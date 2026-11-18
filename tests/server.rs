@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::IntoResponse;
-use claude_codex::{
+use duolane::{
     MessagesRequest,
     anthropic::MAX_ANTHROPIC_REQUEST_BYTES,
     config::AliasProvider,
@@ -1320,7 +1320,7 @@ async fn openai_routes_reject_the_anthropic_provider_before_recording_a_session(
             value["error"]["message"],
             "provider 'anthropic' does not support OpenAI-compatible generation"
         );
-        assert!(claude_codex::session::existing_session_now(Some(session)).is_none());
+        assert!(duolane::session::existing_session_now(Some(session)).is_none());
         let snapshot = monitor.snapshot();
         assert_eq!(snapshot.recent[0].session_seq, None);
         assert_eq!(snapshot.recent[0].provider, None);

@@ -112,19 +112,19 @@ async fn real_process_empty_tool_completion_preserves_negative_cases() {
             .local_addr()
             .unwrap()
             .port();
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_claude-codex"));
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_duolane"));
         command
             .env_clear()
             .env("HOME", dir.path())
             .env("XDG_CONFIG_HOME", dir.path().join("xdg-config"))
             .args(["serve", "--port", &port.to_string(), "--no-monitor"])
-            .env("CCP_CONFIG_DIR", dir.path())
+            .env("DUOLANE_CONFIG_DIR", dir.path())
             .env("XDG_STATE_HOME", dir.path().join("state"))
-            .env("CCP_CODEX_TRANSPORT", transport)
-            .env("CCP_CODEX_BASE_URL", format!("http://{upstream}"))
-            .env("CCP_CODEX_PREVIOUS_RESPONSE_ID", "0")
-            .env("CCP_CODEX_SERVER_COMPACTION", "0")
-            .env("CCP_ALIAS_PROVIDER", "codex")
+            .env("DUOLANE_CODEX_TRANSPORT", transport)
+            .env("DUOLANE_CODEX_BASE_URL", format!("http://{upstream}"))
+            .env("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "0")
+            .env("DUOLANE_CODEX_SERVER_COMPACTION", "0")
+            .env("DUOLANE_ALIAS_PROVIDER", "codex")
             .env("NO_PROXY", "127.0.0.1,localhost")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());

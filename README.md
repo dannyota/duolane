@@ -1,60 +1,39 @@
-# claude-code-with-codex
+# duolane
 
-[![crates.io](https://img.shields.io/crates/v/claude-codex.svg)](https://crates.io/crates/claude-codex)
-[![CI](https://github.com/fcakyon/claude-code-with-codex/actions/workflows/ci.yml/badge.svg)](https://github.com/fcakyon/claude-code-with-codex/actions/workflows/ci.yml)
+[![CI](https://github.com/dannyota/duolane/actions/workflows/ci.yml/badge.svg)](https://github.com/dannyota/duolane/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/dannyota/duolane)](LICENSE)
 
-Use Claude Code with your **Claude subscription and your ChatGPT (Codex)
-subscription at the same time**, and switch between them mid-conversation.
+A local proxy that lets Claude Code use your Claude subscription and your
+ChatGPT subscription in the same session. It picks the backend for each request
+from the model name, so you can keep one model on each plan and switch between
+them mid-conversation.
 
-<img src="https://github.com/fcakyon/claude-code-with-codex/releases/download/v0.3.0/claude-codex-demo.gif" alt="Claude Code running through the proxy" />
+This is a personal, unofficial project, not affiliated with or endorsed by
+Anthropic or OpenAI. It has no release yet, and security and reasoning work is
+in progress, so run it only on a machine you trust. Expect breaking changes
+until `1.0.0`.
 
-It runs as a tiny local proxy. Claude Code already speaks the Anthropic API, so
-the proxy sits in front of it and sends each request to the right place based on
-the model name:
+## Requirements
 
-- Ask for a **Claude** model and it uses your **Claude subscription** (the login
-  Claude Code already has). Nothing is translated and no API key is needed.
-- Ask for a **`gpt-*`** model such as `gpt-6-astra` and it uses your **ChatGPT
-  subscription** through the Codex login.
+- Claude Code, signed in with a Claude Pro or Max plan
+- The Codex CLI, signed in with a ChatGPT Plus, Pro, or Team plan
+- A stable Rust toolchain
 
-So you can keep Opus on your Claude plan for hard work and run the fast slot on
-your ChatGPT plan, in the same session, and flip between them whenever you want.
+## Install
 
-[Quickstart](#quickstart) · [Switching models](#switching-models) ·
-[How it works](#how-it-works) · [Configuration](#configuration) ·
-[Limitations](#limitations)
-
-## What you need
-
-- **Claude Code** installed and signed in with a **Claude Pro or Max** plan.
-- A **ChatGPT Plus, Pro, or Team** plan and the **Codex CLI** signed in.
-- **Rust** only if you install from crates.io or source. The prebuilt binary needs nothing.
-
-## Quickstart
-
-**1. Install `claude-codex`** using a prebuilt binary:
-
-Prebuilt binary, no Rust needed (macOS and Linux):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/fcakyon/claude-code-with-codex/main/scripts/install.sh | bash
+```bash
+cargo install --git https://github.com/dannyota/duolane --locked
 ```
 
-Or install from crates.io if you have Rust:
+## Quick start
 
-```sh
-cargo install claude-codex --locked
+Check your Codex login. Run `codex login` first if no account is found.
+
+```bash
+duolane codex auth status
 ```
 
-**2. Check your Codex CLI login:**
-
-```sh
-claude-codex codex auth status
-```
-
-Run `codex login` first if no valid account is found.
-
-**3. Point Claude Code at the router** in `~/.claude/settings.json`:
+Point Claude Code at the proxy in `~/.claude/settings.json`:
 
 ```json
 {
@@ -64,111 +43,88 @@ Run `codex login` first if no valid account is found.
 }
 ```
 
-**4. Start the router** and leave it running:
+Start the proxy and leave it running:
 
-```sh
-claude-codex serve
+```bash
+duolane serve
 ```
 
-**5. Restart Claude Code.**
-
-Claude Code now discovers the models exposed by the router. Switch directly:
+Restart Claude Code, then choose a model:
 
 ```text
-/model gpt-6-astra[1m]
 /model claude-opus-5-5
+/model gpt-6-astra[1m]
 ```
 
-The `[1m]` suffix enables Claude Code's larger-context mode. The router removes
-the suffix before sending the model name to Codex.
+The `[1m]` suffix turns on Claude Code's larger context mode. duolane removes it
+before calling the backend.
 
-## Switching models
+## Commands
 
-- **Inside Claude Code.** Run `/model gpt-6-astra[1m]` for Codex or
-  `/model claude-opus-5-5` for Claude.
-- **For one new session.** Set `ANTHROPIC_MODEL` when launching Claude Code.
-- **List what is available.** `claude-codex models`.
-- **New Codex models.** Any model the Codex CLI lists in
-  `~/.codex/models_cache.json` is accepted too, so run `codex` once after your
-  plan gains a model and it shows up without an update. When a Claude alias is
-  sent to Codex, it picks the first of its preferred models that your catalog
-  lists.
-
-Reasoning is carried across a switch. When you move a conversation from one plan
-to the other, the earlier turn's thinking is kept and shown to the next model as
-plain tagged text, so context is not lost.
+| Command                     | Purpose                                    |
+| --------------------------- | ------------------------------------------ |
+| `duolane serve`             | Start the proxy and its terminal dashboard |
+| `duolane monitor`           | Attach a dashboard to a running proxy      |
+| `duolane models`            | List the models you can use                |
+| `duolane codex auth status` | Check the Codex login                      |
 
 ## How it works
 
-Claude Code sends normal Anthropic API requests to the proxy. The proxy reads
-the model name and routes:
+- **Claude models** go to `api.anthropic.com` unchanged, using the login Claude
+  Code already sends. duolane stores no Claude credential.
+- **Codex models** are translated to the OpenAI Responses API and use the login
+  in `~/.codex/auth.json`. duolane writes refreshed tokens back so the Codex CLI
+  keeps working.
+- **Other model names** get an HTTP 400 that lists the models you can use.
 
-- **Claude models** are relayed straight to `api.anthropic.com`, untouched,
-  reusing the subscription token Claude Code already sends. The request body is
-  forwarded as-is so Anthropic's prompt caching keeps working. The proxy stores
-  no Claude credentials.
-- **Codex models** are translated to the OpenAI Responses API and sent with the
-  ChatGPT login from the Codex CLI's `~/.codex/auth.json`. The proxy refreshes
-  that token when needed and writes it back so the Codex CLI keeps working.
-
-An unknown model name returns a clear 400 that lists the ids you can use and
-names any backend that still needs a login.
+The [architecture](docs/design/architecture.md) and
+[security design](docs/design/security.md) describe the intended behavior.
 
 ## Configuration
 
-Only `ANTHROPIC_BASE_URL` is required in Claude Code's user settings. Restart
-Claude Code after changing it so `/model` discovers the router's model list.
+Do not set `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`. Either one replaces
+your Claude login, and the Claude route then fails.
 
-| Variable                                   | What it does                                                     |
-| ------------------------------------------ | ---------------------------------------------------------------- |
-| `ANTHROPIC_BASE_URL`                       | Point Claude Code at the proxy, e.g. `http://localhost:18765`.   |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL`             | Optionally remap the Opus alias.                                 |
-| `ANTHROPIC_DEFAULT_SONNET_MODEL`           | Optionally remap the Sonnet alias.                               |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL`            | Small background model, e.g. `claude-haiku-5-5` on Claude.       |
-| `ANTHROPIC_MODEL`                          | Optionally force one model for the whole session.                |
-| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Set to `1` to skip Claude Code's non-essential background calls. |
-| `ENABLE_TOOL_SEARCH`                       | Set to `true` to load MCP tool schemas only when a tool is used. |
+| Setting                          | Purpose                                   |
+| -------------------------------- | ----------------------------------------- |
+| `PORT`                           | Listening port, `18765` by default        |
+| `DUOLANE_BIND_ADDRESS`           | Listening address, `127.0.0.1` by default |
+| `DUOLANE_AUTH_TOKEN`             | Token required on the proxy's routes      |
+| `DUOLANE_ALIAS_PROVIDER`         | Backend for the Claude aliases            |
+| `DUOLANE_AUTO_REVIEW_MODEL`      | Model for Claude Code's auto-review       |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL`   | Claude Code's model for the Opus alias    |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | Claude Code's model for the Sonnet alias  |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL`  | Claude Code's small background model      |
+| `ENABLE_TOOL_SEARCH`             | Set to `true` to keep MCP tool search on  |
 
-Do not set `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`. Either one overrides
-the Claude subscription login and the Claude route returns 401.
+File settings live in `~/.config/duolane/config.json`.
 
-The proxy listens on `127.0.0.1:18765` by default. Change it with
-`PORT=11435 claude-codex serve`, and match `ANTHROPIC_BASE_URL`.
+### Reaching the proxy from another machine
 
-Claude Code turns tool search off behind a proxy, so every MCP tool schema rides
-along with every request. `ENABLE_TOOL_SEARCH=true` keeps it on. Codex gets each
-tool right where `ToolSearch` loaded it, so earlier input stays in the prompt
-cache.
-
-To reach the proxy from another machine, set `CCP_BIND_ADDRESS=0.0.0.0` and a
-token with `CCP_AUTH_TOKEN` (or `"authToken"` in
-`~/.config/claude-code-proxy/config.json`). Claude Code sends the token in its
-own header, so the Claude login keeps working:
+The proxy speaks plain HTTP, including your token and Claude login. Bind beyond
+loopback only over an encrypted path, such as an SSH tunnel or WireGuard, and
+always set `DUOLANE_AUTH_TOKEN`. Claude Code sends the token in its own header:
 
 ```json
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://proxy-host:18765",
-    "ANTHROPIC_CUSTOM_HEADERS": "x-claude-codex-key: <token>"
+    "ANTHROPIC_CUSTOM_HEADERS": "x-duolane-key: <token>"
   }
 }
 ```
 
-OpenAI-compatible clients can send it as `Authorization: Bearer <token>`.
-
-Alias remapping is optional. For example,
-`ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.6-terra` makes `/model sonnet` use Codex.
-
 ## Limitations
 
-- Switching plans in the middle of an active tool call (for example pressing Esc
-  during a tool use, then switching and continuing) can fail, because the next
-  model cannot verify reasoning that came from the other plan. Starting the next
-  step fresh avoids it.
+Switching backends while a tool call is pending can fail. Start the next step
+fresh if it does.
 
 ## Credits
 
-Built on [`raine/claude-code-proxy`](https://github.com/raine/claude-code-proxy),
-which provides the Codex backend. This fork adds using
-your Claude subscription as a backend alongside Codex, reasoning that survives a
-mid-conversation switch, and reading the Codex login from the Codex CLI.
+duolane is built on
+[`raine/claude-code-proxy`](https://github.com/raine/claude-code-proxy) and
+[`fcakyon/claude-code-with-codex`](https://github.com/fcakyon/claude-code-with-codex).
+
+## License
+
+[MIT](LICENSE)

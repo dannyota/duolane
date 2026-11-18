@@ -1,16 +1,16 @@
 pub fn rerun_without_credentials(test_name: &str) -> bool {
-    if std::env::var("CCP_TEST_ISOLATED_CODEX").as_deref() != Ok(test_name) {
+    if std::env::var("DUOLANE_TEST_ISOLATED_CODEX").as_deref() != Ok(test_name) {
         let isolated = tempfile::TempDir::new().unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", test_name, "--nocapture"])
             .env_clear()
-            .env("CCP_TEST_ISOLATED_CODEX", test_name)
-            .env("CCP_CONFIG_DIR", isolated.path())
+            .env("DUOLANE_TEST_ISOLATED_CODEX", test_name)
+            .env("DUOLANE_CONFIG_DIR", isolated.path())
             .env("HOME", isolated.path())
             .env("USERPROFILE", isolated.path())
             .env("XDG_CONFIG_HOME", isolated.path())
             .env("XDG_STATE_HOME", isolated.path())
-            .env("CCP_CODEX_BASE_URL", "http://127.0.0.1:1/responses")
+            .env("DUOLANE_CODEX_BASE_URL", "http://127.0.0.1:1/responses")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()

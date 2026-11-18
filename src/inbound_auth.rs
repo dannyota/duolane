@@ -16,7 +16,7 @@ use axum::{
 
 use crate::{anthropic::json_error, auth::constant_time_eq};
 
-pub const PROXY_KEY_HEADER: &str = "x-claude-codex-key";
+pub const PROXY_KEY_HEADER: &str = "x-duolane-key";
 
 pub async fn require_token(
     State(token): State<Arc<str>>,
@@ -122,6 +122,21 @@ mod tests {
             )
             .await,
             (StatusCode::OK, String::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn token_is_accepted_only_through_the_duolane_header() {
+        assert_eq!(
+            call("/v1/models", &[("x-duolane-key", "s3cret")]).await.0,
+            StatusCode::OK
+        );
+        let old_header = ["x-claude", "codex-key"].join("-");
+        assert_eq!(
+            call("/v1/models", &[(old_header.as_str(), "s3cret")])
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
         );
     }
 }

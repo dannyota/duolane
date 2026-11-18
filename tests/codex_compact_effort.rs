@@ -11,8 +11,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use claude_codex::MessagesRequest;
-use claude_codex::providers::codex::translate::request::{TranslateOptions, translate_request};
+use duolane::MessagesRequest;
+use duolane::providers::codex::translate::request::{TranslateOptions, translate_request};
 use serde_json::{Value, json};
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -63,11 +63,11 @@ impl Drop for EnvGuard {
 /// real user config cannot leak into the test.
 fn isolated_environment(config_dir: &Path) -> Vec<EnvGuard> {
     let mut guards = vec![
-        EnvGuard::unset("CCP_CODEX_EFFORT"),
-        EnvGuard::unset("CCP_CODEX_REASONING_SUMMARY"),
-        EnvGuard::unset("CCP_COMPACT_EFFORT"),
+        EnvGuard::unset("DUOLANE_CODEX_EFFORT"),
+        EnvGuard::unset("DUOLANE_CODEX_REASONING_SUMMARY"),
+        EnvGuard::unset("DUOLANE_COMPACT_EFFORT"),
     ];
-    guards.push(EnvGuard::set("CCP_CONFIG_DIR", config_dir));
+    guards.push(EnvGuard::set("DUOLANE_CONFIG_DIR", config_dir));
     guards
 }
 
@@ -111,7 +111,7 @@ fn compact_cap_none_overrides_default_without_reasoning_artifacts() {
     let _guard = env_lock();
     let config = tempfile::TempDir::new().unwrap();
     let mut env = isolated_environment(config.path());
-    env.push(EnvGuard::set("CCP_COMPACT_EFFORT", "none"));
+    env.push(EnvGuard::set("DUOLANE_COMPACT_EFFORT", "none"));
 
     let wire = translate_compact();
 
@@ -126,7 +126,7 @@ fn compact_cap_off_leaves_omitted_effort_unset() {
     let _guard = env_lock();
     let config = tempfile::TempDir::new().unwrap();
     let mut env = isolated_environment(config.path());
-    env.push(EnvGuard::set("CCP_COMPACT_EFFORT", "off"));
+    env.push(EnvGuard::set("DUOLANE_COMPACT_EFFORT", "off"));
 
     let wire = translate_compact();
 
@@ -142,7 +142,7 @@ fn global_high_is_lowered_by_default_compact_cap() {
     let _guard = env_lock();
     let config = tempfile::TempDir::new().unwrap();
     let mut env = isolated_environment(config.path());
-    env.push(EnvGuard::set("CCP_CODEX_EFFORT", "high"));
+    env.push(EnvGuard::set("DUOLANE_CODEX_EFFORT", "high"));
 
     let wire = translate_compact();
 
@@ -158,7 +158,7 @@ fn global_none_survives_compact_cap_without_reasoning_artifacts() {
     let _guard = env_lock();
     let config = tempfile::TempDir::new().unwrap();
     let mut env = isolated_environment(config.path());
-    env.push(EnvGuard::set("CCP_CODEX_EFFORT", "none"));
+    env.push(EnvGuard::set("DUOLANE_CODEX_EFFORT", "none"));
 
     let wire = translate_compact();
 
@@ -172,8 +172,8 @@ fn global_low_is_preserved_under_higher_compact_cap() {
     let _guard = env_lock();
     let config = tempfile::TempDir::new().unwrap();
     let mut env = isolated_environment(config.path());
-    env.push(EnvGuard::set("CCP_CODEX_EFFORT", "low"));
-    env.push(EnvGuard::set("CCP_COMPACT_EFFORT", "medium"));
+    env.push(EnvGuard::set("DUOLANE_CODEX_EFFORT", "low"));
+    env.push(EnvGuard::set("DUOLANE_COMPACT_EFFORT", "medium"));
 
     let wire = translate_compact();
 

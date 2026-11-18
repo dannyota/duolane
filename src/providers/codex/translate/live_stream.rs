@@ -1451,7 +1451,7 @@ mod tests {
                     "item": {
                         "type": "web_search_call",
                         "id": "ws_1",
-                        "action": {"query": "claude-code-proxy"}
+                        "action": {"query": "duolane"}
                     }
                 }),
                 None,
@@ -1542,7 +1542,7 @@ mod tests {
             json!({
                 "type": "response.function_call_arguments.done",
                 "output_index": 0,
-                "arguments": "{\"query\":\"claude-code-proxy github\"}"
+                "arguments": "{\"query\":\"duolane github\"}"
             }),
             json!({
                 "type": "response.output_item.done",
@@ -1551,7 +1551,7 @@ mod tests {
                     "type":"function_call",
                     "call_id":"call_1",
                     "name":"WebSearch",
-                    "arguments":"{\"query\":\"claude-code-proxy github\"}"
+                    "arguments":"{\"query\":\"duolane github\"}"
                 }
             }),
         ] {

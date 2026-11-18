@@ -14,10 +14,10 @@ use tempfile::TempDir;
 
 #[test]
 fn version_aliases_print_expected_version() -> Result<(), Box<dyn std::error::Error>> {
-    let expected = format!("claude-codex {}", env!("CARGO_PKG_VERSION"));
+    let expected = format!("duolane {}", env!("CARGO_PKG_VERSION"));
 
     for arg in ["--version", "-v", "version"] {
-        let mut cmd = Command::cargo_bin("claude-codex")?;
+        let mut cmd = Command::cargo_bin("duolane")?;
         cmd.arg(arg)
             .assert()
             .success()
@@ -28,7 +28,7 @@ fn version_aliases_print_expected_version() -> Result<(), Box<dyn std::error::Er
 
 #[test]
 fn models_prints_codex_provider() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::cargo_bin("claude-codex")?;
+    let mut cmd = Command::cargo_bin("duolane")?;
     cmd.arg("models");
     let out = String::from_utf8(cmd.output()?.stdout)?;
     assert!(out.contains("codex:"));
@@ -37,7 +37,7 @@ fn models_prints_codex_provider() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::cargo_bin("claude-codex")?;
+    let mut cmd = Command::cargo_bin("duolane")?;
     cmd.arg("--help");
     let output = cmd.output()?;
     assert!(output.status.success());
@@ -58,11 +58,11 @@ fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::e
 
 #[test]
 fn removed_backend_commands_are_not_offered() -> Result<(), Box<dyn std::error::Error>> {
-    let help = Command::cargo_bin("claude-codex")?.arg("--help").output()?;
+    let help = Command::cargo_bin("duolane")?.arg("--help").output()?;
     let help = String::from_utf8(help.stdout)?.to_lowercase();
     for command in ["kimi", "grok", "cursor"] {
         assert!(!help.contains(command), "help offers {command}");
-        Command::cargo_bin("claude-codex")?
+        Command::cargo_bin("duolane")?
             .args([command, "auth", "status"])
             .assert()
             .failure()
@@ -73,7 +73,7 @@ fn removed_backend_commands_are_not_offered() -> Result<(), Box<dyn std::error::
 
 #[test]
 fn invalid_command_exits_two() -> Result<(), Box<dyn std::error::Error>> {
-    Command::cargo_bin("claude-codex")?
+    Command::cargo_bin("duolane")?
         .arg("definitely-not-a-command")
         .assert()
         .failure()
@@ -83,7 +83,7 @@ fn invalid_command_exits_two() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn unsupported_provider_auth_command_exits_two() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::cargo_bin("claude-codex")?;
+    let mut cmd = Command::cargo_bin("duolane")?;
     cmd.args(["codex", "auth", "device"]);
     let output = cmd.output()?;
     assert_eq!(output.status.code(), Some(2));
@@ -95,9 +95,9 @@ fn unsupported_provider_auth_command_exits_two() -> Result<(), Box<dyn std::erro
 #[test]
 fn provider_logout_without_auth_is_success() -> Result<(), Box<dyn std::error::Error>> {
     let temp = TempDir::new()?;
-    let mut cmd = Command::cargo_bin("claude-codex")?;
+    let mut cmd = Command::cargo_bin("duolane")?;
     cmd.args(["codex", "auth", "logout"]);
-    cmd.env("CCP_CONFIG_DIR", temp.path());
+    cmd.env("DUOLANE_CONFIG_DIR", temp.path());
     cmd.env("HOME", temp.path());
     cmd.env("USERPROFILE", temp.path());
     cmd.assert().success();
@@ -183,11 +183,11 @@ fn plain_service_exits_on_second_signal(signal: &str) -> Result<(), Box<dyn std:
 
     let config = TempDir::new()?;
     let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
-    let child = std::process::Command::new(env!("CARGO_BIN_EXE_claude-codex"))
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_duolane"))
         .args(["serve", "--no-monitor", "--port", &port.to_string()])
-        .env("CCP_CONFIG_DIR", config.path())
-        .env("CCP_ALIAS_PROVIDER", "anthropic")
-        .env("CCP_ANTHROPIC_BASE_URL", upstream_url)
+        .env("DUOLANE_CONFIG_DIR", config.path())
+        .env("DUOLANE_ALIAS_PROVIDER", "anthropic")
+        .env("DUOLANE_ANTHROPIC_BASE_URL", upstream_url)
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
         .stdin(Stdio::null())

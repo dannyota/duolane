@@ -367,7 +367,7 @@ pub(crate) fn is_compact_messages_request(request: &MessagesRequest) -> bool {
 /// run at the upstream default, which is the effort level the cap exists to
 /// avoid.
 fn compact_effort_cap() -> Option<Effort> {
-    compact_effort_cap_from(std::env::var("CCP_COMPACT_EFFORT").ok().as_deref())
+    compact_effort_cap_from(std::env::var("DUOLANE_COMPACT_EFFORT").ok().as_deref())
 }
 
 /// Applies the cap to a request's resolved effort. A missing effort takes

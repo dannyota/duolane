@@ -93,7 +93,7 @@ fn default_user_agent(use_responses_lite: bool) -> String {
     if use_responses_lite {
         RESPONSES_LITE_ORIGINATOR.to_string()
     } else {
-        format!("claude-code-proxy/{}", env!("CARGO_PKG_VERSION"))
+        format!("duolane/{}", env!("CARGO_PKG_VERSION"))
     }
 }
 
@@ -1335,7 +1335,7 @@ impl CodexHttpClient {
             if tx
                 .send(Ok(serde_json::json!({
                     "type": "keepalive",
-                    "_ccp_synthetic": true
+                    "_duolane_synthetic": true
                 })))
                 .await
                 .is_err()
@@ -2957,7 +2957,7 @@ fn is_retryable_transport_error(err: &CodexError) -> bool {
     // failure. The request reached Codex, which is holding the head while the
     // model reasons, so re-sending it starts that reasoning again from scratch
     // and the new attempt runs out of time exactly like the last one. Wait
-    // longer with CCP_CODEX_HEADER_TIMEOUT_MS instead.
+    // longer with DUOLANE_CODEX_HEADER_TIMEOUT_MS instead.
     if err.detail.as_deref() == Some(HTTP_RESPONSE_HEADERS_DETAIL) {
         return false;
     }
@@ -5312,6 +5312,15 @@ mod tests {
         );
         assert_eq!(headers.get("originator").unwrap(), "codex_cli_rs");
         assert_eq!(default_user_agent(true), "codex_cli_rs");
+    }
+
+    #[test]
+    fn default_codex_identity_uses_the_product_name() {
+        assert_eq!(ORIGINATOR, "duolane");
+        assert_eq!(
+            default_user_agent(false),
+            format!("duolane/{}", env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]

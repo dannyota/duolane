@@ -21,7 +21,7 @@ impl Default for DirResolverEnv {
 }
 
 pub fn resolve_config_dir(deps: &DirResolverEnv) -> PathBuf {
-    if let Some(override_dir) = deps.env.get("CCP_CONFIG_DIR") {
+    if let Some(override_dir) = deps.env.get("DUOLANE_CONFIG_DIR") {
         return Path::new(override_dir).to_path_buf();
     }
 
@@ -31,11 +31,11 @@ pub fn resolve_config_dir(deps: &DirResolverEnv) -> PathBuf {
             .get("APPDATA")
             .cloned()
             .unwrap_or_else(|| format!("{}\\AppData\\Roaming", deps.home));
-        return join_with_sep(&appdata, &["claude-code-proxy"], true);
+        return join_with_sep(&appdata, &["duolane"], true);
     }
 
     if deps.platform == "darwin" {
-        return join_with_sep(&deps.home, &[".config", "claude-code-proxy"], false);
+        return join_with_sep(&deps.home, &[".config", "duolane"], false);
     }
 
     let base = deps.env.get("XDG_CONFIG_HOME").cloned().unwrap_or_else(|| {
@@ -43,7 +43,7 @@ pub fn resolve_config_dir(deps: &DirResolverEnv) -> PathBuf {
             .to_string_lossy()
             .into_owned()
     });
-    join_with_sep(&base, &["claude-code-proxy"], false)
+    join_with_sep(&base, &["duolane"], false)
 }
 
 pub fn resolve_state_dir(deps: &DirResolverEnv) -> PathBuf {
@@ -53,7 +53,7 @@ pub fn resolve_state_dir(deps: &DirResolverEnv) -> PathBuf {
             .get("LOCALAPPDATA")
             .cloned()
             .unwrap_or_else(|| format!("{}\\AppData\\Local", deps.home));
-        return join_with_sep(&local, &["claude-code-proxy"], true);
+        return join_with_sep(&local, &["duolane"], true);
     }
 
     let base = deps.env.get("XDG_STATE_HOME").cloned().unwrap_or_else(|| {
@@ -61,7 +61,7 @@ pub fn resolve_state_dir(deps: &DirResolverEnv) -> PathBuf {
             .to_string_lossy()
             .into_owned()
     });
-    join_with_sep(&base, &["claude-code-proxy"], false)
+    join_with_sep(&base, &["duolane"], false)
 }
 
 pub fn config_dir() -> PathBuf {
@@ -72,12 +72,8 @@ pub fn state_dir() -> PathBuf {
     resolve_state_dir(&DirResolverEnv::default())
 }
 
-pub fn codex_auth_file(deps: &DirResolverEnv) -> PathBuf {
-    resolve_config_dir(deps).join("codex").join("auth.json")
-}
-
 pub fn log_file() -> PathBuf {
-    resolve_state_dir(&DirResolverEnv::default()).join("proxy.log")
+    resolve_state_dir(&DirResolverEnv::default()).join("duolane.log")
 }
 
 fn join_with_sep(base: &str, parts: &[&str], win32: bool) -> PathBuf {

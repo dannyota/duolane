@@ -35,7 +35,7 @@ pub fn traffic_capture_enabled() -> bool {
 }
 
 pub fn traffic_capture_enabled_for_env(env: &std::collections::HashMap<String, String>) -> bool {
-    match env.get("CCP_TRAFFIC_LOG").map(String::as_str) {
+    match env.get("DUOLANE_TRAFFIC_LOG").map(String::as_str) {
         Some(v) => matches!(v, "1" | "true" | "yes"),
         None => false,
     }

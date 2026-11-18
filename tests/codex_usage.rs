@@ -1,4 +1,4 @@
-use claude_codex::providers::codex::translate::{
+use duolane::providers::codex::translate::{
     accumulate::accumulate_response, live_stream::LiveStreamTranslator,
     stream::translate_stream_bytes,
 };

@@ -16,18 +16,18 @@ impl Drop for Proxy {
 }
 
 fn command(dir: &TempDir) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_claude-codex"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_duolane"));
     // Avoid inherited credentials, routing overrides, proxy settings and logs.
     cmd.env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("USERPROFILE", dir.path())
         .env("HOME", dir.path())
         .env("CODEX_HOME", dir.path())
-        .env("CCP_CONFIG_DIR", dir.path())
+        .env("DUOLANE_CONFIG_DIR", dir.path())
         .env("XDG_STATE_HOME", dir.path())
-        .env("CCP_CODEX_TRANSPORT", "http")
-        .env("CCP_CODEX_RESPONSES_API", "1")
-        .env("CCP_ALIAS_PROVIDER", "codex")
+        .env("DUOLANE_CODEX_TRANSPORT", "http")
+        .env("DUOLANE_CODEX_RESPONSES_API", "1")
+        .env("DUOLANE_ALIAS_PROVIDER", "codex")
         .env("NO_PROXY", "*")
         .env("no_proxy", "*");
     cmd
@@ -109,7 +109,7 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         command(&dir)
             .args(["serve", "--no-monitor", "--port", &port.to_string()])
             .env(
-                "CCP_CODEX_BASE_URL",
+                "DUOLANE_CODEX_BASE_URL",
                 format!("http://{upstream_addr}/responses"),
             )
             .stdin(Stdio::null())
