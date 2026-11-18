@@ -423,9 +423,7 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, anyhow::Error>
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
-    Ok(terminal)
+    Ok(Terminal::new(backend)?)
 }
 
 fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorSnapshot) {

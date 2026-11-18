@@ -13,8 +13,7 @@
   directory, and header names.
 - The OpenAI-compatible endpoints return HTTP 400 for non-Codex models.
 - On Windows, config and logs move to `%APPDATA%` and `%LOCALAPPDATA%`.
-- Dependencies are refreshed to close known vulnerabilities. Three advisories
-  for crates used through `ratatui` remain until its upgrade.
+- Dependencies are refreshed to close known vulnerabilities.
 
 ### Removed
 
