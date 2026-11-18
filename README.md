@@ -9,9 +9,9 @@ from the model name, so you can keep one model on each plan and switch between
 them mid-conversation.
 
 This is a personal, unofficial project, not affiliated with or endorsed by
-Anthropic or OpenAI. It has no release yet, and security and reasoning work is
-in progress, so run it only on a machine you trust. Expect breaking changes
-until `1.0.0`.
+Anthropic or OpenAI. It has no release yet and has not been checked against live
+accounts, so run it only on a machine you trust. Expect breaking changes until
+`1.0.0`.
 
 ## Requirements
 
