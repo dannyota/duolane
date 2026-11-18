@@ -23,19 +23,21 @@ includes `127.0.0.0/8`, `::1`, and `::ffff:127.0.0.1`.
 
 1. The default bind address is `127.0.0.1`.
 2. Any configured inbound token has at least 32 characters. A configuration file
-   that exists but cannot be read stops startup, so a typo cannot silently drop
-   the token. duolane refuses to start on a non-loopback address without a
-   token. Inbound traffic is plain HTTP, including the token and the Claude
-   login, so such a bind is supported only on an encrypted path such as an SSH
-   tunnel, WireGuard, or a TLS-terminating proxy. duolane prints this warning at
-   startup.
+   that exists but is not valid JSON of the expected shape stops startup, so a
+   syntax or type error cannot silently drop the token. duolane refuses to start
+   on a non-loopback address without a token. Inbound traffic is plain HTTP,
+   including the token and the Claude login, so such a bind is supported only on
+   an encrypted path such as an SSH tunnel, WireGuard, or a TLS-terminating
+   proxy. duolane prints this warning at startup.
 3. On a loopback bind, the `Host` header must be present once and its host must
    exactly match `localhost`, `127.0.0.1`, `[::1]`, or the literal bind address,
    ignoring case. Any port is allowed. Prefix and suffix matches are forbidden.
 4. Additional exact hosts can be configured for a local tunnel or reverse proxy,
    through `DUOLANE_ALLOWED_HOSTS` or `allowedHosts`. Each entry is a bare host
    name or a bracketed IPv6 address, with no port, scheme, path, or trailing
-   dot. Configuring one requires an inbound token.
+   dot. Configuring one requires an inbound token. A reverse proxy that rewrites
+   `Host` to a loopback name looks local to these rules, so it must sit behind
+   the token too.
 5. Any request with an `Origin` header is rejected. duolane sends no CORS
    headers and answers no preflight.
 6. `POST` routes that take JSON require the media type `application/json`, and
@@ -48,9 +50,10 @@ includes `127.0.0.0/8`, `::1`, and `::ffff:127.0.0.1`.
    Claude login. A bearer token is also accepted for OpenAI-compatible clients;
    when the token arrives in `x-duolane-key`, a bearer value is the Claude login
    and is forwarded. `duolane monitor` sends the configured token.
-8. `/monitor` also accepts only loopback peers and loopback `Host` names, never
-   a configured extra host. Remote monitoring is unsupported. `duolane monitor`
-   sends the token only to a loopback or HTTPS URL.
+8. `/monitor` also accepts only loopback peers, and only the loopback `Host`
+   names or the literal bind address, never a configured extra host. Remote
+   monitoring is unsupported. `duolane monitor` sends the token only to a
+   loopback or HTTPS URL.
 9. Token comparison reveals neither the token length nor the position of a
    mismatch. The inbound token is removed before a request goes upstream.
 10. These checks run before the body is read, on every route except `/healthz`.
