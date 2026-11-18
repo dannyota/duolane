@@ -61,7 +61,7 @@ async fn serve(app: Router) -> Server {
 }
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder()
+    duolane::tls::client_builder()
         .no_proxy()
         .timeout(Duration::from_secs(2))
         .build()

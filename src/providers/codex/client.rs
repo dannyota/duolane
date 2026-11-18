@@ -581,7 +581,7 @@ impl ProxyEnvironment {
 fn codex_http_client(proxy_environment: &ProxyEnvironment) -> reqwest::Client {
     proxy_environment
         .apply(
-            reqwest::Client::builder()
+            crate::tls::client_builder()
                 .connect_timeout(Duration::from_secs(15))
                 .redirect(reqwest::redirect::Policy::none()),
         )
@@ -627,7 +627,7 @@ fn websocket_http_client(proxy_environment: &ProxyEnvironment) -> reqwest::Clien
     let tls_config = super::websocket::websocket_tls_config();
     proxy_environment
         .apply(
-            reqwest::Client::builder()
+            crate::tls::client_builder()
                 .http1_only()
                 .connect_timeout(Duration::from_secs(15))
                 .redirect(reqwest::redirect::Policy::none())
@@ -649,7 +649,7 @@ fn custom_client_auto_http_fallback_enabled(
 
 #[cfg(test)]
 fn test_native_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::tls::client_builder()
         .connect_timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
@@ -659,7 +659,7 @@ fn test_native_http_client() -> reqwest::Client {
 
 #[cfg(test)]
 fn test_websocket_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::tls::client_builder()
         .http1_only()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
@@ -3126,7 +3126,7 @@ mod tests {
 
     fn http_test_client(base_url: String, body_idle_timeout_ms: u64) -> CodexHttpClient {
         CodexHttpClient::new_for_test(
-            reqwest::Client::builder().no_proxy().build().unwrap(),
+            crate::tls::client_builder().no_proxy().build().unwrap(),
             base_url,
             100,
             body_idle_timeout_ms,
@@ -3198,7 +3198,7 @@ mod tests {
         response_id: &str,
     ) {
         websocket
-            .send(tokio_tungstenite::tungstenite::Message::Text(
+            .send(tokio_tungstenite::tungstenite::Message::text(
                 serde_json::json!({
                     "type": "response.completed",
                     "response": {
@@ -3217,7 +3217,7 @@ mod tests {
         websocket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     ) {
         websocket
-            .send(tokio_tungstenite::tungstenite::Message::Text(
+            .send(tokio_tungstenite::tungstenite::Message::text(
                 serde_json::json!({
                     "type": "response.failed",
                     "response": {

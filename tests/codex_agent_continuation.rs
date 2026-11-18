@@ -548,7 +548,7 @@ async fn handle_socket(
                 probes
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push((socket_ordinal, requests_seen, payload.clone()));
+                    .push((socket_ordinal, requests_seen, payload.to_vec()));
                 if websocket.send(Message::Pong(payload)).await.is_err() {
                     return;
                 }
@@ -621,7 +621,7 @@ async fn handle_socket(
                     } => {
                         for event in events {
                             if websocket
-                                .send(Message::Text(event.to_string()))
+                                .send(Message::text(event.to_string()))
                                 .await
                                 .is_err()
                             {
@@ -668,7 +668,7 @@ async fn emit_completion(
         }),
     ];
     for event in events {
-        websocket.send(Message::Text(event.to_string())).await?;
+        websocket.send(Message::text(event.to_string())).await?;
     }
     Ok(())
 }
@@ -716,7 +716,7 @@ async fn emit_function_call(
         }),
     ];
     for event in events {
-        websocket.send(Message::Text(event.to_string())).await?;
+        websocket.send(Message::text(event.to_string())).await?;
     }
     Ok(())
 }
@@ -804,7 +804,7 @@ impl TestHarness {
         let server_task = tokio::spawn(server::serve_listener(listener, None, async move {
             let _ = shutdown.await;
         }));
-        let client = reqwest::Client::builder()
+        let client = duolane::tls::client_builder()
             .http1_only()
             .no_proxy()
             .build()

@@ -104,6 +104,9 @@ Rejections use the Anthropic error shape and never echo request values:
   allowed only for a loopback host, for tests and local development. The Codex,
   Codex images, and Anthropic base URL settings are checked at startup and may
   not carry user info, a query, or a fragment.
+- TLS uses rustls with the ring provider. HTTP clients verify certificates
+  against the operating system trust store; the WebSocket client uses the system
+  roots plus the bundled Mozilla roots.
 - duolane never decompresses upstream data.
 
 ## Limits

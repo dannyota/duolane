@@ -380,7 +380,7 @@ impl AnthropicProvider {
     }
 
     fn with_timeouts(base_url: String, header_timeout: Duration, idle_timeout: Duration) -> Self {
-        let mut builder = reqwest::Client::builder()
+        let mut builder = crate::tls::client_builder()
             .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none());
         if url::Url::parse(&base_url).is_ok_and(|url| crate::upstream_url::is_loopback_host(&url)) {

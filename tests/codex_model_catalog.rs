@@ -118,7 +118,7 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
             .spawn()
             .unwrap(),
     );
-    let client = reqwest::Client::builder()
+    let client = duolane::tls::client_builder()
         .no_proxy()
         .timeout(Duration::from_secs(5))
         .build()

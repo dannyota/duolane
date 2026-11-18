@@ -78,7 +78,7 @@ async fn websocket_concurrent_requests() {
                     "input": [{"role":"user","content":[{"type":"input_text","text":format!("msg {i}")}]}]
                 });
                 let _ = writer
-                    .send(Message::Text(serde_json::to_string(&req).unwrap()))
+                    .send(Message::text(serde_json::to_string(&req).unwrap()))
                     .await;
             }
         }));
@@ -102,8 +102,8 @@ async fn websocket_request_serializes_response_create() {
         assert!(value.get("model").is_some());
         assert!(value.get("input").is_some());
 
-        ws.send(Message::Text(
-            r#"{"type":"response.completed","response":{"id":"resp_1","usage":{}}}"#.into(),
+        ws.send(Message::text(
+            r#"{"type":"response.completed","response":{"id":"resp_1","usage":{}}}"#,
         ))
         .await
         .unwrap();
@@ -123,7 +123,7 @@ async fn websocket_request_serializes_response_create() {
         "text": {"verbosity": "low"},
     });
     writer
-        .send(Message::Text(serde_json::to_string(&req).unwrap()))
+        .send(Message::text(serde_json::to_string(&req).unwrap()))
         .await
         .unwrap();
 }
@@ -132,18 +132,18 @@ async fn websocket_request_serializes_response_create() {
 async fn websocket_collects_sse_events_until_terminal() {
     let url = websocket_mock(|_headers, mut ws| async move {
         let _msg = ws.next().await.unwrap().unwrap();
-        ws.send(Message::Text(
-            r#"{"type":"response.output_text.delta","delta":"hello"}"#.into(),
+        ws.send(Message::text(
+            r#"{"type":"response.output_text.delta","delta":"hello"}"#,
         ))
         .await
         .unwrap();
-        ws.send(Message::Text(
-            r#"{"type":"response.output_text.delta","delta":" world"}"#.into(),
+        ws.send(Message::text(
+            r#"{"type":"response.output_text.delta","delta":" world"}"#,
         ))
         .await
         .unwrap();
-        ws.send(Message::Text(
-            r#"{"type":"response.completed","response":{"id":"resp_1","usage":{}}}"#.into(),
+        ws.send(Message::text(
+            r#"{"type":"response.completed","response":{"id":"resp_1","usage":{}}}"#,
         ))
         .await
         .unwrap();
@@ -156,7 +156,7 @@ async fn websocket_collects_sse_events_until_terminal() {
 
     let req = serde_json::json!({"type": "response.create", "model": "gpt-5.5", "input": []});
     writer
-        .send(Message::Text(serde_json::to_string(&req).unwrap()))
+        .send(Message::text(serde_json::to_string(&req).unwrap()))
         .await
         .unwrap();
     drop(writer);
@@ -203,7 +203,7 @@ async fn websocket_idle_timeout_no_events() {
 
     let req = serde_json::json!({"type": "response.create", "model": "gpt-5.5", "input": []});
     writer
-        .send(Message::Text(serde_json::to_string(&req).unwrap()))
+        .send(Message::text(serde_json::to_string(&req).unwrap()))
         .await
         .unwrap();
     drop(writer);
@@ -220,8 +220,8 @@ async fn websocket_idle_timeout_no_events() {
 async fn websocket_invalidation_on_error() {
     let url = websocket_mock(|_headers, mut ws| async move {
         let _msg = ws.next().await.unwrap();
-        ws.send(Message::Text(
-            r#"{"type":"response.failed","response":{"id":"resp_e"}}"#.into(),
+        ws.send(Message::text(
+            r#"{"type":"response.failed","response":{"id":"resp_e"}}"#,
         ))
         .await
         .unwrap();
@@ -234,7 +234,7 @@ async fn websocket_invalidation_on_error() {
 
     let req = serde_json::json!({"type": "response.create", "model": "gpt-5.5", "input": []});
     writer
-        .send(Message::Text(serde_json::to_string(&req).unwrap()))
+        .send(Message::text(serde_json::to_string(&req).unwrap()))
         .await
         .unwrap();
     drop(writer);
@@ -287,7 +287,7 @@ async fn websocket_soak_concurrent_requests() {
                     "input": [{"role":"user","content":[{"type":"input_text","text":format!("soak {i}")}]}]
                 });
                 let _ = writer
-                    .send(Message::Text(serde_json::to_string(&req).unwrap()))
+                    .send(Message::text(serde_json::to_string(&req).unwrap()))
                     .await;
                 drop(writer);
                 let _ = tokio::time::timeout(Duration::from_millis(500), reader.next()).await;

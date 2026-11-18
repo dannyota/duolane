@@ -789,7 +789,7 @@ pub(super) async fn codex_websocket_request(
     }
 
     guard
-        .send(Message::Text(body_json))
+        .send(Message::text(body_json))
         .await
         .map_err(|error| {
             if let Some(owner) = &pool_owner {
@@ -886,7 +886,7 @@ where
         .to_be_bytes()
         .to_vec();
     websocket
-        .send(Message::Ping(nonce.clone()))
+        .send(Message::Ping(nonce.clone().into()))
         .await
         .map_err(|error| error.to_string())?;
     tokio::time::timeout(Duration::from_millis(timeout_ms), async {
@@ -1030,7 +1030,7 @@ pub(super) fn start_codex_websocket_events(
             idle_timeout_ms,
         } = ready;
         let pool_owner = reservation_pool_owner(reservation.as_ref());
-        if let Err(error) = guard.send(Message::Text(body_json)).await {
+        if let Err(error) = guard.send(Message::text(body_json)).await {
             drop(guard);
             if let Some(owner) = &pool_owner {
                 pool_remove_entry(owner, &entry);
@@ -1153,11 +1153,9 @@ fn websocket_idle_timeout_error(timeout_ms: u64) -> CodexError {
 }
 
 fn websocket_config() -> WebSocketConfig {
-    WebSocketConfig {
-        max_message_size: Some(MAX_UPSTREAM_FRAME_BYTES),
-        max_frame_size: Some(MAX_UPSTREAM_FRAME_BYTES),
-        ..WebSocketConfig::default()
-    }
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_UPSTREAM_FRAME_BYTES))
+        .max_frame_size(Some(MAX_UPSTREAM_FRAME_BYTES))
 }
 
 fn response_start_timeout_error(timeout_ms: u64) -> CodexError {
@@ -1950,7 +1948,7 @@ where
             frame = ws.next() => return WebSocketRead::Frame(frame),
             _ = &mut timeout => return WebSocketRead::Timeout,
             _ = keepalive.tick() => {
-                let send = ws.send(Message::Ping(Vec::new()));
+                let send = ws.send(Message::Ping(Default::default()));
                 let send_timeout = tokio::time::sleep(WEBSOCKET_KEEPALIVE_SEND_TIMEOUT);
                 tokio::pin!(send_timeout);
                 tokio::select! {
@@ -2080,7 +2078,7 @@ where
                                 "040-upstream-event",
                                 &serde_json::json!({
                                     "unparseable": true,
-                                    "data": text,
+                                    "data": text.as_str(),
                                 }),
                             );
                         }
@@ -2225,7 +2223,7 @@ where
                                 "040-upstream-event",
                                 &serde_json::json!({
                                     "unparseable": true,
-                                    "data": text,
+                                    "data": text.as_str(),
                                 }),
                             );
                         }
@@ -2406,7 +2404,7 @@ mod tests {
     }
 
     fn test_websocket_client() -> reqwest::Client {
-        reqwest::Client::builder()
+        crate::tls::client_builder()
             .http1_only()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
@@ -3229,7 +3227,7 @@ mod tests {
                 other => panic!("unexpected first validation frame: {other:?}"),
             };
             assert_eq!(prior_nonce.len(), std::mem::size_of::<u64>());
-            assert_ne!(prior_nonce, 0_u64.to_be_bytes());
+            assert_ne!(prior_nonce[..], 0_u64.to_be_bytes());
             websocket
                 .send(Message::Pong(prior_nonce.clone()))
                 .await
@@ -3247,7 +3245,7 @@ mod tests {
                 other => panic!("unexpected second validation frame: {other:?}"),
             };
             assert_ne!(current_nonce, prior_nonce);
-            assert_ne!(current_nonce, 0_u64.to_be_bytes());
+            assert_ne!(current_nonce[..], 0_u64.to_be_bytes());
             release_peer_rx.await.unwrap();
         });
         let (mut websocket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
@@ -3453,7 +3451,7 @@ mod tests {
                     Message::Text(_) => {
                         release_response_rx.await.unwrap();
                         websocket
-                            .send(Message::Text(
+                            .send(Message::text(
                                 serde_json::json!({
                                     "type": "response.completed",
                                     "response": {"id": "resp_terminal_order"}
@@ -3540,7 +3538,7 @@ mod tests {
                         request_seen_tx.send(()).unwrap();
                         release_response_rx.await.unwrap();
                         websocket
-                            .send(Message::Text(
+                            .send(Message::text(
                                 serde_json::json!({
                                     "type": "response.completed",
                                     "response": {"id": "resp_dropped_receiver"}
@@ -3836,15 +3834,15 @@ mod tests {
             let mut websocket = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
             assert_eq!(
                 websocket.next().await.unwrap().unwrap(),
-                Message::Text("hello".to_string())
+                Message::text("hello")
             );
             websocket
-                .send(Message::Text("proxy-ok".to_string()))
+                .send(Message::text("proxy-ok".to_string()))
                 .await
                 .unwrap();
         });
 
-        let client = reqwest::Client::builder()
+        let client = crate::tls::client_builder()
             .http1_only()
             .redirect(reqwest::redirect::Policy::none())
             .proxy(
@@ -3862,12 +3860,12 @@ mod tests {
         .await
         .unwrap();
         websocket
-            .send(Message::Text("hello".to_string()))
+            .send(Message::text("hello".to_string()))
             .await
             .unwrap();
         assert_eq!(
             websocket.next().await.unwrap().unwrap(),
-            Message::Text("proxy-ok".to_string())
+            Message::text("proxy-ok")
         );
 
         let captured = captured_rx.await.unwrap();
@@ -3998,7 +3996,7 @@ mod tests {
         });
 
         let proxy_url = format!("http://secret-user:secret-pass@{proxy_addr}");
-        let client = reqwest::Client::builder()
+        let client = crate::tls::client_builder()
             .http1_only()
             .redirect(reqwest::redirect::Policy::none())
             .proxy(reqwest::Proxy::https(&proxy_url).unwrap())
@@ -4056,7 +4054,9 @@ mod tests {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-            ws.send(Message::Binary(vec![1, 2, 3])).await.unwrap();
+            ws.send(Message::Binary(vec![1, 2, 3].into()))
+                .await
+                .unwrap();
         });
 
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
@@ -4092,13 +4092,13 @@ mod tests {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-            ws.send(Message::Text(
-                r#"{"type":"codex.rate_limits","rate_limits":{"allowed":true}}"#.into(),
+            ws.send(Message::text(
+                r#"{"type":"codex.rate_limits","rate_limits":{"allowed":true}}"#,
             ))
             .await
             .unwrap();
             loop {
-                if ws.send(Message::Ping(Vec::new())).await.is_err() {
+                if ws.send(Message::Ping(Default::default())).await.is_err() {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -4140,14 +4140,13 @@ mod tests {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-            ws.send(Message::Text(
-                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message"}}"#
-                    .into(),
+            ws.send(Message::text(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message"}}"#,
             ))
             .await
             .unwrap();
             loop {
-                if ws.send(Message::Ping(Vec::new())).await.is_err() {
+                if ws.send(Message::Ping(Default::default())).await.is_err() {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -4177,7 +4176,7 @@ mod tests {
             let frame = server.next().await.unwrap().unwrap();
             assert!(matches!(frame, Message::Ping(_)));
             server
-                .send(Message::Text(r#"{"type":"response.created"}"#.into()))
+                .send(Message::text(r#"{"type":"response.created"}"#))
                 .await
                 .unwrap();
         });

@@ -7,6 +7,6 @@
 1162 src/providers/codex/translate/live_stream.rs
 1097 src/providers/codex/translate/reducer.rs
 1275 src/providers/codex/translate/request.rs
-2333 src/providers/codex/websocket.rs
+2331 src/providers/codex/websocket.rs
 2125 src/server.rs
 1784 src/tui.rs
