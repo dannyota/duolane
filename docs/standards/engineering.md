@@ -45,6 +45,11 @@ drift from the code and mislead agents (owner, 2026-11-18).
 - A rule the code must keep belongs in the design that owns it, or in a test
   that fails when it breaks.
 
+`scripts/check-comments.py` fails on any comment in a tracked Rust file unless
+`scripts/comments-allowlist.txt` lists it. Each allowlist line is
+`path:line: text`, exactly as the script prints the finding, and lines starting
+with `#` are ignored.
+
 ## File size
 
 Markdown stays at or under 400 lines. Rust stays at or under 700 lines, not

@@ -1,24 +1,219 @@
 name: CI
 
 on:
-  pull_request:
   push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * 1"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  checks:
-    name: Full checks
+  gates:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - name: Install tools
-        run: cargo install checkle just --locked
-      - name: Run full checks
-        run: just check-ci
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Length gate
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: make lengths
+      - name: Comment gate
+        run: make comments
+      - name: Workflow pin gate
+        run: make pins
+      - name: Install Markdown tools
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Markdown checks
+        run: make docs
+
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: |
+          version="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          test -n "$version"
+          rustup toolchain install "$version" --profile minimal --component rustfmt,clippy
+          test "$(rustc --version | cut -d ' ' -f 2)" = "$version"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --no-run
+      - name: Test with an empty home
+        run: |
+          home="$RUNNER_TEMP/test-home"
+          mkdir "$home"
+          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+          rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+          CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" \
+            HOME="$home" XDG_CONFIG_HOME="$home" XDG_STATE_HOME="$home" XDG_DATA_HOME="$home" \
+            cargo test --locked -- --test-threads=1
+      - name: Check the test home stayed empty
+        if: ${{ !cancelled() }}
+        run: |
+          home="$RUNNER_TEMP/test-home"
+          if [ -n "$(ls -A "$home")" ]; then
+            find "$home"
+            exit 1
+          fi
+
+  macos:
+    needs: rust
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: |
+          version="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          test -n "$version"
+          rustup toolchain install "$version" --profile minimal --component rustfmt,clippy
+          test "$(rustc --version | cut -d ' ' -f 2)" = "$version"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --locked --no-run
+      - name: Test with an empty home
+        run: |
+          home="$RUNNER_TEMP/test-home"
+          mkdir "$home"
+          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+          rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+          CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" \
+            HOME="$home" XDG_CONFIG_HOME="$home" XDG_STATE_HOME="$home" XDG_DATA_HOME="$home" \
+            cargo test --locked -- --test-threads=1
+      - name: Check the test home stayed empty
+        if: ${{ !cancelled() }}
+        run: |
+          home="$RUNNER_TEMP/test-home"
+          if [ -n "$(ls -A "$home")" ]; then
+            find "$home"
+            exit 1
+          fi
+
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: |
+          version="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          test -n "$version"
+          rustup toolchain install "$version" --profile minimal --component rustfmt,clippy
+          test "$(rustc --version | cut -d ' ' -f 2)" = "$version"
+      - name: Read the cargo-deny pin
+        run: echo "CARGO_DENY=$(awk '$1 == "cargo-deny" { print $2 }' .tool-versions)" >> "$GITHUB_ENV"
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-deny@${{ env.CARGO_DENY }}
+          fallback: none
+      - run: cargo deny --locked check
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned gitleaks
+        env:
+          GITLEAKS_LINUX_X64_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          version="$(awk '$1 == "gitleaks" { print $2 }' .tool-versions)"
+          archive="gitleaks_${version}_linux_x64.tar.gz"
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${archive}"
+          echo "$GITLEAKS_LINUX_X64_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - run: gitleaks git --redact --no-banner --log-opts="--all --full-history"
+
+  crate-age:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: python3 -I scripts/test/check-crate-age-test.py
+      - name: Crate cool-down
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CRATE_AGE_EXEMPT: ${{ vars.CRATE_AGE_EXEMPT }}
+        run: python3 -I scripts/check-crate-age.py "$BASE_SHA"
+
+  tools:
+    if: github.event_name == 'schedule' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Find pin changes
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -z "$BASE_SHA" ]; then
+            echo "check=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$BASE_SHA" HEAD -- .tool-versions rust-toolchain.toml package.json package-lock.json .github/workflows scripts/tools-outdated.sh; then
+            echo "check=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "check=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Tool freshness
+        if: steps.scope.outputs.check == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/tools-outdated.sh
+
+  ci:
+    if: ${{ always() }}
+    needs: [gates, rust, macos, deny, gitleaks, crate-age]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to pass or skip
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            case "$result" in
+              success | skipped) ;;
+              *)
+                echo "a required job ended with $result"
+                exit 1
+                ;;
+            esac
+          done

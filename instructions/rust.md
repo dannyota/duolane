@@ -2,10 +2,11 @@
 
 ## Checks
 
-- `cargo fmt --all -- --check`
-- `cargo clippy --all-targets -- -D warnings`
-- `cargo test -- --test-threads=1`. Config tests mutate process-wide environment variables and race under the parallel runner.
-- `cargo deny check advisories`, which blocks merge
+- `make check` runs every offline check: `lengths`, `comments`, `pins`, `docs`, `fmt`, `lint`, and `test`. `make help` lists every target.
+- `make fmt` checks formatting and `make lint` runs clippy with warnings denied.
+- `make test` runs `cargo test --locked -- --test-threads=1` with `HOME` and the XDG directories at an empty directory under `target/`, and fails if a test writes there. Config tests mutate process-wide environment variables and race under the parallel runner.
+- `make deny` runs `cargo deny --locked check`, which blocks merge.
+- `make crate-age` checks the crate cool-down against `origin/main`, or `BASE_REF` when set.
 
 ## Code rules
 
