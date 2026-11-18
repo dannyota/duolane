@@ -6,14 +6,14 @@ The primary designs and decides. Implementers change code. Reviewers judge work 
 
 1. Read the relevant design and accepted ADRs. Create one worktree under `.worktrees/` for the task.
 2. A change to architecture, a contract, or a security boundary starts with a design or ADR update that an independent reviewer accepts. Small changes skip this step.
-3. Brief one implementer per bounded task: objective, authorities to read, owned paths, forbidden actions, numbered decisions, test requirements, gate commands, and the report contract. Include "Do NOT commit".
+3. Brief one implementer per bounded task: objective, authorities to read, owned paths, forbidden actions, numbered decisions, test requirements, gate commands, and the report contract. Include "Do NOT commit". Ask for minimal tests (owner): one test per rule, with a hostile and a legitimate case, and no exhaustive variants.
 4. Failing test first, then the smallest correct change. Hostile input, authorization, races, and bounds belong to the author.
 5. The primary runs the gates, reads the risky parts of the diff, and commits.
 6. Send the commit SHA to a reviewer the routing selects, with the design, decisions, known bugs, and a regression checklist. Ask for severity, `file:line`, a failure scenario, a fix sentence, and a verdict of MERGE, MERGE-WITH-FIXES, or BLOCK.
 7. Paste findings verbatim into a new implementer brief. The same reviewer confirms the fixes.
-8. Push, open a pull request, wait for green CI on the exact head, and merge with a merge commit. Delete the branch and the worktree.
+8. Push, open a pull request, wait for the `ci` check on the exact head, and merge with a merge commit. Delete the branch and the worktree.
 
-Two red CI runs from the same cause mean stop and repair the process.
+Two red CI runs from the same cause mean stop and repair the process. Run one `make check` at a time on this laptop; agents that build in parallel use `CARGO_BUILD_JOBS=4`.
 
 ## Codex jobs
 

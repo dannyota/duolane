@@ -6,5 +6,6 @@
 - A process test sets the environment of its child explicitly.
 - When you set `HOME` for a test run from a shell, set it for the test command only, never for Git commands, because Git reads the commit identity and signing key from it. Tests must not spawn Git.
 - Name a test after the behavior it proves.
+- Keep tests minimal (owner): one test per rule, with a hostile and a legitimate case. No exhaustive variants.
 - Security fixes include the hostile case and the legitimate case that must keep working.
 - Live checks against real Claude or ChatGPT accounts run only with the owner's approval for that run. Mocks do not prove upstream behavior, so state which claims stay unverified.

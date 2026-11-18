@@ -6,7 +6,7 @@ Shared rules live here and in `instructions/`. [CLAUDE.md](CLAUDE.md) adds Claud
 
 `duolane` is Danny's personal local proxy. It lets Claude Code use a Claude subscription and a ChatGPT subscription in one session, chosen per request by model name. It is written in Rust, licensed under MIT, and not affiliated with Anthropic or OpenAI. The repository and CI logs are public.
 
-The code is being migrated to this design. The [foundation plan](docs/plans/foundation.md) owns the order. Until its slices land, parts of the code differ from the design.
+Remaining work is in the [foundation plan](docs/plans/foundation.md).
 
 ## Map
 
@@ -29,6 +29,21 @@ The code is being migrated to this design. The [foundation plan](docs/plans/foun
 |Writing documents|[Documentation](instructions/documentation.md)|
 
 Direct owner instructions and platform safety rules come first. An accepted ADR wins over design text, and design wins over a plan. Code and tests describe current behavior; a disagreement with the design is a defect to repair or a gap the plan tracks.
+
+## Code map
+
+|Path|Owns|
+|-|-|
+|`src/server.rs`, `src/server/`|Routes, listener, request dispatch|
+|`src/inbound_auth.rs`|Host, Origin, content type, and token guard|
+|`src/providers/anthropic/`|Claude passthrough and reasoning conversion|
+|`src/providers/codex/`|Codex translation, transport, and login|
+|`src/monitor.rs`, `src/tui.rs`|Dashboard|
+|`tests/support/hermetic.rs`|Test isolation every test binary includes|
+
+## Commands
+
+`make check` before every commit. `make deny` and `make crate-age` when `Cargo.lock` changes. `make help` lists all targets.
 
 ## Roles
 
@@ -60,7 +75,13 @@ Always use the latest model of each family, and update these ids when a newer on
 - Run `gh` as `dannyota`: prefix it with `GH_TOKEN=$(gh auth token -u dannyota)` and pass `--repo dannyota/duolane`. Never run `gh auth switch` or change git config.
 - Push with `GH_TOKEN=$(gh auth token -u dannyota) git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push`.
 - Use one worktree per task under `.worktrees/`. Every change lands through a pull request.
-- The primary commits, pushes, opens pull requests, and merges after green CI and a passing independent review (owner, 2026-11-18). Documentation-only changes need no independent review unless they set a design or ADR.
+- The primary commits, pushes, opens pull requests, and merges when the `ci` check is green and an independent review passes (owner, 2026-11-18). CodeQL is not awaited. Documentation-only changes need no independent review unless they set a design or ADR.
 - Tags, releases, and package publishing need the owner's approval each time.
 - Commits are signed. Use Conventional Commits. Messages describe the change only and never mention agents, AI, or automated assistance. Stage named paths; never use `git add -A` or `git add .`.
 - The remotes `upstream` (raine/claude-code-proxy) and `fcakyon` are read-only references. Never push to them or open pull requests against them.
+
+## Gotchas
+
+- The shell `sed` is GNU, so `sed -i ''` fails. Edit files with the Edit tool or Python.
+- The length gate fails when a capped file shrinks. Lower its cap in `scripts/lengths-baseline.txt`.
+- Never print request bodies or tokens in test assertion messages. CodeQL flags them as cleartext logging.
