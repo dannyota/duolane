@@ -1559,6 +1559,7 @@ async fn auto_review_with_agent_headers_is_stateless() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missing_and_dead_origin_retry_full_context_once_and_republish_for_both_modes() {
     let _environment_lock = env_lock();
+    duolane::retry::set_zero_retry_delay_for_tests(true);
     let mut harness = TestHarness::start().await;
     let case = unique("origin-recovery");
 
@@ -1667,6 +1668,7 @@ async fn missing_and_dead_origin_retry_full_context_once_and_republish_for_both_
     }
 
     harness.shutdown().await;
+    duolane::retry::set_zero_retry_delay_for_tests(false);
 }
 
 #[allow(clippy::await_holding_lock)]
