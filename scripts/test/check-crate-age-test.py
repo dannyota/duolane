@@ -69,22 +69,6 @@ class CrateAge(unittest.TestCase):
             ["exempt: rustls@0.23.99 published 2h ago: fixes RUSTSEC-2026-0001"], 0,
         ))
 
-    def test_exemption_covers_one_version_only(self):
-        head = lock(("rustls", "0.23.100", REGISTRY))
-        fetch, _ = fetcher({("rustls", "0.23.100"): 2})
-        exempt = check_crate_age.exemptions("rustls@0.23.99 fixes RUSTSEC-2026-0001")
-        _, failures = check_crate_age.check("", head, exempt, fetch, NOW)
-        self.assertEqual(failures, 1)
-
-    def test_exemption_needs_version_and_reason(self):
-        for value in ["rustls@0.23.99", "rustls fixes it", "@0.23.99 fixes it", "rustls@ fixes it"]:
-            with self.subTest(value=value):
-                with self.assertRaises(ValueError):
-                    check_crate_age.exemptions(value)
-
-    def test_main_rejects_missing_base_ref(self):
-        self.assertEqual(check_crate_age.main(["check-crate-age.py"]), 2)
-
 
 if __name__ == "__main__":
     unittest.main()

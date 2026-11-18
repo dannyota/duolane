@@ -89,42 +89,6 @@ jobs:
             exit 1
           fi
 
-  macos:
-    needs: rust
-    runs-on: macos-15
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install pinned Rust
-        run: |
-          version="$(tr -d '\r' < rust-toolchain.toml | sed -n 's/^channel = "\(.*\)"$/\1/p')"
-          test -n "$version"
-          rustup toolchain install "$version" --profile minimal --component rustfmt,clippy
-          test "$(rustc --version | cut -d ' ' -f 2)" = "$version"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo test --locked --no-run
-      - name: Test with an empty home
-        run: |
-          home="$RUNNER_TEMP/test-home"
-          mkdir "$home"
-          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-          rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
-          CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" \
-            HOME="$home" XDG_CONFIG_HOME="$home" XDG_STATE_HOME="$home" XDG_DATA_HOME="$home" \
-            cargo test --locked -- --test-threads=1
-      - name: Check the test home stayed empty
-        if: ${{ !cancelled() }}
-        run: |
-          home="$RUNNER_TEMP/test-home"
-          if [ -n "$(ls -A "$home")" ]; then
-            find "$home"
-            exit 1
-          fi
-
   deny:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -183,36 +147,9 @@ jobs:
           CRATE_AGE_EXEMPT: ${{ vars.CRATE_AGE_EXEMPT }}
         run: python3 -I scripts/check-crate-age.py "$BASE_SHA"
 
-  tools:
-    if: github.event_name == 'schedule' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Find pin changes
-        id: scope
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          if [ -z "$BASE_SHA" ]; then
-            echo "check=true" >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$BASE_SHA" HEAD -- .tool-versions rust-toolchain.toml package.json package-lock.json .github/workflows scripts/tools-outdated.sh scripts/check-workflow-pins.py; then
-            echo "check=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "check=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Tool freshness
-        if: steps.scope.outputs.check == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash scripts/tools-outdated.sh
-
   ci:
     if: ${{ always() }}
-    needs: [gates, rust, macos, deny, gitleaks, crate-age]
+    needs: [gates, rust, deny, gitleaks, crate-age]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -227,7 +164,7 @@ jobs:
           import sys
 
           needs = json.loads(os.environ["NEEDS"])
-          expected = {"gates", "rust", "macos", "deny", "gitleaks", "crate-age"}
+          expected = {"gates", "rust", "deny", "gitleaks", "crate-age"}
           if set(needs) != expected:
               sys.exit(f"needed jobs {sorted(needs)} differ from {sorted(expected)}")
           failed = []

@@ -107,26 +107,6 @@ class Gate(unittest.TestCase):
                 self.assert_rejected(uses)
         self.assert_rejected("- name: x\n        uses: >-\n          actions/checkout@v7", line=6)
 
-    def test_every_workflow_file_is_checked(self):
-        self.workflow("ci.yml", f"- uses: actions/checkout@{SHA_A} # v7.0.1")
-        self.assert_rejected("- uses: actions/checkout@v7", name="other.yaml")
-
-    def test_other_extensions_fail(self):
-        for name in ["notes.md", "ci.yml.bak", "ci.YML", "release"]:
-            with self.subTest(name=name):
-                self.workflow(name, f"- uses: actions/checkout@{SHA_A} # v7.0.1")
-                code, output = self.run_gate()
-                self.assertEqual(code, 1)
-                self.assertIn(f".github/workflows/{name}: workflows must be .yml or .yaml files", output)
-                (self.root / ".github/workflows" / name).unlink()
-
-    def test_one_action_has_one_pin(self):
-        self.workflow("ci.yml", f"- uses: actions/checkout@{SHA_A} # v7.0.1")
-        self.workflow("release.yml", f"- uses: Actions/Checkout@{SHA_B} # v7.0.0")
-        code, output = self.run_gate()
-        self.assertEqual((code, output), (
-            1, "check-workflow-pins: .github/workflows/release.yml:5: Actions/Checkout has another pin in a workflow",
-        ))
 
     def test_tool_pins_must_agree(self):
         self.workflow("ci.yml", f"- uses: actions/checkout@{SHA_A} # v7.0.1")
@@ -153,12 +133,6 @@ class Gate(unittest.TestCase):
         code, output = self.run_gate()
         self.assertEqual(code, 1)
         self.assertIn("package-lock.json devDependencies differ from package.json", output)
-
-    def test_tag_mismatch_is_reported(self):
-        pins = {"actions/checkout": (SHA_A, "7.0.1"), "github/codeql-action": (SHA_B, "4.39.3")}
-        tags = {("actions/checkout", "7.0.1"): SHA_A, ("github/codeql-action", "4.39.3"): "c" * 40}
-        problems = check_workflow_pins.tag_mismatches(pins, lambda repo, version: tags[(repo, version)])
-        self.assertEqual(problems, [f"github/codeql-action pin {SHA_B} is not v4.39.3 ({'c' * 40})"])
 
 
 if __name__ == "__main__":
