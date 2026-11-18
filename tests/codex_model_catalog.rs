@@ -64,7 +64,7 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         r#"{"tokens":{"access_token":"synthetic-access","refresh_token":"synthetic-refresh"}}"#,
     )
     .unwrap();
-    let output = command(&dir).args(["models", "--full"]).output().unwrap();
+    let output = command(&dir).arg("models").output().unwrap();
     assert!(output.status.success());
     let listing = String::from_utf8(output.stdout).unwrap();
     assert!(listing.contains("gpt-test-future-fast"));

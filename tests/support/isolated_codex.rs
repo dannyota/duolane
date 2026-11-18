@@ -1,6 +1,3 @@
-/// Rerun one test without ambient config, credentials, or process-global env
-/// mutation that could race other tests. The config override disables Keychain;
-/// HOME also isolates the file store's legacy credential fallback.
 pub fn rerun_without_credentials(test_name: &str) -> bool {
     if std::env::var("CCP_TEST_ISOLATED_CODEX").as_deref() != Ok(test_name) {
         let isolated = tempfile::TempDir::new().unwrap();

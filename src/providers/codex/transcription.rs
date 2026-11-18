@@ -368,8 +368,6 @@ mod tests {
         crate::provider::RequestContext {
             req_id: "transcription-test".to_string(),
             session_id: None,
-            session_seq: None,
-            provider: "codex".to_string(),
             traffic: None,
             monitor: None,
             passthrough: None,

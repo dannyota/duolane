@@ -4,7 +4,6 @@ use std::time::Duration;
 pub const RETRY_INITIAL_DELAY_MS: u64 = 2000;
 pub const RETRY_MAX_DELAY_MS: u64 = 30_000;
 pub const RETRY_BACKOFF_FACTOR: u64 = 2;
-pub const MAX_RATE_LIMIT_RETRIES: u32 = 3;
 
 #[derive(Debug, Clone, Copy)]
 pub struct BackoffOutcome {
@@ -53,30 +52,4 @@ pub async fn sleep(ms: u64) {
         return;
     }
     tokio::time::sleep(Duration::from_millis(ms)).await;
-}
-
-#[cfg(test)]
-pub async fn retry_on_statuses<T, E, F>(mut next: F) -> Result<T, E>
-where
-    E: std::fmt::Debug,
-    F: FnMut(u32) -> Result<T, E>,
-{
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        if attempt > MAX_RATE_LIMIT_RETRIES + 1 {
-            break;
-        }
-        match next(attempt) {
-            Ok(value) => return Ok(value),
-            Err(err) if attempt <= MAX_RATE_LIMIT_RETRIES + 1 => {
-                if attempt > MAX_RATE_LIMIT_RETRIES {
-                    return Err(err);
-                }
-                sleep(compute_backoff_delay(attempt, None).wait_ms).await;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    unreachable!()
 }

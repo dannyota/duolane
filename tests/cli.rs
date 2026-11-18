@@ -27,17 +27,11 @@ fn version_aliases_print_expected_version() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
-fn models_prints_all_providers() -> Result<(), Box<dyn std::error::Error>> {
+fn models_prints_codex_provider() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin("claude-codex")?;
     cmd.arg("models");
     let out = String::from_utf8(cmd.output()?.stdout)?;
     assert!(out.contains("codex:"));
-    assert!(out.contains("kimi:"));
-    assert!(out.contains("cursor:"));
-
-    let mut cmd = Command::cargo_bin("claude-codex")?;
-    cmd.args(["models", "--full"]);
-    cmd.output()?;
     Ok(())
 }
 
@@ -54,14 +48,26 @@ fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::e
         "Start the proxy server and monitor",
         "List supported provider models",
         "Manage Codex authentication",
-        "Manage Kimi authentication",
-        "Manage Cursor authentication",
-        "Manage Grok authentication",
     ] {
         assert!(stdout.contains(description), "missing: {description}");
     }
     assert!(!stdout.contains("demo"));
     assert!(!stdout.contains("mock data and no proxy server"));
+    Ok(())
+}
+
+#[test]
+fn removed_backend_commands_are_not_offered() -> Result<(), Box<dyn std::error::Error>> {
+    let help = Command::cargo_bin("claude-codex")?.arg("--help").output()?;
+    let help = String::from_utf8(help.stdout)?.to_lowercase();
+    for command in ["kimi", "grok", "cursor"] {
+        assert!(!help.contains(command), "help offers {command}");
+        Command::cargo_bin("claude-codex")?
+            .args([command, "auth", "status"])
+            .assert()
+            .failure()
+            .code(2);
+    }
     Ok(())
 }
 
@@ -78,11 +84,11 @@ fn invalid_command_exits_two() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn unsupported_provider_auth_command_exits_two() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin("claude-codex")?;
-    cmd.args(["cursor", "auth", "device"]);
+    cmd.args(["codex", "auth", "device"]);
     let output = cmd.output()?;
     assert_eq!(output.status.code(), Some(2));
     let out = String::from_utf8(output.stderr)?;
-    assert!(out.contains("not yet implemented") || out.contains("unsupported"));
+    assert!(out.contains("Codex auth is provided by the Codex CLI"));
     Ok(())
 }
 
@@ -90,26 +96,11 @@ fn unsupported_provider_auth_command_exits_two() -> Result<(), Box<dyn std::erro
 fn provider_logout_without_auth_is_success() -> Result<(), Box<dyn std::error::Error>> {
     let temp = TempDir::new()?;
     let mut cmd = Command::cargo_bin("claude-codex")?;
-    cmd.args(["kimi", "auth", "logout"]);
+    cmd.args(["codex", "auth", "logout"]);
     cmd.env("CCP_CONFIG_DIR", temp.path());
-    // Logout clears the legacy path as well as the primary credential path.
     cmd.env("HOME", temp.path());
     cmd.env("USERPROFILE", temp.path());
     cmd.assert().success();
-    Ok(())
-}
-
-#[test]
-fn models_output_is_stable_order() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::cargo_bin("claude-codex")?;
-    cmd.args(["models", "--full"]);
-    let output = cmd.output()?;
-    let out = String::from_utf8(output.stdout)?;
-    let codex_pos = out.find("codex:").unwrap_or(0);
-    let kimi_pos = out.find("kimi:").unwrap_or(0);
-    let cursor_pos = out.find("cursor:").unwrap_or(0);
-    assert!(codex_pos < kimi_pos);
-    assert!(kimi_pos < cursor_pos);
     Ok(())
 }
 
@@ -191,17 +182,12 @@ fn plain_service_exits_on_second_signal(signal: &str) -> Result<(), Box<dyn std:
     });
 
     let config = TempDir::new()?;
-    let auth_dir = config.path().join("kimi");
-    std::fs::create_dir_all(&auth_dir)?;
-    std::fs::write(
-        auth_dir.join("auth.json"),
-        r#"{"access":"test","refresh":"test","expires":4102444800000,"scope":"openid","userId":"test"}"#,
-    )?;
     let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
     let child = std::process::Command::new(env!("CARGO_BIN_EXE_claude-codex"))
         .args(["serve", "--no-monitor", "--port", &port.to_string()])
         .env("CCP_CONFIG_DIR", config.path())
-        .env("CCP_KIMI_BASE_URL", upstream_url)
+        .env("CCP_ALIAS_PROVIDER", "anthropic")
+        .env("CCP_ANTHROPIC_BASE_URL", upstream_url)
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
         .stdin(Stdio::null())
@@ -210,7 +196,7 @@ fn plain_service_exits_on_second_signal(signal: &str) -> Result<(), Box<dyn std:
         .spawn()?;
     let mut child = ChildGuard(child);
     let mut downstream = wait_for_service(&mut child, port)?;
-    let body = br#"{"model":"kimi-for-coding","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}"#;
+    let body = br#"{"model":"claude-haiku-5-5","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}"#;
     write!(
         downstream,
         "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
@@ -241,20 +227,4 @@ fn plain_service_exits_on_second_ctrl_c() -> Result<(), Box<dyn std::error::Erro
 #[test]
 fn plain_service_exits_on_second_sigterm() -> Result<(), Box<dyn std::error::Error>> {
     plain_service_exits_on_second_signal("-TERM")
-}
-
-#[test]
-fn kimi_auth_status_reads_stored_auth() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = TempDir::new()?;
-    let auth_dir = temp.path().join("kimi");
-    std::fs::create_dir_all(&auth_dir)?;
-    std::fs::write(
-        auth_dir.join("auth.json"),
-        r#"{"access":"a","refresh":"r","expires":4102444800000,"scope":"openid","userId":"u"}"#,
-    )?;
-    let mut cmd = Command::cargo_bin("claude-codex")?;
-    cmd.args(["kimi", "auth", "status"]);
-    cmd.env("CCP_CONFIG_DIR", temp.path());
-    cmd.assert().success().stdout(contains("User: u"));
-    Ok(())
 }
