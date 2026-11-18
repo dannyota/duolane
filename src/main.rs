@@ -184,7 +184,7 @@ fn main() -> Result<()> {
                 value.set_sensitive(true);
                 headers.insert(PROXY_KEY_HEADER, value);
             }
-            let client = reqwest::Client::builder()
+            let client = duolane::tls::client_builder()
                 .default_headers(headers)
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())

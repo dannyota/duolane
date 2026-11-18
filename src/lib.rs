@@ -19,6 +19,7 @@ pub mod retry;
 pub mod server;
 pub mod session;
 pub mod text;
+pub mod tls;
 pub mod traffic;
 pub mod tui;
 pub mod upstream_url;

@@ -451,7 +451,7 @@ mod tests {
         });
 
         let client = super::super::client::CodexHttpClient::new_for_test(
-            reqwest::Client::builder().no_proxy().build().unwrap(),
+            crate::tls::client_builder().no_proxy().build().unwrap(),
             format!("http://{addr}/responses"),
             1_000,
             1_000,

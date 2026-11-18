@@ -362,7 +362,7 @@ mod tests {
             body
         });
         let client = CodexHttpClient::new_for_test(
-            reqwest::Client::new(),
+            crate::tls::client_builder().build().unwrap(),
             format!("http://{address}/v1/responses"),
             1_000,
             1_000,

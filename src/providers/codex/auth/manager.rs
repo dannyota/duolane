@@ -38,7 +38,7 @@ impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
             #[cfg(test)]
             test_auth: Arc::new(Mutex::new(None)),
             refresh_lock: CODEX_REFRESH_LOCK.clone(),
-            refresh_client: reqwest::Client::builder()
+            refresh_client: crate::tls::client_builder()
                 .connect_timeout(Duration::from_secs(15))
                 .timeout(Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
