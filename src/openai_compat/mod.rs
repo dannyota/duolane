@@ -27,10 +27,10 @@ impl OpenAiError {
 
     pub fn unsupported_provider(provider: &str) -> Self {
         Self {
-            status: StatusCode::NOT_IMPLEMENTED,
+            status: StatusCode::BAD_REQUEST,
             message: format!("provider '{provider}' does not support OpenAI-compatible generation")
                 .into_boxed_str(),
-            param: None,
+            param: Some("model".into()),
         }
     }
 

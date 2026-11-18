@@ -1308,7 +1308,7 @@ async fn openai_routes_reject_the_anthropic_provider_before_recording_a_session(
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED, "{uri}");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
         let value: Value = serde_json::from_slice(
             &axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
