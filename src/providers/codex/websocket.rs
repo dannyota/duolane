@@ -33,6 +33,7 @@ use super::client::{
     OwnerAwareCodexResponse,
 };
 use super::continuation::ContinuationReservation;
+use super::translate::reasoning_signature::ReasoningAccount;
 
 pub const WEBSOCKET_PROTOCOL_HEADER: &str = "responses_websockets=2026-02-06";
 pub const WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
@@ -319,7 +320,8 @@ impl PoolEntry {
 static NEXT_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
 static POOLED_VALIDATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static POOL_ACTIVITY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-static WS_POOL: once_cell::sync::Lazy<Mutex<HashMap<ConversationIdentity, Arc<PoolEntry>>>> =
+type PoolKey = (ConversationIdentity, ReasoningAccount);
+static WS_POOL: once_cell::sync::Lazy<Mutex<HashMap<PoolKey, Arc<PoolEntry>>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 #[cfg(test)]
 static WS_POOL_TEST_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
@@ -361,19 +363,20 @@ pub(crate) fn pooled_socket_id_for_tests(owner: &ConversationIdentity) -> Option
     WS_POOL
         .lock()
         .unwrap()
-        .get(owner)
-        .map(|entry| entry.socket_id)
+        .iter()
+        .find(|((pooled_owner, _), _)| pooled_owner == owner)
+        .map(|(_, entry)| entry.socket_id)
 }
 
 pub fn invalidate_codex_websocket_pool_owner(owner: &ConversationIdentity) {
     let mut guard = WS_POOL.lock().unwrap();
-    guard.remove(owner);
+    guard.retain(|(pooled_owner, _), _| pooled_owner != owner);
 }
 
 #[deprecated(note = "use typed conversation ownership internally")]
 pub fn invalidate_codex_websocket_pool_key(session_id: &str) {
     let mut guard = WS_POOL.lock().unwrap();
-    guard.retain(|owner, _| match owner {
+    guard.retain(|(owner, _), _| match owner {
         ConversationIdentity::Main(owner_session_id)
         | ConversationIdentity::Agent(owner_session_id, _) => owner_session_id != session_id,
     });
@@ -395,7 +398,7 @@ pub fn invalidate_codex_websocket_pool_turn(session_id: &str, turn_id: Option<u6
     invalidate_codex_websocket_pool_turn_for_owner(&owner, turn_id);
 }
 
-fn invalidate_pool_entry(owner: &ConversationIdentity, entry: &Arc<PoolEntry>) {
+fn invalidate_pool_entry(owner: &PoolKey, entry: &Arc<PoolEntry>) {
     let mut guard = WS_POOL.lock().unwrap();
     if guard
         .get(owner)
@@ -405,30 +408,28 @@ fn invalidate_pool_entry(owner: &ConversationIdentity, entry: &Arc<PoolEntry>) {
     }
 }
 
-fn invalidate_pool_owner(owner: Option<&ConversationIdentity>, entry: Option<&Arc<PoolEntry>>) {
+fn invalidate_pool_owner(owner: Option<&PoolKey>, entry: Option<&Arc<PoolEntry>>) {
     let Some(owner) = owner else {
         return;
     };
     match entry {
         Some(entry) => invalidate_pool_entry(owner, entry),
-        None => invalidate_codex_websocket_pool_owner(owner),
+        None => drop(WS_POOL.lock().unwrap().remove(owner)),
     }
 }
 
-fn reservation_pool_owner(
-    reservation: Option<&ContinuationReservation>,
-) -> Option<&ConversationIdentity> {
+fn reservation_pool_owner(reservation: Option<&ContinuationReservation>) -> Option<PoolKey> {
     let reservation = reservation?;
     if reservation.candidate().disabled_reason.as_deref() == Some("disabled") {
         return None;
     }
-    reservation.owner()
+    Some((reservation.owner()?.clone(), reservation.account().clone()))
 }
 
 fn pool_take_for_turn(reservation: &ContinuationReservation) -> Option<Arc<PoolEntry>> {
-    let owner = reservation.owner()?;
+    let owner = (reservation.owner()?.clone(), reservation.account().clone());
     super::continuation::if_current_turn_for_owner(reservation, || {
-        WS_POOL.lock().ok()?.remove(owner)
+        WS_POOL.lock().ok()?.remove(&owner)
     })
     .flatten()
 }
@@ -454,7 +455,7 @@ fn take_pool_entry_for_request(
                 .is_none_or(|entry| Some(entry.socket_id) != expected_socket_id))
     {
         if let (Some(owner), Some(entry)) = (pool_owner, pooled.as_ref()) {
-            pool_insert_if_vacant_or_same(owner.clone(), entry.clone());
+            pool_insert_if_vacant_or_same(owner, entry.clone());
         }
         return Err(continuation_socket_missing_error());
     }
@@ -463,7 +464,7 @@ fn take_pool_entry_for_request(
 }
 
 fn pool_insert_for_turn(reservation: &ContinuationReservation, entry: Arc<PoolEntry>) -> bool {
-    let Some(owner) = reservation_pool_owner(Some(reservation)).cloned() else {
+    let Some(owner) = reservation_pool_owner(Some(reservation)) else {
         return false;
     };
     super::continuation::if_current_turn_for_owner(reservation, || {
@@ -472,7 +473,7 @@ fn pool_insert_for_turn(reservation: &ContinuationReservation, entry: Arc<PoolEn
     .unwrap_or(false)
 }
 
-fn pool_remove_entry(owner: &ConversationIdentity, entry: &Arc<PoolEntry>) {
+fn pool_remove_entry(owner: &PoolKey, entry: &Arc<PoolEntry>) {
     invalidate_pool_entry(owner, entry);
 }
 
@@ -487,16 +488,16 @@ pub(super) fn invalidate_codex_websocket_pool_socket(
         return;
     };
     let entry = WS_POOL.lock().ok().and_then(|pool| {
-        pool.get(owner)
+        pool.get(&owner)
             .filter(|entry| entry.socket_id == socket_id)
             .cloned()
     });
     if let Some(entry) = entry {
-        pool_remove_entry(owner, &entry);
+        pool_remove_entry(&owner, &entry);
     }
 }
 
-fn pool_insert_if_vacant_or_same(owner: ConversationIdentity, entry: Arc<PoolEntry>) -> bool {
+fn pool_insert_if_vacant_or_same(owner: PoolKey, entry: Arc<PoolEntry>) -> bool {
     entry.touch();
     let mut guard = WS_POOL.lock().unwrap();
     if let Some(existing) = guard.get(&owner) {
@@ -524,7 +525,7 @@ fn pool_insert(owner: ConversationIdentity, entry: Arc<PoolEntry>) {
     }
     let now = now_ms();
     guard.retain(|_, entry| now.saturating_sub(entry.created_at) < POOL_IDLE_TTL_MS);
-    guard.insert(owner, entry);
+    guard.insert((owner, ReasoningAccount::default()), entry);
 }
 
 fn cleanup_pool_before_connect() {
@@ -576,20 +577,18 @@ impl WebSocketConnectGate {
 pub fn to_websocket_url(url: &str) -> Result<String, CodexWebSocketError> {
     let mut parsed = url::Url::parse(url)
         .map_err(|e| CodexWebSocketError::new(format!("Failed to parse URL: {e}")))?;
-    match parsed.scheme() {
-        "http" => parsed.set_scheme("ws").map_err(|_| {
-            CodexWebSocketError::new("Unsupported Codex WebSocket URL scheme".to_string())
-        })?,
-        "https" => parsed.set_scheme("wss").map_err(|_| {
-            CodexWebSocketError::new("Unsupported Codex WebSocket URL scheme".to_string())
-        })?,
-        "ws" | "wss" => {}
+    let scheme = match parsed.scheme() {
+        "https" | "wss" => "wss",
+        "http" | "ws" if crate::upstream_url::is_loopback_host(&parsed) => "ws",
         other => {
             return Err(CodexWebSocketError::new(format!(
-                "Unsupported Codex WebSocket URL scheme: {other}"
+                "Codex WebSocket URL must use wss, or ws only for a loopback host, not {other}"
             )));
         }
-    }
+    };
+    parsed.set_scheme(scheme).map_err(|_| {
+        CodexWebSocketError::new("Unsupported Codex WebSocket URL scheme".to_string())
+    })?;
     Ok(parsed.to_string())
 }
 
@@ -769,7 +768,7 @@ pub(super) async fn codex_websocket_request(
             .is_err()
     {
         drop(guard);
-        if let Some(owner) = pool_owner {
+        if let Some(owner) = &pool_owner {
             pool_remove_entry(owner, &entry);
         }
         if requires_origin {
@@ -793,7 +792,7 @@ pub(super) async fn codex_websocket_request(
         .send(Message::Text(body_json))
         .await
         .map_err(|error| {
-            if let Some(owner) = pool_owner {
+            if let Some(owner) = &pool_owner {
                 pool_remove_entry(owner, &entry);
             }
             CodexError {
@@ -809,7 +808,7 @@ pub(super) async fn codex_websocket_request(
     let collected = collect_ws_events(
         &mut guard,
         idle_timeout_ms,
-        pool_owner,
+        pool_owner.as_ref(),
         Some(&entry),
         traffic,
     )
@@ -818,21 +817,21 @@ pub(super) async fn codex_websocket_request(
     let (sse_body, terminal_event) = match collected {
         Ok(result) => result,
         Err(error) => {
-            if let Some(owner) = pool_owner {
+            if let Some(owner) = &pool_owner {
                 pool_remove_entry(owner, &entry);
             }
             return Err(error);
         }
     };
     let Some(terminal_event) = terminal_event else {
-        if let Some(owner) = pool_owner {
+        if let Some(owner) = &pool_owner {
             pool_remove_entry(owner, &entry);
         }
         return Err(missing_terminal_error());
     };
 
     if is_previous_response_missing(&terminal_event.payload) {
-        if let Some(owner) = pool_owner {
+        if let Some(owner) = &pool_owner {
             pool_remove_entry(owner, &entry);
         }
         return Err(CodexError {
@@ -849,7 +848,7 @@ pub(super) async fn codex_websocket_request(
     let origin_reinserted = if completed {
         reservation.is_some_and(|reservation| pool_insert_for_turn(reservation, entry.clone()))
     } else {
-        if let Some(owner) = pool_owner {
+        if let Some(owner) = &pool_owner {
             pool_remove_entry(owner, &entry);
         }
         false
@@ -967,7 +966,7 @@ pub(super) async fn prepare_codex_websocket(
         && let Err(detail) = validate_pooled_websocket(&mut guard, connect_timeout_ms).await
     {
         drop(guard);
-        if let Some(owner) = pool_owner {
+        if let Some(owner) = &pool_owner {
             pool_remove_entry(owner, &entry);
         }
         return Err(if requires_origin {
@@ -1033,7 +1032,7 @@ pub(super) fn start_codex_websocket_events(
         let pool_owner = reservation_pool_owner(reservation.as_ref());
         if let Err(error) = guard.send(Message::Text(body_json)).await {
             drop(guard);
-            if let Some(owner) = pool_owner {
+            if let Some(owner) = &pool_owner {
                 pool_remove_entry(owner, &entry);
             }
             socket_id_publisher.publish(None);
@@ -1058,7 +1057,7 @@ pub(super) fn start_codex_websocket_events(
                 .as_ref()
                 .is_some_and(|reservation| pool_insert_for_turn(reservation, entry.clone()))
         } else {
-            if let Some(owner) = pool_owner {
+            if let Some(owner) = &pool_owner {
                 pool_remove_entry(owner, &entry);
             }
             false
@@ -1067,7 +1066,7 @@ pub(super) fn start_codex_websocket_events(
         if let Some(item) = terminal_item
             && tx.send(item).await.is_err()
             && origin_reinserted
-            && let Some(owner) = pool_owner
+            && let Some(owner) = &pool_owner
         {
             pool_remove_entry(owner, &entry);
         }
@@ -1982,7 +1981,7 @@ struct WsEvent {
 async fn collect_ws_events<S>(
     ws: &mut WebSocketStream<S>,
     idle_timeout_ms: u64,
-    pool_owner: Option<&ConversationIdentity>,
+    pool_owner: Option<&PoolKey>,
     pool_entry: Option<&Arc<PoolEntry>>,
     traffic: Option<&TrafficCapture>,
 ) -> Result<(Vec<u8>, Option<WsEvent>), CodexError>
@@ -2003,7 +2002,7 @@ where
 async fn collect_ws_events_with_keepalive_interval<S>(
     ws: &mut WebSocketStream<S>,
     idle_timeout_ms: u64,
-    pool_owner: Option<&ConversationIdentity>,
+    pool_owner: Option<&PoolKey>,
     pool_entry: Option<&Arc<PoolEntry>>,
     traffic: Option<&TrafficCapture>,
     keepalive_interval: Duration,
@@ -2352,6 +2351,10 @@ mod tests {
         assert!(!publisher_b.is_provider_retry_handoff());
     }
 
+    fn pool_key_for(owner: &ConversationIdentity) -> PoolKey {
+        (owner.clone(), ReasoningAccount::default())
+    }
+
     fn main_owner(session_id: &str) -> ConversationIdentity {
         ConversationIdentity::Main(session_id.to_string())
     }
@@ -2525,7 +2528,7 @@ mod tests {
             let mut guard = WS_POOL.lock().unwrap();
             for index in 0..POOL_CONNECT_CLEANUP_THRESHOLD {
                 guard.insert(
-                    main_owner(&format!("entry-{index:02}")),
+                    pool_key_for(&main_owner(&format!("entry-{index:02}"))),
                     shared_pool_entry(&ws),
                 );
             }
@@ -2537,20 +2540,20 @@ mod tests {
             POOL_CONNECT_CLEANUP_THRESHOLD
         );
 
+        WS_POOL.lock().unwrap().insert(
+            pool_key_for(&main_owner("entry-50")),
+            shared_pool_entry(&ws),
+        );
         WS_POOL
             .lock()
             .unwrap()
-            .insert(main_owner("entry-50"), shared_pool_entry(&ws));
-        WS_POOL
-            .lock()
-            .unwrap()
-            .get(&main_owner("entry-00"))
+            .get(&pool_key_for(&main_owner("entry-00")))
             .unwrap()
             .touch();
         let leased = WS_POOL
             .lock()
             .unwrap()
-            .get(&main_owner("entry-01"))
+            .get(&pool_key_for(&main_owner("entry-01")))
             .unwrap()
             .clone();
 
@@ -2558,13 +2561,13 @@ mod tests {
 
         let guard = WS_POOL.lock().unwrap();
         assert_eq!(guard.len(), POOL_CONNECT_CLEANUP_TARGET);
-        assert!(guard.contains_key(&main_owner("entry-00")));
-        assert!(guard.contains_key(&main_owner("entry-01")));
+        assert!(guard.contains_key(&pool_key_for(&main_owner("entry-00"))));
+        assert!(guard.contains_key(&pool_key_for(&main_owner("entry-01"))));
         for index in 2..=12 {
-            assert!(!guard.contains_key(&main_owner(&format!("entry-{index:02}"))));
+            assert!(!guard.contains_key(&pool_key_for(&main_owner(&format!("entry-{index:02}")))));
         }
-        assert!(guard.contains_key(&main_owner("entry-13")));
-        assert!(guard.contains_key(&main_owner("entry-50")));
+        assert!(guard.contains_key(&pool_key_for(&main_owner("entry-13"))));
+        assert!(guard.contains_key(&pool_key_for(&main_owner("entry-50"))));
         drop(guard);
         drop(leased);
         clear_codex_websocket_pool_for_tests();
@@ -2582,12 +2585,12 @@ mod tests {
         {
             let mut guard = WS_POOL.lock().unwrap();
             guard.insert(
-                main_owner("entry-00"),
+                pool_key_for(&main_owner("entry-00")),
                 Arc::new(PoolEntry::new(probe_stream)),
             );
             for index in 1..=POOL_CONNECT_CLEANUP_THRESHOLD {
                 guard.insert(
-                    main_owner(&format!("entry-{index:02}")),
+                    pool_key_for(&main_owner(&format!("entry-{index:02}"))),
                     shared_pool_entry(&shared_ws),
                 );
             }
@@ -2921,13 +2924,19 @@ mod tests {
             "wss://example.test/codex"
         );
         assert_eq!(
-            to_websocket_url("http://example.test/codex").unwrap(),
-            "ws://example.test/codex"
+            to_websocket_url("http://127.0.0.1:4141/codex").unwrap(),
+            "ws://127.0.0.1:4141/codex"
+        );
+        assert_eq!(
+            to_websocket_url("ws://localhost/codex").unwrap(),
+            "ws://localhost/codex"
         );
         assert_eq!(
             to_websocket_url("wss://example.test/codex").unwrap(),
             "wss://example.test/codex"
         );
+        assert!(to_websocket_url("http://example.test/codex").is_err());
+        assert!(to_websocket_url("ws://example.test/codex").is_err());
         assert!(to_websocket_url("ftp://example.test/codex").is_err());
     }
 
@@ -3178,18 +3187,28 @@ mod tests {
         let owner = main_owner("exclusive");
         pool_insert(owner.clone(), first.clone());
         assert!(Arc::ptr_eq(
-            &WS_POOL.lock().unwrap().remove(&owner).unwrap(),
+            &WS_POOL
+                .lock()
+                .unwrap()
+                .remove(&pool_key_for(&owner))
+                .unwrap(),
             &first
         ));
-        assert!(WS_POOL.lock().unwrap().remove(&owner).is_none());
+        assert!(
+            WS_POOL
+                .lock()
+                .unwrap()
+                .remove(&pool_key_for(&owner))
+                .is_none()
+        );
 
         let replacement = Arc::new(PoolEntry::new(create_dummy_stream_async().await));
         pool_insert(owner.clone(), replacement.clone());
-        pool_remove_entry(&owner, &first);
+        pool_remove_entry(&pool_key_for(&owner), &first);
         let reservation = test_continuation(Some(owner.clone()), None, None, None);
         invalidate_codex_websocket_pool_socket(&reservation, Some(first.socket_id));
         assert!(Arc::ptr_eq(
-            WS_POOL.lock().unwrap().get(&owner).unwrap(),
+            WS_POOL.lock().unwrap().get(&pool_key_for(&owner)).unwrap(),
             &replacement
         ));
         clear_codex_websocket_pool_for_tests();
@@ -3304,7 +3323,7 @@ mod tests {
         assert!(!error.message.contains("replacement-session"));
         assert!(!error.message.contains("replacement-agent"));
         assert!(Arc::ptr_eq(
-            WS_POOL.lock().unwrap().get(&owner).unwrap(),
+            WS_POOL.lock().unwrap().get(&pool_key_for(&owner)).unwrap(),
             &replacement
         ));
 
@@ -3341,7 +3360,11 @@ mod tests {
         let mut insert_replacement = tokio::spawn(async move {
             tokio::time::timeout(Duration::from_secs(1), async move {
                 loop {
-                    if !WS_POOL.lock().unwrap().contains_key(&replacement_owner) {
+                    if !WS_POOL
+                        .lock()
+                        .unwrap()
+                        .contains_key(&pool_key_for(&replacement_owner))
+                    {
                         pool_insert(replacement_owner, replacement_for_task);
                         return;
                     }
@@ -3390,11 +3413,11 @@ mod tests {
             Some(WEBSOCKET_CONTINUATION_SOCKET_MISSING_DETAIL)
         );
         assert!(Arc::ptr_eq(
-            WS_POOL.lock().unwrap().get(&owner).unwrap(),
+            WS_POOL.lock().unwrap().get(&pool_key_for(&owner)).unwrap(),
             &replacement
         ));
         assert!(!Arc::ptr_eq(
-            WS_POOL.lock().unwrap().get(&owner).unwrap(),
+            WS_POOL.lock().unwrap().get(&pool_key_for(&owner)).unwrap(),
             &exact
         ));
 
@@ -3477,7 +3500,7 @@ mod tests {
         let pooled = WS_POOL
             .lock()
             .unwrap()
-            .get(&owner)
+            .get(&pool_key_for(&owner))
             .cloned()
             .expect("origin must be reusable before terminal publication");
         assert_eq!(events.socket_id(), Some(pooled.socket_id));
@@ -3571,7 +3594,7 @@ mod tests {
             WS_POOL
                 .lock()
                 .unwrap()
-                .get(&owner)
+                .get(&pool_key_for(&owner))
                 .is_none_or(|pooled| !Arc::ptr_eq(pooled, &exact)),
             "the exact completed socket must not remain pooled"
         );
@@ -3588,18 +3611,41 @@ mod tests {
         let sibling_owner = agent_owner("test-session", "sibling-agent");
         {
             let mut guard = WS_POOL.lock().unwrap();
-            guard.insert(first_owner.clone(), Arc::new(PoolEntry::new(first_stream)));
             guard.insert(
-                sibling_owner.clone(),
+                pool_key_for(&first_owner),
+                Arc::new(PoolEntry::new(first_stream)),
+            );
+            guard.insert(
+                pool_key_for(&sibling_owner),
                 Arc::new(PoolEntry::new(second_stream)),
             );
         }
-        assert!(WS_POOL.lock().unwrap().contains_key(&first_owner));
-        assert!(WS_POOL.lock().unwrap().contains_key(&sibling_owner));
+        assert!(
+            WS_POOL
+                .lock()
+                .unwrap()
+                .contains_key(&pool_key_for(&first_owner))
+        );
+        assert!(
+            WS_POOL
+                .lock()
+                .unwrap()
+                .contains_key(&pool_key_for(&sibling_owner))
+        );
 
         invalidate_codex_websocket_pool_owner(&first_owner);
-        assert!(!WS_POOL.lock().unwrap().contains_key(&first_owner));
-        assert!(WS_POOL.lock().unwrap().contains_key(&sibling_owner));
+        assert!(
+            !WS_POOL
+                .lock()
+                .unwrap()
+                .contains_key(&pool_key_for(&first_owner))
+        );
+        assert!(
+            WS_POOL
+                .lock()
+                .unwrap()
+                .contains_key(&pool_key_for(&sibling_owner))
+        );
         clear_codex_websocket_pool_for_tests();
     }
 
@@ -3628,10 +3674,10 @@ mod tests {
         invalidate_codex_websocket_pool_key(session_id);
 
         let pool = WS_POOL.lock().unwrap();
-        assert!(!pool.contains_key(&main));
-        assert!(!pool.contains_key(&first_agent));
-        assert!(!pool.contains_key(&second_agent));
-        assert!(pool.contains_key(&other_session));
+        assert!(!pool.contains_key(&pool_key_for(&main)));
+        assert!(!pool.contains_key(&pool_key_for(&first_agent)));
+        assert!(!pool.contains_key(&pool_key_for(&second_agent)));
+        assert!(pool.contains_key(&pool_key_for(&other_session)));
         drop(pool);
         clear_codex_websocket_pool_for_tests();
     }
@@ -3669,7 +3715,7 @@ mod tests {
         invalidate_codex_websocket_pool_socket(&missing_owner, Some(pooled.socket_id));
 
         assert!(Arc::ptr_eq(
-            WS_POOL.lock().unwrap().get(&owner).unwrap(),
+            WS_POOL.lock().unwrap().get(&pool_key_for(&owner)).unwrap(),
             &pooled
         ));
         clear_codex_websocket_pool_for_tests();
@@ -3999,7 +4045,10 @@ mod tests {
         let owner = agent_owner("binary-session", "binary-agent");
         {
             let mut guard = WS_POOL.lock().unwrap();
-            guard.insert(owner.clone(), Arc::new(PoolEntry::new(pooled_stream)));
+            guard.insert(
+                pool_key_for(&owner),
+                Arc::new(PoolEntry::new(pooled_stream)),
+            );
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4013,13 +4062,15 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
             .unwrap();
-        let err = match collect_ws_events(&mut ws, 1_000, Some(&owner), None, None).await {
+        let err = match collect_ws_events(&mut ws, 1_000, Some(&pool_key_for(&owner)), None, None)
+            .await
+        {
             Ok(_) => panic!("expected binary frame to fail"),
             Err(err) => err,
         };
 
         assert!(err.message.contains("binary frames"));
-        assert!(!WS_POOL.lock().unwrap().contains_key(&owner));
+        assert!(!WS_POOL.lock().unwrap().contains_key(&pool_key_for(&owner)));
     }
 
     #[tokio::test]
@@ -4030,7 +4081,10 @@ mod tests {
         let owner = main_owner("start-timeout-session");
         {
             let mut guard = WS_POOL.lock().unwrap();
-            guard.insert(owner.clone(), Arc::new(PoolEntry::new(pooled_stream)));
+            guard.insert(
+                pool_key_for(&owner),
+                Arc::new(PoolEntry::new(pooled_stream)),
+            );
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4054,16 +4108,17 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
             .unwrap();
-        let err = match collect_ws_events(&mut ws, 50, Some(&owner), None, None).await {
-            Ok(_) => panic!("expected response start timeout"),
-            Err(err) => err,
-        };
+        let err =
+            match collect_ws_events(&mut ws, 50, Some(&pool_key_for(&owner)), None, None).await {
+                Ok(_) => panic!("expected response start timeout"),
+                Err(err) => err,
+            };
 
         assert_eq!(
             err.detail.as_deref(),
             Some(WEBSOCKET_RESPONSE_START_TIMEOUT_DETAIL)
         );
-        assert!(!WS_POOL.lock().unwrap().contains_key(&owner));
+        assert!(!WS_POOL.lock().unwrap().contains_key(&pool_key_for(&owner)));
     }
 
     #[tokio::test]
@@ -4074,7 +4129,10 @@ mod tests {
         let owner = main_owner("response-idle-session");
         {
             let mut guard = WS_POOL.lock().unwrap();
-            guard.insert(owner.clone(), Arc::new(PoolEntry::new(pooled_stream)));
+            guard.insert(
+                pool_key_for(&owner),
+                Arc::new(PoolEntry::new(pooled_stream)),
+            );
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4099,14 +4157,15 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
             .unwrap();
-        let err = match collect_ws_events(&mut ws, 50, Some(&owner), None, None).await {
-            Ok(_) => panic!("expected response idle timeout"),
-            Err(err) => err,
-        };
+        let err =
+            match collect_ws_events(&mut ws, 50, Some(&pool_key_for(&owner)), None, None).await {
+                Ok(_) => panic!("expected response idle timeout"),
+                Err(err) => err,
+            };
 
         assert!(err.message.contains("idle timeout"));
         assert_eq!(err.detail, None);
-        assert!(!WS_POOL.lock().unwrap().contains_key(&owner));
+        assert!(!WS_POOL.lock().unwrap().contains_key(&pool_key_for(&owner)));
     }
 
     #[tokio::test(start_paused = true)]

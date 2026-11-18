@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::request_identity::ConversationIdentity;
 
+use super::translate::reasoning_signature::ReasoningAccount;
 use super::translate::request::{ResponsesInputItem, ResponsesRequest};
 
 const TTL_MS: u64 = 30 * 60 * 1000;
@@ -64,6 +65,7 @@ pub(crate) struct ContinuationReservation {
     candidate: ContinuationCandidate,
     owner: Option<ConversationIdentity>,
     origin_socket_id: Option<u64>,
+    account: ReasoningAccount,
 }
 
 impl ContinuationReservation {
@@ -76,7 +78,13 @@ impl ContinuationReservation {
             candidate,
             owner,
             origin_socket_id,
+            account: ReasoningAccount::default(),
         }
+    }
+
+    fn for_account(mut self, account: &ReasoningAccount) -> Self {
+        self.account = account.clone();
+        self
     }
 
     pub(crate) fn from_public_candidate(candidate: &ContinuationCandidate) -> Self {
@@ -108,6 +116,10 @@ impl ContinuationReservation {
         self.owner.as_ref()
     }
 
+    pub(crate) fn account(&self) -> &ReasoningAccount {
+        &self.account
+    }
+
     pub(crate) fn turn_id(&self) -> Option<u64> {
         self.candidate.turn_id
     }
@@ -125,7 +137,7 @@ impl ContinuationReservation {
         candidate.previous_response_id = None;
         candidate.input_delta = None;
         candidate.disabled_reason = Some("full_context_retry".to_string());
-        Self::new(candidate, self.owner.clone(), None)
+        Self::new(candidate, self.owner.clone(), None).for_account(&self.account)
     }
 }
 
@@ -152,6 +164,7 @@ pub(crate) fn continuation_candidate_for_owner(
     enabled: bool,
 ) -> ContinuationReservation {
     continuation_candidate_inner(owner, body, enabled, "missing_identity")
+        .for_account(&body.reasoning_account)
 }
 
 fn continuation_candidate_inner(
@@ -582,8 +595,11 @@ fn prompt_signature(body: &ResponsesRequest) -> String {
         Some(o) => o,
         None => return String::new(),
     };
+    let account_key = "reasoning_account".to_string();
+    let account = serde_json::json!(body.reasoning_account.tag());
     let mut entries: Vec<(&String, &serde_json::Value)> =
         obj.iter().filter(|(k, _)| *k != "input").collect();
+    entries.push((&account_key, &account));
     entries.sort_by_key(|(a, _)| *a);
     let mut sig = String::from("{");
     for (i, (key, val)) in entries.iter().enumerate() {

@@ -164,12 +164,21 @@ impl Registry {
         None
     }
 
-    pub fn unknown_model_message(&self) -> String {
-        self.unknown_model_message_for(|_| true)
+    pub async fn unknown_model_message(self: &Arc<Self>) -> String {
+        self.unknown_model_message_off_thread(false).await
     }
 
-    pub fn unknown_codex_model_message(&self) -> String {
-        self.unknown_model_message_for(|provider| provider == "codex")
+    pub async fn unknown_codex_model_message(self: &Arc<Self>) -> String {
+        self.unknown_model_message_off_thread(true).await
+    }
+
+    async fn unknown_model_message_off_thread(self: &Arc<Self>, codex_only: bool) -> String {
+        let registry = self.clone();
+        tokio::task::spawn_blocking(move || {
+            registry.unknown_model_message_for(|provider| !codex_only || provider == "codex")
+        })
+        .await
+        .unwrap_or_default()
     }
 
     fn unknown_model_message_for(&self, include: impl Fn(&str) -> bool) -> String {
@@ -286,8 +295,8 @@ mod tests {
         assert_eq!(registry.list_provider_names(), ["anthropic", "codex"]);
     }
 
-    #[test]
-    fn unknown_codex_model_message_lists_only_codex() {
+    #[tokio::test]
+    async fn unknown_codex_model_message_lists_only_codex() {
         let provider = |login_hint| {
             Arc::new(ToyProvider {
                 name: "codex",
@@ -303,26 +312,28 @@ mod tests {
             }) as Arc<dyn Provider>
         };
 
-        let signed_in =
-            Registry::from_providers(AliasProvider::Anthropic, [anthropic(), provider(None)]);
+        let signed_in = Arc::new(Registry::from_providers(
+            AliasProvider::Anthropic,
+            [anthropic(), provider(None)],
+        ));
         assert_eq!(
-            signed_in.unknown_codex_model_message(),
+            signed_in.unknown_codex_model_message().await,
             "Supported: codex: gpt-toy."
         );
 
-        let signed_out = Registry::from_providers(
+        let signed_out = Arc::new(Registry::from_providers(
             AliasProvider::Anthropic,
             [anthropic(), provider(Some("run `codex login`"))],
-        );
+        ));
         assert_eq!(
-            signed_out.unknown_codex_model_message(),
+            signed_out.unknown_codex_model_message().await,
             "Not signed in: codex (run `codex login`)."
         );
     }
 
-    #[test]
-    fn signed_out_backends_are_named_instead_of_listed() {
-        let registry = Registry::from_providers(
+    #[tokio::test]
+    async fn signed_out_backends_are_named_instead_of_listed() {
+        let registry = Arc::new(Registry::from_providers(
             AliasProvider::Anthropic,
             [
                 Arc::new(ToyProvider {
@@ -336,7 +347,7 @@ mod tests {
                     login_hint: Some("run `codex login`"),
                 }),
             ],
-        );
+        ));
 
         assert_eq!(
             registry.signed_out(),
@@ -346,7 +357,7 @@ mod tests {
             registry.provider_for_model("gpt-toy", None).unwrap().name(),
             "codex"
         );
-        let message = registry.unknown_model_message();
+        let message = registry.unknown_model_message().await;
         assert!(message.contains("claude-toy") && !message.contains("gpt-toy"));
         assert!(message.ends_with("Not signed in: codex (run `codex login`)."));
     }

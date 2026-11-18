@@ -9,6 +9,10 @@ where
     fn save(&self, value: T) -> Result<()>;
     fn clear(&self) -> Result<()>;
     fn path(&self) -> String;
+
+    fn lock_for_refresh(&self) -> Result<Option<std::fs::File>> {
+        Ok(None)
+    }
 }
 
 pub fn constant_time_eq(candidate: &str, secret: &str) -> bool {

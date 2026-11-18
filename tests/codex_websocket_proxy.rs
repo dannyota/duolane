@@ -170,42 +170,6 @@ struct CapturedProxyRequest {
     has_proxy_authorization: bool,
 }
 
-#[allow(clippy::result_large_err)]
-async fn spawn_websocket_proxy() -> (
-    String,
-    oneshot::Receiver<CapturedProxyRequest>,
-    tokio::task::JoinHandle<()>,
-) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let (captured_tx, captured_rx) = oneshot::channel();
-    let task = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let websocket = tokio_tungstenite::accept_hdr_async(
-            stream,
-            move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                  response| {
-                let _ = captured_tx.send(CapturedProxyRequest {
-                    target: request.uri().to_string(),
-                    has_proxy_authorization: request
-                        .headers()
-                        .contains_key(http::header::PROXY_AUTHORIZATION),
-                });
-                Ok(response)
-            },
-        )
-        .await
-        .unwrap();
-        let mut websocket = websocket;
-        send_codex_response(&mut websocket).await;
-    });
-    (
-        format!("http://proxy-user:proxy-pass@{addr}"),
-        captured_rx,
-        task,
-    )
-}
-
 async fn spawn_direct_websocket() -> (String, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -448,30 +412,26 @@ async fn codex_websocket_inherits_environment_proxy_configuration() {
     write_codex_auth(config_dir.path());
 
     clear_codex_websocket_pool_for_tests();
-    let (proxy_url, captured, proxy_task) = spawn_websocket_proxy().await;
+    let (https_proxy_url, captured, stop, proxy_task) =
+        spawn_rejecting_proxy(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n").await;
     let all_proxy_trap = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    {
+    let status = {
         let mut guards = clear_proxy_environment();
         guards.extend(configure_codex(
             config_dir.path(),
-            "http://codex.invalid/backend-api/codex/responses",
+            "https://codex.invalid:4443/backend-api/codex/responses",
         ));
-        guards.push(EnvGuard::set("HTTP_PROXY", &proxy_url));
+        guards.push(EnvGuard::set("HTTPS_PROXY", &https_proxy_url));
         guards.push(EnvGuard::set(
             "ALL_PROXY",
             format!("http://{}", all_proxy_trap.local_addr().unwrap()),
         ));
-        let (status, body) = call_messages("proxy-env-http").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("proxy env ok"));
-    }
-    let captured = captured.await.unwrap();
-    assert_eq!(
-        captured.target,
-        "http://codex.invalid/backend-api/codex/responses"
-    );
-    assert!(captured.has_proxy_authorization);
+        call_messages("proxy-env-scheme").await.0
+    };
+    let _ = stop.send(());
     proxy_task.await.unwrap();
+    assert!(!status.is_success());
+    assert_connects_through_proxy(&captured);
     assert!(
         tokio::time::timeout(Duration::from_millis(100), all_proxy_trap.accept())
             .await
@@ -479,24 +439,21 @@ async fn codex_websocket_inherits_environment_proxy_configuration() {
     );
 
     clear_codex_websocket_pool_for_tests();
-    let (all_proxy_url, captured, proxy_task) = spawn_websocket_proxy().await;
-    {
+    let (all_proxy_url, captured, stop, proxy_task) =
+        spawn_rejecting_proxy(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n").await;
+    let status = {
         let mut guards = clear_proxy_environment();
         guards.extend(configure_codex(
             config_dir.path(),
-            "http://all-proxy.invalid/backend-api/codex/responses",
+            "https://codex.invalid:4443/backend-api/codex/responses",
         ));
         guards.push(EnvGuard::set("ALL_PROXY", &all_proxy_url));
-        let (status, body) = call_messages("proxy-env-all").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("proxy env ok"));
-    }
-    let captured = captured.await.unwrap();
-    assert_eq!(
-        captured.target,
-        "http://all-proxy.invalid/backend-api/codex/responses"
-    );
+        call_messages("proxy-env-all").await.0
+    };
+    let _ = stop.send(());
     proxy_task.await.unwrap();
+    assert!(!status.is_success());
+    assert_connects_through_proxy(&captured);
 
     clear_codex_websocket_pool_for_tests();
     let (direct_url, direct_task) = spawn_direct_websocket().await;
@@ -526,12 +483,11 @@ async fn codex_websocket_inherits_environment_proxy_configuration() {
     {
         let mut guards = clear_proxy_environment();
         guards.extend(configure_codex(config_dir.path(), &direct_url));
-        guards.push(EnvGuard::set(
-            "HTTP_PROXY",
-            format!("http://{}", trap_proxy.local_addr().unwrap()),
-        ));
-        guards.push(EnvGuard::set("NO_PROXY", "127.0.0.1"));
-        let (status, body) = call_messages("proxy-env-no-proxy").await;
+        let trap_url = format!("http://{}", trap_proxy.local_addr().unwrap());
+        for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+            guards.push(EnvGuard::set(name, &trap_url));
+        }
+        let (status, body) = call_messages("proxy-env-loopback-direct").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("proxy env ok"));
     }
@@ -611,47 +567,34 @@ async fn codex_websocket_inherits_environment_proxy_configuration() {
     assert_eq!(captured.lock().unwrap().len(), 1);
 
     clear_codex_websocket_pool_for_tests();
-    let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let origin_url = format!("http://{}/responses", origin.local_addr().unwrap());
     let (failing_proxy_url, captured, stop, proxy_task) = spawn_rejecting_proxy(
         b"HTTP/1.1 502 Bad Gateway\r\nRetry-After: 120\r\nContent-Length: 0\r\n\r\n",
     )
     .await;
     let (status, _) = {
         let mut guards = clear_proxy_environment();
-        guards.extend(configure_codex(config_dir.path(), &origin_url));
-        guards.push(EnvGuard::set("HTTP_PROXY", &failing_proxy_url));
+        guards.extend(configure_codex(
+            config_dir.path(),
+            "https://codex.invalid:4443/backend-api/codex/responses",
+        ));
+        guards.push(EnvGuard::set("HTTPS_PROXY", &failing_proxy_url));
         guards.push(EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "auto"));
         call_messages("proxy-env-no-direct-fallback").await
     };
     let _ = stop.send(());
     proxy_task.await.unwrap();
     assert!(!status.is_success());
-    {
-        let captured = captured.lock().unwrap();
-        assert!(
-            captured
-                .iter()
-                .any(|request| request.target.starts_with("GET http://"))
-        );
-        assert!(
-            captured
-                .iter()
-                .any(|request| request.target.starts_with("POST http://"))
-        );
-        assert!(
-            captured
-                .iter()
-                .all(|request| request.has_proxy_authorization)
-        );
-    }
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), origin.accept())
-            .await
-            .is_err()
-    );
+    assert_connects_through_proxy(&captured);
 
     clear_codex_websocket_pool_for_tests();
+}
+
+fn assert_connects_through_proxy(captured: &Mutex<Vec<CapturedProxyRequest>>) {
+    let captured = captured.lock().unwrap();
+    assert!(!captured.is_empty());
+    assert!(captured.iter().all(|request| {
+        request.target.starts_with("CONNECT codex.invalid:4443 ") && request.has_proxy_authorization
+    }));
 }
 
 #[tokio::test]
