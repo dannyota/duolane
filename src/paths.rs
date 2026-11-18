@@ -21,7 +21,11 @@ impl Default for DirResolverEnv {
 }
 
 pub fn resolve_config_dir(deps: &DirResolverEnv) -> PathBuf {
-    if let Some(override_dir) = deps.env.get("DUOLANE_CONFIG_DIR") {
+    if let Some(override_dir) = deps
+        .env
+        .get("DUOLANE_CONFIG_DIR")
+        .filter(|dir| !dir.is_empty())
+    {
         return Path::new(override_dir).to_path_buf();
     }
 
@@ -43,7 +47,11 @@ pub fn resolve_config_dir(deps: &DirResolverEnv) -> PathBuf {
 }
 
 pub fn resolve_state_dir(deps: &DirResolverEnv) -> PathBuf {
-    if let Some(override_dir) = deps.env.get("DUOLANE_STATE_DIR") {
+    if let Some(override_dir) = deps
+        .env
+        .get("DUOLANE_STATE_DIR")
+        .filter(|dir| !dir.is_empty())
+    {
         return Path::new(override_dir).to_path_buf();
     }
 

@@ -10,12 +10,18 @@ extern "C" fn remove_root() {
     }
 }
 
+fn fail(message: &str) -> ! {
+    eprintln!("hermetic test isolation failed: {message}");
+    std::process::abort()
+}
+
 extern "C" fn isolate_process_environment() {
-    let root = std::env::temp_dir().join(format!("duolane-hermetic-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    if std::fs::create_dir_all(&root).is_err() {
-        return;
-    }
+    let dir = tempfile::Builder::new()
+        .prefix("duolane-hermetic-")
+        .tempdir()
+        .unwrap_or_else(|err| fail(&format!("cannot create private root: {err}")));
+    let root = dir.path().to_path_buf();
+    std::mem::forget(dir);
     let vars = [
         ("HOME", root.join("home")),
         ("USERPROFILE", root.join("home")),
@@ -29,15 +35,31 @@ extern "C" fn isolate_process_environment() {
         ("CODEX_HOME", root.join("codex")),
     ];
     for (name, path) in vars {
-        let _ = std::fs::create_dir_all(&path);
+        if let Err(err) = std::fs::create_dir_all(&path) {
+            fail(&format!("cannot create {}: {err}", path.display()));
+        }
         unsafe { std::env::set_var(name, &path) };
     }
     unsafe {
         std::env::remove_var("DUOLANE_CODEX_AUTH_FILE");
-        atexit(remove_root);
+        if atexit(remove_root) != 0 {
+            fail("cannot register cleanup");
+        }
     }
     let _ = ROOT.set(root);
 }
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows"
+)))]
+compile_error!(
+    "hermetic test isolation supports linux, android, freebsd, macos, ios and windows only"
+);
 
 #[used]
 #[cfg_attr(
