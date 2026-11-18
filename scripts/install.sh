@@ -39,7 +39,7 @@ detect_platform() {
 		echo ""
 		echo "${BIN_NAME} supports macOS and Linux."
 		echo "For other platforms, build from source with Cargo:"
-		echo "  git clone https://github.com/${REPO}"
+		echo "  cargo install --git https://github.com/${REPO} --locked"
 		echo ""
 		exit 1
 		;;
@@ -53,7 +53,7 @@ detect_platform() {
 		echo ""
 		echo "${BIN_NAME} prebuilt binaries are available for amd64 and arm64."
 		echo "For other architectures, build from source with Cargo:"
-		echo "  git clone https://github.com/${REPO}"
+		echo "  cargo install --git https://github.com/${REPO} --locked"
 		echo ""
 		exit 1
 		;;
