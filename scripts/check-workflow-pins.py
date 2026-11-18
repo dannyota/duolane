@@ -17,7 +17,7 @@ PIN = re.compile(
     r"\s*(?:-\s+)?uses: ([\w.-]+/[\w.-]+)(?:/[\w./-]+)?@([0-9a-f]{40}) # v([0-9]+\.[0-9]+\.[0-9]+)\s*"
 )
 NPM_TOOLS = ("prettier", "markdownlint-cli2")
-REQUIRED_TOOLS = ("rust", "cargo-deny", "gitleaks", "node", *NPM_TOOLS)
+REQUIRED_TOOLS = ("rust", "cargo-deny", "cargo-nextest", "gitleaks", "node", *NPM_TOOLS)
 
 
 def workflow_files():

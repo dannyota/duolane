@@ -1,4 +1,1 @@
 # Ratchet caps at exact line counts. Never add entries or raise caps; lower a cap when its file shrinks.
-1135 src/monitor.rs
-725 src/monitor/mock.rs
-1784 src/tui.rs

@@ -325,7 +325,7 @@ impl WebSocketConnectGate {
     pub(super) async fn wait_to_start(&self, before_start: impl std::future::Future<Output = ()>) {
         let mut last_start = self.last_start.lock().await;
         if let Some(previous) = *last_start {
-            tokio::time::sleep_until(previous + self.start_spacing).await;
+            crate::retry::sleep_until(previous + self.start_spacing).await;
         }
         before_start.await;
         *last_start = Some(tokio::time::Instant::now());

@@ -7,9 +7,9 @@ Bug reports and focused fixes are welcome. Read the
 ## Setup
 
 Install the tools pinned in `.tool-versions`. rustup reads the Rust version from
-`rust-toolchain.toml`. Install Node, cargo-deny, and gitleaks at their pinned
-versions. The scripts need Python 3.11 or later. Then install the Markdown tools
-and the pre-commit hook:
+`rust-toolchain.toml`. Install Node, cargo-deny, cargo-nextest, and gitleaks at
+their pinned versions. The scripts need Python 3.11 or later. Then install the
+Markdown tools and the pre-commit hook:
 
 ```bash
 npm ci --ignore-scripts

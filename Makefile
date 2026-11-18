@@ -20,12 +20,14 @@ fmt: ## Check Rust formatting; fix with cargo fmt --all
 lint: ## Run clippy with warnings denied
 	cargo clippy --locked --all-targets -- -D warnings
 
-test: ## Run tests single-threaded with an empty home under target/
+test: ## Run tests with nextest and an empty home under target/
 	rm -rf "$(TEST_HOME)"
 	mkdir -p "$(TEST_HOME)"
 	env -u CODEX_HOME CARGO_HOME="$(REAL_CARGO_HOME)" RUSTUP_HOME="$(REAL_RUSTUP_HOME)" \
 		HOME="$(TEST_HOME)" XDG_CONFIG_HOME="$(TEST_HOME)" XDG_STATE_HOME="$(TEST_HOME)" XDG_DATA_HOME="$(TEST_HOME)" \
-		cargo test --locked -- --test-threads=1
+		bash -c 'if cargo nextest --version >/dev/null 2>&1; then cargo nextest run --locked; \
+		else echo "cargo-nextest is missing, so tests run single-threaded and slowly; install it with: cargo install --locked cargo-nextest" >&2; \
+		cargo test --locked -- --test-threads=1; fi'
 	@if [[ -n "$$(ls -A "$(TEST_HOME)")" ]]; then echo "tests wrote under $(TEST_HOME):" >&2; find "$(TEST_HOME)" >&2; exit 1; fi
 
 deny: ## Check advisories, licenses, bans, and sources

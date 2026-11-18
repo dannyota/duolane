@@ -32,8 +32,10 @@ cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours
 stable = re.compile(r"v?([0-9]+)\.([0-9]+)\.([0-9]+)")
 data = json.load(sys.stdin)
 if sys.argv[1] == "github":
-    found = [(r["tag_name"], r["published_at"]) for r in data
-             if not r["draft"] and not r["prerelease"] and r["published_at"]]
+    prefix = sys.argv[2] if len(sys.argv) > 2 else ""
+    found = [(r["tag_name"].removeprefix(prefix), r["published_at"]) for r in data
+             if not r["draft"] and not r["prerelease"] and r["published_at"]
+             and r["tag_name"].startswith(prefix)]
 elif sys.argv[1] == "node":
     found = [(r["version"], r["date"] + "T23:59:59Z") for r in data
              if r["lts"] and r["version"].startswith(f"v{sys.argv[2]}.")]
@@ -45,7 +47,7 @@ ready = [(tuple(map(int, m.groups())), tag) for tag, when in found
 print(max(ready)[1].removeprefix("v"))
 PYTHON
 
-github_latest() { github "repos/$1/releases?per_page=100" | python3 -I -c "$PICK" github; }
+github_latest() { github "repos/$1/releases?per_page=100" | python3 -I -c "$PICK" github "${2:-}"; }
 npm_latest() { curl -fsSL --proto '=https' "https://registry.npmjs.org/$1" | python3 -I -c "$PICK" npm; }
 node_latest() { curl -fsSL --proto '=https' https://nodejs.org/dist/index.json | python3 -I -c "$PICK" node "$1"; }
 
@@ -56,6 +58,8 @@ latest=$(node_latest "${node%%.*}")
 check node "$node" "$latest"
 latest=$(github_latest EmbarkStudios/cargo-deny)
 check cargo-deny "$(pin cargo-deny)" "$latest"
+latest=$(github_latest nextest-rs/nextest cargo-nextest-)
+check cargo-nextest "$(pin cargo-nextest)" "$latest"
 latest=$(github_latest gitleaks/gitleaks)
 check gitleaks "$(pin gitleaks)" "$latest"
 latest=$(npm_latest prettier)
