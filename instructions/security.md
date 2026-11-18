@@ -11,9 +11,10 @@ The [security design](../docs/design/security.md) owns the requirements. These r
 ## Dependencies
 
 - Stay on the latest stable Rust, crates, tools, and GitHub Actions. Move major versions one at a time, each with the full test suite.
-- Wait 3 days after a crate version is published before adopting it, unless it fixes a vulnerability that affects this product.
+- Wait 72 hours after a crate version is published before adopting it, unless it fixes a vulnerability that affects this product. `make crate-age` enforces this on pull requests; exempt a vulnerability fix with a `name@version reason` line in the `CRATE_AGE_EXEMPT` repository variable.
 - Before adding a crate, check its latest version, license, maintenance, and transitive dependencies, and record the reason in the owning design or plan.
-- `cargo deny check advisories` findings block merge. Suppress only a verified false positive, with its reason.
+- `cargo deny --locked check` findings block merge. Suppress only a verified false positive, with its reason.
+- The npm advisories reached through markdownlint-cli2, picomatch ReDoS (GHSA-fc5q-39xc-vjpf, high) and KaTeX (GHSA-238p-pmpm-9mq7, low), are accepted because the Markdown tools read only repository Markdown in a job with a read-only token. Revisit them when a fixed release exists. CI runs `npm ci` without `--no-audit` so they stay visible.
 
 ## Workflows
 

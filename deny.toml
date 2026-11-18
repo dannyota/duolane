@@ -7,3 +7,23 @@ ignore = [
   { id = "RUSTSEC-2026-0002", reason = "lru through ratatui 0.29 with IterMut unused, removed by the ratatui upgrade" },
   { id = "RUSTSEC-2026-0253", reason = "lru through ratatui 0.29 with pop unused, removed by the ratatui upgrade" },
 ]
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "BSD-3-Clause",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

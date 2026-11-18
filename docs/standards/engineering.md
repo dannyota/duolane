@@ -45,12 +45,21 @@ drift from the code and mislead agents (owner, 2026-11-18).
 - A rule the code must keep belongs in the design that owns it, or in a test
   that fails when it breaks.
 
+`scripts/check-comments.py` fails on any comment in a tracked Rust file unless
+`scripts/comments-allowlist.txt` lists it. Each allowlist line is
+`path:line: text`, exactly as the script prints the finding, and lines starting
+with `#` are ignored.
+
 ## File size
 
 Markdown stays at or under 400 lines. Rust stays at or under 700 lines, not
-counting `#[cfg(test)]` modules or files under `tests/`. Split by concern and
-name each file after its concern. Plans under `docs/plans/` are exempt because
-they are deleted when their work lands.
+counting a top-level `#[cfg(test)]` module or files directly in `tests/` and
+under `tests/support/`. Split by concern and name each file after its concern.
+Plans under `docs/plans/` are exempt because they are deleted when their work
+lands.
+
+`scripts/lengths-baseline.txt` caps files that were already over the limit, and
+a cap may only fall. A baselined file cannot be renamed; split it instead.
 
 Prettier formats human Markdown and markdownlint checks it, using the repository
 configuration.

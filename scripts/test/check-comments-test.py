@@ -1,0 +1,193 @@
+#!/usr/bin/env -S python3 -I
+# Usage: python3 -I scripts/test/check-comments-test.py
+import importlib.util
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+SCRIPT = Path(__file__).resolve().parent.parent / "check-comments.py"
+sys.dont_write_bytecode = True
+SPEC = importlib.util.spec_from_file_location("check_comments", SCRIPT)
+check_comments = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(check_comments)
+
+
+def found(source):
+    return list(check_comments.findings("src/lib.rs", source))
+
+
+class Lexer(unittest.TestCase):
+    def test_line_and_doc_comments(self):
+        source = "fn a() {} // one\n/// two\n//! three\n"
+        self.assertEqual(found(source), [
+            "src/lib.rs:1: // one",
+            "src/lib.rs:2: /// two",
+            "src/lib.rs:3: //! three",
+        ])
+
+    def test_block_comment_reports_each_line(self):
+        source = "let a = 1; /* one\n\n   two */ let b = 2;\n"
+        self.assertEqual(found(source), [
+            "src/lib.rs:1: /* one",
+            "src/lib.rs:3: two */",
+        ])
+
+    def test_nested_block_comment_ends_at_outer_close(self):
+        source = "/* outer /* inner */ still outer */ let a = '/'; // tail\n"
+        self.assertEqual(found(source), [
+            "src/lib.rs:1: /* outer /* inner */ still outer */",
+            "src/lib.rs:1: // tail",
+        ])
+
+    def test_string_literals_hide_markers(self):
+        for literal in [
+            '"// no"',
+            '"/* no */"',
+            '"escaped \\" // no"',
+            '"ends in backslash \\\\"',
+            'r"// no"',
+            'r#"quote " // no"#',
+            'r##"close "# // no"##',
+            'b"// no"',
+            'br"// no"',
+            'br#"/* no */"#',
+            'c"// no"',
+            'cr#"// no"#',
+        ]:
+            with self.subTest(literal=literal):
+                source = f"let s = {literal}; // yes\n"
+                self.assertEqual(found(source), ["src/lib.rs:1: // yes"])
+
+    def test_char_literals_hide_markers(self):
+        for literal in [
+            "'/'",
+            "'*'",
+            "'\"'",
+            "'\\''",
+            "'\\\\'",
+            "'\\u{2F}'",
+            "b'/'",
+            "b'\"'",
+            "b'\\''",
+            "b'\\\\'",
+        ]:
+            with self.subTest(literal=literal):
+                source = f'let c = {literal}; let s = "x"; // yes\n'
+                self.assertEqual(found(source), ["src/lib.rs:1: // yes"])
+
+    def test_lifetimes_do_not_start_literals(self):
+        source = "fn f<'a>(x: &'a str) -> &'a str { x } // yes\nlet s = \"// no\";\n"
+        self.assertEqual(found(source), ["src/lib.rs:1: // yes"])
+
+    def test_raw_identifier_is_not_a_raw_string(self):
+        source = 'let r#type = "x"; let bar = 1; // yes\n'
+        self.assertEqual(found(source), ["src/lib.rs:1: // yes"])
+
+
+class DocAttributes(unittest.TestCase):
+    def test_doc_attributes_are_findings(self):
+        for source in [
+            '#[doc = "x"]\nfn a() {}\n',
+            '#![doc = "x"]\n',
+            '# ! [ doc = "x" ]\n',
+            '#[cfg_attr(feature = "docs", doc = "x")]\nfn a() {}\n',
+            '#[cfg_attr(all(), cfg_attr(test, doc = include_str!("a.md")))]\nfn a() {}\n',
+            '#[doc = concat!("a", "b")]\nfn a() {}\n',
+        ]:
+            with self.subTest(source=source):
+                line = source.split("\n")[0].strip()
+                self.assertEqual(found(source), [f"src/lib.rs:1: {line}"])
+
+    def test_multiline_doc_attribute_reports_the_doc_line(self):
+        source = "#[cfg_attr(\n    test,\n    doc = \"x\"\n)]\nfn a() {}\n"
+        self.assertEqual(found(source), ['src/lib.rs:3: doc = "x"'])
+
+    def test_non_doc_code_is_not_a_finding(self):
+        for source in [
+            "let doc = 1;\n",
+            "#[doc(hidden)]\nfn a() {}\n",
+            '#[doc(alias = "x")]\nfn a() {}\n',
+            "#[cfg(doc)]\nfn a() {}\n",
+            'let s = "#[doc = \\"x\\"]";\n',
+            'let s = r#"#[doc = "x"]"#;\n',
+            '#[cfg(feature = "doc = x")]\nfn a() {}\n',
+            "#[cfg(test)]\nfn a() { if doc == 1 {} }\n",
+        ]:
+            with self.subTest(source=source):
+                self.assertEqual(found(source), [])
+
+
+class Gate(unittest.TestCase):
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp(prefix="duolane-check-comments."))
+        self.addCleanup(shutil.rmtree, self.repo)
+        (self.repo / "scripts").mkdir()
+        shutil.copy(SCRIPT, self.repo / "scripts/check-comments.py")
+        self.allow("")
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+
+    def allow(self, entries):
+        text = "# Format: see the engineering standard.\n" + entries
+        (self.repo / "scripts/comments-allowlist.txt").write_text(text)
+
+    def track(self, name, text):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        subprocess.run(["git", "-C", str(self.repo), "add", "--", name], check=True)
+
+    def run_gate(self):
+        result = subprocess.run(
+            [sys.executable, "-I", str(self.repo / "scripts/check-comments.py")],
+            capture_output=True, text=True,
+        )
+        return result.returncode, result.stdout.strip()
+
+    def test_clean_tree_passes(self):
+        self.track("src/lib.rs", 'pub fn a() -> &\'static str { "// no" }\n')
+        self.assertEqual(self.run_gate(), (0, "check-comments: ok"))
+
+    def test_comment_fails(self):
+        self.track("src/lib.rs", "fn a() {}\n// why\n")
+        self.assertEqual(self.run_gate(), (1, "src/lib.rs:2: // why"))
+
+    def test_untracked_file_is_ignored(self):
+        self.track("src/lib.rs", "fn a() {}\n")
+        (self.repo / "src/extra.rs").write_text("// local\n")
+        self.assertEqual(self.run_gate(), (0, "check-comments: ok"))
+
+    def test_allowlisted_entry_passes(self):
+        self.track("src/lib.rs", "fn a() {}\n// @generated by tool\n")
+        self.allow("src/lib.rs:2: // @generated by tool\n")
+        self.assertEqual(self.run_gate(), (0, "check-comments: ok"))
+
+    def test_allowlist_needs_exact_line(self):
+        self.track("src/lib.rs", "\nfn a() {}\n// @generated by tool\n")
+        self.allow("src/lib.rs:2: // @generated by tool\n")
+        self.assertEqual(self.run_gate(), (1, "\n".join([
+            "src/lib.rs:3: // @generated by tool",
+            "scripts/comments-allowlist.txt: stale entry: src/lib.rs:2: // @generated by tool",
+        ])))
+
+    def test_doc_attribute_fails(self):
+        self.track("src/lib.rs", '#![doc = "crate"]\nfn a() {}\n')
+        self.assertEqual(self.run_gate(), (1, 'src/lib.rs:1: #![doc = "crate"]'))
+
+    def test_inc_files_are_checked(self):
+        self.track("src/generated.inc", "fn a() {}\n// why\n")
+        self.assertEqual(self.run_gate(), (1, "src/generated.inc:2: // why"))
+
+    def test_allowlist_needs_exact_text(self):
+        self.track("src/lib.rs", "fn a() {}\n// @generated by other\n")
+        self.allow("src/lib.rs:2: // @generated by tool\n")
+        self.assertEqual(self.run_gate(), (1, "\n".join([
+            "src/lib.rs:2: // @generated by other",
+            "scripts/comments-allowlist.txt: stale entry: src/lib.rs:2: // @generated by tool",
+        ])))
+
+
+if __name__ == "__main__":
+    unittest.main()
