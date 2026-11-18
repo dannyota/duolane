@@ -3146,6 +3146,7 @@ mod tests {
     async fn retry_exhaustion_aborts_live_request_state_after_eleven_attempts() {
         let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
         let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
+        crate::retry::set_zero_retry_delay_for_tests(true);
         let status = run_live_failure_case(
             "live-retry-exhaustion-cleanup",
             serde_json::json!({
@@ -3164,6 +3165,7 @@ mod tests {
         )
         .await
         .status();
+        crate::retry::set_zero_retry_delay_for_tests(false);
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     }
 

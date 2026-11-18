@@ -408,6 +408,7 @@ async fn spawn_rejecting_proxy(
 #[tokio::test]
 async fn codex_websocket_inherits_environment_proxy_configuration() {
     let _env_lock = ENV_LOCK.lock().await;
+    let _zero_retry_delay = ZeroRetryDelayGuard::new();
     let config_dir = TempDir::new().unwrap();
     write_codex_auth(config_dir.path());
 

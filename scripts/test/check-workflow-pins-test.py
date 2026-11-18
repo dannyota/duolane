@@ -17,7 +17,7 @@ SPEC.loader.exec_module(check_workflow_pins)
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
-PINS = {"rust": "1.100.0", "node": "24.22.3", "cargo-deny": "0.20.2", "gitleaks": "8.30.1",
+PINS = {"rust": "1.100.0", "node": "24.22.3", "cargo-deny": "0.20.2", "cargo-nextest": "0.9.152", "gitleaks": "8.30.1",
         "prettier": "3.10.1", "markdownlint-cli2": "0.24.1"}
 
 

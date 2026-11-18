@@ -41,13 +41,32 @@ pub fn compute_backoff_delay(attempt: u32, retry_after: Option<&str>) -> Backoff
 
 static ZERO_RETRY_DELAY_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
+#[cfg(debug_assertions)]
+static ZERO_RETRY_DELAY_ENV: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var_os("DUOLANE_ZERO_RETRY_DELAY_FOR_TESTS").is_some());
+
 pub fn set_zero_retry_delay_for_tests(enabled: bool) {
     ZERO_RETRY_DELAY_FOR_TESTS.store(enabled, Ordering::SeqCst);
 }
 
+fn zero_retry_delay_enabled() -> bool {
+    #[cfg(debug_assertions)]
+    if *ZERO_RETRY_DELAY_ENV {
+        return true;
+    }
+    ZERO_RETRY_DELAY_FOR_TESTS.load(Ordering::SeqCst)
+}
+
 pub async fn sleep(ms: u64) {
-    if ZERO_RETRY_DELAY_FOR_TESTS.load(Ordering::SeqCst) {
+    if zero_retry_delay_enabled() {
         return;
     }
     tokio::time::sleep(Duration::from_millis(ms)).await;
+}
+
+pub async fn sleep_until(deadline: tokio::time::Instant) {
+    if zero_retry_delay_enabled() {
+        return;
+    }
+    tokio::time::sleep_until(deadline).await;
 }
