@@ -45,9 +45,8 @@ pub struct PreparedTranscription {
 }
 
 #[derive(Debug, Deserialize)]
-struct TranscriptionResponse<'a> {
-    #[serde(borrow)]
-    text: &'a str,
+struct TranscriptionResponse {
+    text: String,
 }
 
 pub struct CodexTranscriptionBackend {
@@ -277,7 +276,7 @@ async fn collect_response_body(
 }
 
 fn validate_success_response(body: &[u8]) -> Result<(), TranscriptionRequestError> {
-    let response: TranscriptionResponse<'_> = serde_json::from_slice(body).map_err(|_| {
+    let response: TranscriptionResponse = serde_json::from_slice(body).map_err(|_| {
         TranscriptionRequestError::upstream("Codex transcription service returned invalid JSON")
     })?;
     if response.text.trim().is_empty() {
@@ -496,5 +495,10 @@ mod tests {
         assert!(validate_success_response(br#"{"text":"hello"}"#).is_ok());
         assert!(validate_success_response(br#"{"text":""}"#).is_err());
         assert!(validate_success_response(br#"{}"#).is_err());
+    }
+
+    #[test]
+    fn transcript_with_json_escapes_is_valid() {
+        assert!(validate_success_response(br#"{"text":"say \"hi\" C:\\tmp\nnext"}"#).is_ok());
     }
 }

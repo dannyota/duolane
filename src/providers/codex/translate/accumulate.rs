@@ -2,11 +2,10 @@ use serde_json::Value;
 
 use crate::traffic::TrafficCapture;
 
-use super::IncompleteResponsePolicy;
 use super::reasoning_signature::ReasoningAccount;
 use super::reducer::{
     AnthropicUsage, ReducerEvent, UpstreamStreamError, map_codex_usage_to_anthropic,
-    reduce_upstream_bytes_with_policy,
+    reduce_upstream_bytes,
 };
 use super::web_search_compat::{WebSearchCompatContent, build_web_search_compat_blocks};
 
@@ -15,11 +14,10 @@ pub fn accumulate_response(
     message_id: &str,
     model: &str,
 ) -> Result<Value, anyhow::Error> {
-    accumulate_response_with_policy_and_traffic(
+    accumulate_response_with_traffic(
         upstream,
         message_id,
         model,
-        IncompleteResponsePolicy::Error,
         &ReasoningAccount::default(),
         None,
     )
@@ -32,36 +30,17 @@ pub fn accumulate_response_with_traffic(
     account: &ReasoningAccount,
     traffic: Option<&TrafficCapture>,
 ) -> Result<Value, anyhow::Error> {
-    accumulate_response_with_policy_and_traffic(
-        upstream,
-        message_id,
-        model,
-        IncompleteResponsePolicy::Error,
-        account,
-        traffic,
-    )
-}
-
-fn accumulate_response_with_policy_and_traffic(
-    upstream: &[u8],
-    message_id: &str,
-    model: &str,
-    incomplete_response_policy: IncompleteResponsePolicy,
-    account: &ReasoningAccount,
-    traffic: Option<&TrafficCapture>,
-) -> Result<Value, anyhow::Error> {
-    let events =
-        match reduce_upstream_bytes_with_policy(upstream, incomplete_response_policy, account) {
-            Ok(events) => events,
-            Err(err) => {
-                write_reducer_error_capture(traffic, &err);
-                return Err(anyhow::anyhow!(
-                    "upstream error: {} ({:?})",
-                    err.message,
-                    err.kind
-                ));
-            }
-        };
+    let events = match reduce_upstream_bytes(upstream, account) {
+        Ok(events) => events,
+        Err(err) => {
+            write_reducer_error_capture(traffic, &err);
+            return Err(anyhow::anyhow!(
+                "upstream error: {} ({:?})",
+                err.message,
+                err.kind
+            ));
+        }
+    };
 
     let mut blocks: Vec<AccumulatedBlock> = Vec::new();
     let mut stop_reason: Option<String> = None;

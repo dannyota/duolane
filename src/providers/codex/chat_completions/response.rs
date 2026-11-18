@@ -82,6 +82,13 @@ impl CompletionState {
                 }
                 self.completed = true;
             }
+            Some("response.incomplete") => {
+                if let Some(response) = event.get("response") {
+                    self.update_metadata(response);
+                }
+                self.finish_reason = "length";
+                self.completed = true;
+            }
             _ => {
                 if event.get("error").is_some_and(|error| !error.is_null()) {
                     return Err(event_error(event));
@@ -208,6 +215,14 @@ mod tests {
         let body = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n";
         let error = aggregate_sse(body, "model").unwrap_err();
         assert!(error.message.contains("Incomplete response"));
+    }
+
+    #[test]
+    fn max_output_tokens_incomplete_finishes_with_length() {
+        let body = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n";
+        let value = aggregate_sse(body, "model").unwrap();
+        assert_eq!(value["choices"][0]["message"]["content"], "partial");
+        assert_eq!(value["choices"][0]["finish_reason"], "length");
     }
 
     #[test]

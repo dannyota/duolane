@@ -1349,15 +1349,6 @@ fn remaining_live_stream_response(
                         &request_continuation,
                         compaction.attempt,
                     );
-                    if err.origin == client::CodexErrorOrigin::WebSocket {
-                        let chunk = translator
-                            .finish_after_closed_completed_tool_call(ctx.traffic.as_deref());
-                        if !chunk.is_empty() {
-                            record_live_stream_progress(&ctx, &chunk);
-                            let _ = tx.send(Ok(Bytes::from(chunk))).await;
-                            return;
-                        }
-                    }
                     let error_type = codex_stream_error_type(&err);
                     let chunk = translator.error_chunk(
                         codex_error_message(&err),
@@ -1378,12 +1369,6 @@ fn remaining_live_stream_response(
             &request_continuation,
             compaction.attempt,
         );
-        let chunk = translator.finish_after_closed_completed_tool_call(ctx.traffic.as_deref());
-        if !chunk.is_empty() {
-            record_live_stream_progress(&ctx, &chunk);
-            let _ = tx.send(Ok(Bytes::from(chunk))).await;
-            return;
-        }
         let chunk = translator.error_chunk(
             "Upstream event stream closed before terminal Codex response event",
             "api_error",
@@ -2347,6 +2332,72 @@ mod tests {
             sse.contains("event: message_stop"),
             "delivered stream must terminate properly, got: {sse:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn live_stream_ending_after_completed_tool_call_is_not_success() {
+        let websocket_closed = client::CodexError {
+            status: 0,
+            message: "WebSocket connection closed before terminal Codex response event".into(),
+            detail: Some(websocket::WEBSOCKET_MISSING_TERMINAL_DETAIL.to_string()),
+            retry_after: None,
+            usage_limit: None,
+            origin: client::CodexErrorOrigin::WebSocket,
+        };
+        for ending in [None, Some(websocket_closed)] {
+            let (tx, rx, ctx, request_body) = empty_terminal_fixture();
+            for event in [
+                serde_json::json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {"type": "function_call", "call_id": "call_1", "name": "Bash"}
+                }),
+                serde_json::json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "Bash",
+                        "arguments": "{\"command\":\"ls\"}"
+                    }
+                }),
+            ] {
+                tx.send(Ok(event)).await.unwrap();
+            }
+            if let Some(error) = ending {
+                tx.send(Err(error)).await.unwrap();
+            }
+            drop(tx);
+            let LiveStreamStart::Response(response) = live_stream_response_once(
+                rx,
+                "msg_test".to_string(),
+                "gpt-5.6-sol",
+                ctx,
+                ContinuationReservation::for_owner_turn(None, None),
+                request_body,
+                LiveStreamCompaction {
+                    compact_boundary: false,
+                    attempt: None,
+                },
+                config::CodexTransport::WebSocket,
+                false,
+            )
+            .await
+            else {
+                panic!("a stream with semantic output must be delivered");
+            };
+            let body = tokio::time::timeout(
+                Duration::from_secs(2),
+                axum::body::to_bytes(response.into_body(), usize::MAX),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let sse = String::from_utf8_lossy(&body);
+            assert!(sse.contains("event: error"), "{sse}");
+            assert!(!sse.contains("event: message_stop"), "{sse}");
+        }
     }
 
     fn request_with_tools(tools: serde_json::Value) -> MessagesRequest {

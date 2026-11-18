@@ -53,7 +53,9 @@ pub(crate) fn classify_stream_event(payload: &Value) -> CodexStreamEventKind {
         return CodexStreamEventKind::TerminalFailure;
     }
     match payload.get("type").and_then(Value::as_str) {
-        Some("response.completed" | "response.done") => CodexStreamEventKind::TerminalSuccess,
+        Some("response.completed" | "response.done" | "response.incomplete") => {
+            CodexStreamEventKind::TerminalSuccess
+        }
         Some(
             "keepalive"
             | "response.created"
@@ -136,7 +138,9 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
     if event_type == "codex.rate_limits" {
         return None;
     }
-    if response_is_incomplete_terminal(payload) {
+    if response_is_incomplete_terminal(payload)
+        && !is_standard_max_output_tokens_incomplete(payload)
+    {
         let reason = payload
             .pointer("/response/incomplete_details/reason")
             .and_then(Value::as_str)
@@ -947,6 +951,11 @@ data: {"type":"response.completed","response":{"status":"completed"}}
         });
         assert!(response_is_incomplete_terminal(&allowed));
         assert!(is_standard_max_output_tokens_incomplete(&allowed));
+        assert!(classify_event_failure(&allowed).is_none());
+        assert_eq!(
+            classify_stream_event(&allowed),
+            CodexStreamEventKind::TerminalSuccess
+        );
         let allowed_without_status = serde_json::json!({
             "type":"response.incomplete",
             "response": {

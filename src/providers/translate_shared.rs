@@ -9,6 +9,10 @@ pub fn wrap_reasoning(reasoning: &str) -> String {
     format!("{REASONING_OPEN}\n{reasoning}\n{REASONING_CLOSE}")
 }
 
+pub fn unsupported_block_marker(kind: &str) -> String {
+    format!("[unsupported content block omitted: {kind}]")
+}
+
 #[derive(Debug)]
 pub enum ContentBlock {
     Text {
@@ -31,6 +35,18 @@ pub enum ContentBlock {
         thinking: String,
         signature: Option<String>,
     },
+}
+
+impl ContentBlock {
+    pub fn unsupported_marker(&self) -> String {
+        unsupported_block_marker(match self {
+            Self::Text { .. } => "text",
+            Self::Image { .. } => "image",
+            Self::ToolUse { .. } => "tool_use",
+            Self::ToolResult { .. } => "tool_result",
+            Self::Thinking { .. } => "thinking",
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -96,15 +112,10 @@ pub fn normalize_content(content: &Value, missing_tool_input: Value) -> Vec<Cont
         Value::String(s) => {
             vec![ContentBlock::Text { text: s.clone() }]
         }
-        Value::Array(arr) => {
-            let mut blocks = Vec::new();
-            for item in arr {
-                if let Some(block) = parse_content_block(item, missing_tool_input.clone()) {
-                    blocks.push(block);
-                }
-            }
-            blocks
-        }
+        Value::Array(arr) => arr
+            .iter()
+            .map(|item| parse_content_block(item, missing_tool_input.clone()))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -117,8 +128,10 @@ pub fn image_source_to_url(source: &ImageSource) -> String {
     }
 }
 
-fn parse_content_block(value: &Value, missing_tool_input: Value) -> Option<ContentBlock> {
-    let kind = value.get("type").and_then(|v| v.as_str())?;
+fn parse_content_block(value: &Value, missing_tool_input: Value) -> ContentBlock {
+    let Some(kind) = value.get("type").and_then(|v| v.as_str()) else {
+        return unsupported_block("unknown");
+    };
     match kind {
         "text" => {
             let text = value
@@ -126,10 +139,12 @@ fn parse_content_block(value: &Value, missing_tool_input: Value) -> Option<Conte
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            Some(ContentBlock::Text { text })
+            ContentBlock::Text { text }
         }
         "image" => {
-            let source = value.get("source")?;
+            let Some(source) = value.get("source") else {
+                return unsupported_block(kind);
+            };
             let media_type = source
                 .get("media_type")
                 .and_then(|v| v.as_str())
@@ -140,19 +155,22 @@ fn parse_content_block(value: &Value, missing_tool_input: Value) -> Option<Conte
                 .and_then(|v| v.as_str())
                 .unwrap_or("base64")
                 .to_string();
+            if !matches!(source_type.as_str(), "base64" | "url") {
+                return unsupported_block(kind);
+            }
             let data = if source_type == "url" {
                 source.get("url").and_then(|v| v.as_str()).unwrap_or("")
             } else {
                 source.get("data").and_then(|v| v.as_str()).unwrap_or("")
             }
             .to_string();
-            Some(ContentBlock::Image {
+            ContentBlock::Image {
                 source: ImageSource {
                     media_type,
                     data,
                     source_type,
                 },
-            })
+            }
         }
         "tool_use" => {
             let id = value
@@ -166,7 +184,7 @@ fn parse_content_block(value: &Value, missing_tool_input: Value) -> Option<Conte
                 .unwrap_or("")
                 .to_string();
             let input = value.get("input").cloned().unwrap_or(missing_tool_input);
-            Some(ContentBlock::ToolUse { id, name, input })
+            ContentBlock::ToolUse { id, name, input }
         }
         "tool_result" => {
             let tool_use_id = value
@@ -179,11 +197,11 @@ fn parse_content_block(value: &Value, missing_tool_input: Value) -> Option<Conte
                 .cloned()
                 .unwrap_or(Value::String(String::new()));
             let is_error = value.get("is_error").and_then(|v| v.as_bool());
-            Some(ContentBlock::ToolResult {
+            ContentBlock::ToolResult {
                 tool_use_id,
                 content,
                 is_error,
-            })
+            }
         }
         "thinking" => {
             let thinking = value
@@ -195,11 +213,17 @@ fn parse_content_block(value: &Value, missing_tool_input: Value) -> Option<Conte
                 .get("signature")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            Some(ContentBlock::Thinking {
+            ContentBlock::Thinking {
                 thinking,
                 signature,
-            })
+            }
         }
-        _ => None,
+        other => unsupported_block(other),
+    }
+}
+
+fn unsupported_block(kind: &str) -> ContentBlock {
+    ContentBlock::Text {
+        text: unsupported_block_marker(kind),
     }
 }
