@@ -49,6 +49,7 @@ use self::translate::model_allowlist::{
     assert_allowed_model, full_lane_web_search_model, resolve_model_request_with_config_override,
     uses_responses_lite_with_full_lane,
 };
+use self::translate::reasoning_signature::ReasoningAccount;
 use self::translate::reducer::finish_metadata_from_upstream;
 use self::translate::request::{
     TranslateOptions, has_hosted_web_search, is_compact_messages_request, translate_request,
@@ -197,6 +198,7 @@ impl CodexProvider {
                 service_tier: resolved.service_tier.clone(),
                 model: resolved.model.clone(),
                 use_responses_lite,
+                reasoning_account: self.client.auth_manager().reasoning_account(),
             },
         ) {
             Ok(t) => t,
@@ -389,7 +391,7 @@ impl CodexProvider {
                     return map_codex_error_to_response(&e);
                 }
             };
-            if !is_empty_codex_success_completion(&response.body) {
+            if !is_empty_codex_success_completion(&response.body, &translated.reasoning_account) {
                 break response;
             }
             if accept_empty_completion(successful_tool_tail, attempt)
@@ -479,12 +481,12 @@ impl CodexProvider {
         );
 
         if want_stream {
-            let estimated_input_tokens = count_translated_tokens(&translated);
             let sse_bytes = match translate_stream_bytes_with_traffic(
                 &upstream.body,
                 &message_id,
                 model,
-                estimated_input_tokens,
+                count_translated_tokens(&translated),
+                &translated.reasoning_account,
                 ctx.traffic.as_deref(),
             ) {
                 Ok(b) => b,
@@ -527,6 +529,7 @@ impl CodexProvider {
                 &upstream.body,
                 &message_id,
                 model,
+                &translated.reasoning_account,
                 ctx.traffic.as_deref(),
             ) {
                 Ok(json) => {
@@ -623,6 +626,7 @@ impl Provider for CodexProvider {
                 service_tier: resolved.service_tier.clone(),
                 model: resolved.model.clone(),
                 use_responses_lite,
+                reasoning_account: self.client.auth_manager().reasoning_account(),
             },
         ) {
             Ok(t) => t,
@@ -937,12 +941,7 @@ async fn live_stream_response_once(
     configured_transport: config::CodexTransport,
     accept_empty: bool,
 ) -> LiveStreamStart {
-    let estimated_input_tokens = count_translated_tokens(&request_body);
-    let mut translator = LiveStreamTranslator::with_estimated_input_tokens(
-        message_id,
-        model.to_string(),
-        estimated_input_tokens,
-    );
+    let mut translator = LiveStreamTranslator::for_request(message_id, model, &request_body);
     let mut upstream_sse_body = Vec::new();
     let mut pending_chunk = Vec::new();
     let mut generation_started = false;
@@ -1463,10 +1462,10 @@ fn empty_buffered_completion_error() -> client::CodexError {
     }
 }
 
-fn is_empty_codex_success_completion(upstream_sse: &[u8]) -> bool {
+fn is_empty_codex_success_completion(upstream_sse: &[u8], account: &ReasoningAccount) -> bool {
     use self::translate::reducer::{ReducerEvent, TERM_COMPLETED, TERM_DONE};
 
-    let Ok(events) = self::translate::reducer::reduce_upstream_bytes(upstream_sse) else {
+    let Ok(events) = self::translate::reducer::reduce_upstream_bytes(upstream_sse, account) else {
         return false;
     };
     let mut saw_success_terminal = false;
@@ -1583,7 +1582,7 @@ fn update_continuation_from_upstream(
     socket_id: Option<u64>,
     compact_boundary: bool,
 ) {
-    match finish_metadata_from_upstream(upstream_body) {
+    match finish_metadata_from_upstream(upstream_body, &request_body.reasoning_account) {
         Ok(Some(finish)) if finish.continuation_eligible => {
             if compact_boundary {
                 activate_compaction(
@@ -1841,6 +1840,7 @@ mod tests {
                 format: None,
             },
             reasoning: None,
+            reasoning_account: Default::default(),
         }
     }
 
@@ -1910,7 +1910,10 @@ mod tests {
             "type": "response.completed",
             "response": {"id": "resp_1", "status": "completed", "incomplete_details": null, "usage": {"input_tokens": 5, "output_tokens": 0}}
         })]);
-        assert!(is_empty_codex_success_completion(&body));
+        assert!(is_empty_codex_success_completion(
+            &body,
+            &ReasoningAccount::default()
+        ));
     }
 
     #[test]
@@ -1919,7 +1922,10 @@ mod tests {
             "type": "response.done",
             "response": {"id": "resp_1", "usage": {}}
         })]);
-        assert!(is_empty_codex_success_completion(&body));
+        assert!(is_empty_codex_success_completion(
+            &body,
+            &ReasoningAccount::default()
+        ));
     }
 
     #[test]
@@ -1940,7 +1946,10 @@ mod tests {
                 "response": {"id": "resp_1", "usage": {}}
             }),
         ]);
-        assert!(is_empty_codex_success_completion(&body));
+        assert!(is_empty_codex_success_completion(
+            &body,
+            &ReasoningAccount::default()
+        ));
     }
 
     #[test]
@@ -1966,7 +1975,10 @@ mod tests {
                 "response": {"id": "resp_1", "usage": {}}
             }),
         ]);
-        assert!(!is_empty_codex_success_completion(&body));
+        assert!(!is_empty_codex_success_completion(
+            &body,
+            &ReasoningAccount::default()
+        ));
     }
 
     #[test]
@@ -1987,7 +1999,10 @@ mod tests {
                 "response": {"id": "resp_1", "usage": {}}
             }),
         ]);
-        assert!(!is_empty_codex_success_completion(&body));
+        assert!(!is_empty_codex_success_completion(
+            &body,
+            &ReasoningAccount::default()
+        ));
     }
 
     #[test]
@@ -1996,12 +2011,18 @@ mod tests {
             "type": "response.incomplete",
             "response": {"id": "resp_1", "incomplete_details": {"reason": "max_output_tokens"}, "usage": {}}
         })]);
-        assert!(!is_empty_codex_success_completion(&body));
+        assert!(!is_empty_codex_success_completion(
+            &body,
+            &ReasoningAccount::default()
+        ));
     }
 
     #[test]
     fn upstream_without_terminal_event_is_not_empty_completion() {
-        assert!(!is_empty_codex_success_completion(&upstream_sse(&[])));
+        assert!(!is_empty_codex_success_completion(
+            &upstream_sse(&[]),
+            &ReasoningAccount::default()
+        ));
     }
 
     fn request_with_tail(messages: serde_json::Value) -> MessagesRequest {
@@ -2165,9 +2186,10 @@ mod tests {
             let payload = serde_json::json!({
                 "type":"response.done", "response":{"id":"r", "status":status,"output":[]}
             });
-            assert!(!is_empty_codex_success_completion(&upstream_sse(
-                std::slice::from_ref(&payload)
-            )));
+            assert!(!is_empty_codex_success_completion(
+                &upstream_sse(std::slice::from_ref(&payload)),
+                &ReasoningAccount::default()
+            ));
             tx.send(Ok(payload)).await.unwrap();
             match live_stream_response_once(
                 rx,
@@ -2226,6 +2248,7 @@ mod tests {
                 service_tier: None,
                 model: "gpt-5.6-sol".to_string(),
                 use_responses_lite: true,
+                reasoning_account: ReasoningAccount::default(),
             },
         )
         .unwrap();
@@ -2407,6 +2430,7 @@ mod tests {
                             service_tier: None,
                             model: resolved,
                             use_responses_lite: lite,
+                            reasoning_account: ReasoningAccount::default(),
                         },
                     )
                     .unwrap();
@@ -2439,6 +2463,7 @@ mod tests {
                         service_tier: resolved.service_tier,
                         model: resolved.model,
                         use_responses_lite: lite,
+                        reasoning_account: ReasoningAccount::default(),
                     },
                 )
                 .unwrap();
@@ -2504,6 +2529,7 @@ mod tests {
                 service_tier: None,
                 model: "gpt-5.6-sol".to_string(),
                 use_responses_lite: true,
+                reasoning_account: ReasoningAccount::default(),
             },
         )
         .unwrap();

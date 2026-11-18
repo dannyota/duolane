@@ -110,9 +110,9 @@ prefix.
 | Codex signature, other account | Reasoning text    | Reasoning text              |
 | No signature                   | Reasoning text    | Reasoning text              |
 
-An empty block that would become reasoning text is removed. If that empties an
-assistant message, the message keeps one reasoning text block with empty text,
-so the conversation stays valid.
+An empty block that would become reasoning text is removed. On the Claude route,
+if that empties an assistant message, the message keeps one reasoning text block
+with empty text, so the conversation stays valid.
 
 ## Invariants
 
@@ -125,6 +125,9 @@ so the conversation stays valid.
 2. **Conversions are deterministic.** The same history produces the same bytes
    on every turn, so the prompt cache and Anthropic's prefix check keep working.
 3. **Encrypted Codex reasoning in a duolane signature never reaches Anthropic.**
+   The Claude route refuses a body it cannot parse, a body with duplicate keys
+   in a message or block, and any block that still carries a duolane signature
+   after conversion.
 4. **Encrypted reasoning returns only to the account that produced it.**
 5. **Stream failures are visible.** An interrupted or incomplete upstream stream
    is never reported as a successful turn, and a tool call with incomplete
