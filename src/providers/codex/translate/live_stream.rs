@@ -962,7 +962,7 @@ impl LiveStreamTranslator {
                     continue;
                 }
                 LiveBlock::Text { index, .. } => index,
-                LiveBlock::Tool { index, .. } => index,
+                LiveBlock::Tool { .. } => continue,
             };
             self.emit(
                 traffic,
@@ -1482,6 +1482,7 @@ mod tests {
     #[test]
     fn terminal_event_with_open_tool_call_fails_the_stream() {
         let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut out = Vec::new();
         for event in [
             json!({
                 "type": "response.output_item.added",
@@ -1494,7 +1495,7 @@ mod tests {
                 "delta": "{\"command\":\"ls"
             }),
         ] {
-            translator.accept(&event, None).unwrap();
+            out.extend(translator.accept(&event, None).unwrap());
         }
         let error = translator
             .accept(
@@ -1505,11 +1506,16 @@ mod tests {
                 None,
             )
             .unwrap_err();
-        let rendered =
-            String::from_utf8(translator.error_chunk(&error, "api_error", None)).unwrap();
+        out.extend(translator.error_chunk(&error, "api_error", None));
+        let rendered = String::from_utf8(out).unwrap();
+        let tool_start = rendered.find(r#""type":"tool_use""#).unwrap();
         assert!(rendered.contains("event: error"), "{rendered}");
-        assert!(!rendered.contains("stop_reason"), "{rendered}");
+        assert!(!rendered.contains("event: message_delta"), "{rendered}");
         assert!(!rendered.contains("message_stop"), "{rendered}");
+        assert!(
+            !rendered[tool_start..].contains("event: content_block_stop"),
+            "{rendered}"
+        );
     }
 
     #[test]

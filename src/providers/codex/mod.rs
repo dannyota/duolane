@@ -1008,8 +1008,8 @@ async fn live_stream_response_once(
             }
         };
         pending_chunk.extend_from_slice(&chunk);
-        if terminal
-            && is_codex_success_terminal_event(&payload)
+        if is_codex_success_terminal_event(&payload)
+            && !events::is_standard_max_output_tokens_incomplete(&payload)
             && !translator.has_semantic_output()
             && !(accept_empty && terminal_status_is_completed(&payload))
         {
@@ -1990,16 +1990,43 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn terminal_only_incomplete_upstream_is_not_empty_completion() {
-        let body = upstream_sse(&[serde_json::json!({
+    #[tokio::test]
+    async fn terminal_only_incomplete_upstream_is_not_empty_completion() {
+        let payload = serde_json::json!({
             "type": "response.incomplete",
             "response": {"id": "resp_1", "incomplete_details": {"reason": "max_output_tokens"}, "usage": {}}
-        })]);
+        });
         assert!(!is_empty_codex_success_completion(
-            &body,
+            &upstream_sse(std::slice::from_ref(&payload)),
             &ReasoningAccount::default()
         ));
+
+        let (tx, rx, ctx, request_body) = empty_terminal_fixture();
+        tx.send(Ok(payload)).await.unwrap();
+        let LiveStreamStart::Response(response) = live_stream_response_once(
+            rx,
+            "msg_test".to_string(),
+            "gpt-5.6-sol",
+            ctx,
+            ContinuationReservation::for_owner_turn(None, None),
+            request_body,
+            LiveStreamCompaction {
+                compact_boundary: false,
+                attempt: None,
+            },
+            config::CodexTransport::WebSocket,
+            false,
+        )
+        .await
+        else {
+            panic!("a max_tokens stop must be delivered, not retried");
+        };
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let sse = String::from_utf8_lossy(&body);
+        assert!(sse.contains(r#""stop_reason":"max_tokens""#), "{sse}");
+        assert!(sse.contains("event: message_stop"), "{sse}");
     }
 
     #[test]
