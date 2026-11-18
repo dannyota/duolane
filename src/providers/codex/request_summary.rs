@@ -280,6 +280,7 @@ mod tests {
                 format: None,
             },
             reasoning: None,
+            reasoning_account: Default::default(),
         };
         let summary = summarize_codex_request_size(&req);
         assert_eq!(summary.input_item_count, 1);

@@ -3,10 +3,10 @@
 725 src/monitor/mock.rs
 3048 src/providers/codex/client.rs
 702 src/providers/codex/images.rs
-1809 src/providers/codex/mod.rs
-1191 src/providers/codex/translate/live_stream.rs
-1130 src/providers/codex/translate/reducer.rs
-1295 src/providers/codex/translate/request.rs
+1808 src/providers/codex/mod.rs
+1186 src/providers/codex/translate/live_stream.rs
+1110 src/providers/codex/translate/reducer.rs
+1294 src/providers/codex/translate/request.rs
 2356 src/providers/codex/websocket.rs
 2125 src/server.rs
 1784 src/tui.rs

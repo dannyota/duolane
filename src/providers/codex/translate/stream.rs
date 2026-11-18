@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use crate::anthropic::sse::encode_sse_event;
 use crate::traffic::TrafficCapture;
 
+use super::reasoning_signature::ReasoningAccount;
 use super::reducer::{
     ReducerEvent, UpstreamStreamError, map_codex_usage_to_anthropic, reduce_upstream_bytes,
 };
@@ -254,7 +255,8 @@ pub fn translate_stream_bytes(
     message_id: &str,
     model: &str,
 ) -> Result<Vec<u8>, anyhow::Error> {
-    translate_stream_bytes_with_traffic(upstream, message_id, model, 0, None)
+    let account = ReasoningAccount::default();
+    translate_stream_bytes_with_traffic(upstream, message_id, model, 0, &account, None)
 }
 
 pub fn translate_stream_bytes_with_traffic(
@@ -262,9 +264,10 @@ pub fn translate_stream_bytes_with_traffic(
     message_id: &str,
     model: &str,
     estimated_input_tokens: u64,
+    account: &ReasoningAccount,
     traffic: Option<&TrafficCapture>,
 ) -> Result<Vec<u8>, anyhow::Error> {
-    let events = match reduce_upstream_bytes(upstream) {
+    let events = match reduce_upstream_bytes(upstream, account) {
         Ok(events) => events,
         Err(err) => {
             write_reducer_error_capture(traffic, &err);
@@ -520,8 +523,15 @@ mod tests {
             ),
         );
         let out = String::from_utf8(
-            translate_stream_bytes_with_traffic(upstream.as_bytes(), "msg_1", "gpt-5.5", 321, None)
-                .unwrap(),
+            translate_stream_bytes_with_traffic(
+                upstream.as_bytes(),
+                "msg_1",
+                "gpt-5.5",
+                321,
+                &ReasoningAccount::default(),
+                None,
+            )
+            .unwrap(),
         )
         .unwrap();
         assert!(out.contains("message_start"));
@@ -739,8 +749,17 @@ mod tests {
                 serde_json::json!({"response":{"id":"resp_1","usage":{}}})
             ),
         );
+        let account = ReasoningAccount::new(Some("acct"));
         let out = String::from_utf8(
-            translate_stream_bytes(upstream.as_bytes(), "msg_1", "gpt-5.5").unwrap(),
+            translate_stream_bytes_with_traffic(
+                upstream.as_bytes(),
+                "msg_1",
+                "gpt-5.5",
+                0,
+                &account,
+                None,
+            )
+            .unwrap(),
         )
         .unwrap();
         let thinking_delta = out.find(r#""type":"thinking_delta""#).unwrap();
@@ -751,6 +770,6 @@ mod tests {
             .unwrap();
         assert!(thinking_delta < signature_delta);
         assert!(signature_delta < thinking_stop);
-        assert!(out.contains("ccp:codex:v1:"));
+        assert!(out.contains("duolane:codex:v1:def0b17f603285ef:cnNfMQ:opaque"));
     }
 }

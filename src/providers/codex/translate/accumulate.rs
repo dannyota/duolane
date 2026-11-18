@@ -3,6 +3,7 @@ use serde_json::Value;
 use crate::traffic::TrafficCapture;
 
 use super::IncompleteResponsePolicy;
+use super::reasoning_signature::ReasoningAccount;
 use super::reducer::{
     AnthropicUsage, ReducerEvent, UpstreamStreamError, map_codex_usage_to_anthropic,
     reduce_upstream_bytes_with_policy,
@@ -19,6 +20,7 @@ pub fn accumulate_response(
         message_id,
         model,
         IncompleteResponsePolicy::Error,
+        &ReasoningAccount::default(),
         None,
     )
 }
@@ -27,6 +29,7 @@ pub fn accumulate_response_with_traffic(
     upstream: &[u8],
     message_id: &str,
     model: &str,
+    account: &ReasoningAccount,
     traffic: Option<&TrafficCapture>,
 ) -> Result<Value, anyhow::Error> {
     accumulate_response_with_policy_and_traffic(
@@ -34,6 +37,7 @@ pub fn accumulate_response_with_traffic(
         message_id,
         model,
         IncompleteResponsePolicy::Error,
+        account,
         traffic,
     )
 }
@@ -43,19 +47,21 @@ fn accumulate_response_with_policy_and_traffic(
     message_id: &str,
     model: &str,
     incomplete_response_policy: IncompleteResponsePolicy,
+    account: &ReasoningAccount,
     traffic: Option<&TrafficCapture>,
 ) -> Result<Value, anyhow::Error> {
-    let events = match reduce_upstream_bytes_with_policy(upstream, incomplete_response_policy) {
-        Ok(events) => events,
-        Err(err) => {
-            write_reducer_error_capture(traffic, &err);
-            return Err(anyhow::anyhow!(
-                "upstream error: {} ({:?})",
-                err.message,
-                err.kind
-            ));
-        }
-    };
+    let events =
+        match reduce_upstream_bytes_with_policy(upstream, incomplete_response_policy, account) {
+            Ok(events) => events,
+            Err(err) => {
+                write_reducer_error_capture(traffic, &err);
+                return Err(anyhow::anyhow!(
+                    "upstream error: {} ({:?})",
+                    err.message,
+                    err.kind
+                ));
+            }
+        };
 
     let mut blocks: Vec<AccumulatedBlock> = Vec::new();
     let mut stop_reason: Option<String> = None;
@@ -589,16 +595,24 @@ mod tests {
                 json!({"response":{"id":"resp_1","usage":{}}})
             ),
         );
-        let response = accumulate_response(upstream.as_bytes(), "msg_1", "gpt-5.5").unwrap();
+        let account = ReasoningAccount::new(Some("acct"));
+        let response = accumulate_response_with_traffic(
+            upstream.as_bytes(),
+            "msg_1",
+            "gpt-5.5",
+            &account,
+            None,
+        )
+        .unwrap();
         let content = response["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "thinking");
         assert_eq!(content[0]["thinking"], "");
-        assert!(
-            content[0]["signature"]
-                .as_str()
-                .unwrap()
-                .starts_with("ccp:codex:v1:")
+        assert_eq!(
+            content[0]["signature"],
+            "duolane:codex:v1:def0b17f603285ef:cnNfMQ:opaque"
         );
+        let unsigned = accumulate_response(upstream.as_bytes(), "msg_1", "gpt-5.5").unwrap();
+        assert_eq!(unsigned["content"], json!([]));
     }
 }

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::anthropic::sse::encode_sse_event;
+use crate::providers::codex::count_tokens::count_translated_tokens;
 use crate::providers::codex::events::{
     classify_event_failure, is_standard_max_output_tokens_incomplete,
 };
@@ -8,11 +9,12 @@ use crate::traffic::TrafficCapture;
 
 use super::IncompleteResponsePolicy;
 use super::read_rewrite::sanitize_read_args;
-use super::reasoning_signature::{PendingReasoning, encode_reasoning_signature};
+use super::reasoning_signature::ReasoningSigner;
 use super::reducer::{
     CodexRateLimits, CodexUsage, STOP_END_TURN, STOP_MAX_TOKENS, STOP_TOOL_USE,
     map_codex_usage_to_anthropic, parse_codex_rate_limits,
 };
+use super::request::ResponsesRequest;
 
 const BUFFERED_READ_REPAIR_TRAILING_WHITESPACE_BYTES: usize = 1_024;
 const BUFFERED_TOOL_MAX_ARGS_BYTES: usize = 5_000_000;
@@ -61,7 +63,7 @@ pub struct LiveStreamTranslator {
     item_id_to_output_index: HashMap<String, usize>,
     anthropic_index: usize,
     thinking: Option<LiveThinking>,
-    reasoning_by_output_index: HashMap<usize, PendingReasoning>,
+    reasoning_by_output_index: ReasoningSigner,
     saw_tool_use: bool,
     web_search_requests: usize,
     web_searches: Vec<LiveWebSearch>,
@@ -92,7 +94,7 @@ impl LiveStreamTranslator {
             item_id_to_output_index: HashMap::new(),
             anthropic_index: 0,
             thinking: None,
-            reasoning_by_output_index: HashMap::new(),
+            reasoning_by_output_index: ReasoningSigner::default(),
             saw_tool_use: false,
             web_search_requests: 0,
             web_searches: Vec::new(),
@@ -103,6 +105,17 @@ impl LiveStreamTranslator {
             incomplete_response_policy: IncompleteResponsePolicy::Error,
             finished: false,
             rate_limits: None,
+        }
+    }
+
+    pub fn for_request(
+        message_id: impl Into<String>,
+        model: impl Into<String>,
+        request: &ResponsesRequest,
+    ) -> Self {
+        Self {
+            reasoning_by_output_index: ReasoningSigner::new(request.reasoning_account.clone()),
+            ..Self::with_estimated_input_tokens(message_id, model, count_translated_tokens(request))
         }
     }
 
@@ -317,10 +330,7 @@ impl LiveStreamTranslator {
 
         match item_type {
             "reasoning" => {
-                self.reasoning_by_output_index
-                    .entry(output_index)
-                    .or_default()
-                    .capture(item);
+                self.reasoning_by_output_index.capture(output_index, item);
             }
             "message" => {
                 self.close_thinking(traffic, out);
@@ -661,10 +671,7 @@ impl LiveStreamTranslator {
             .filter(|item_type| *item_type == "reasoning")
             .and_then(|_| payload.get("item"))
         {
-            self.reasoning_by_output_index
-                .entry(output_index)
-                .or_default()
-                .capture(item);
+            self.reasoning_by_output_index.capture(output_index, item);
             let had_active_summary = self
                 .thinking
                 .is_some_and(|thinking| thinking.output_index == output_index);
@@ -999,14 +1006,7 @@ impl LiveStreamTranslator {
         traffic: Option<&TrafficCapture>,
         out: &mut Vec<u8>,
     ) {
-        let Some(replay) = self
-            .reasoning_by_output_index
-            .remove(&output_index)
-            .and_then(|pending| pending.replay())
-        else {
-            return;
-        };
-        let Some(signature) = encode_reasoning_signature(&replay) else {
+        let Some((_, signature)) = self.reasoning_by_output_index.take(output_index) else {
             return;
         };
         self.semantic_output_started = true;
@@ -1048,12 +1048,7 @@ impl LiveStreamTranslator {
         let Some(thinking) = self.thinking.take() else {
             return;
         };
-        if let Some(signature) = self
-            .reasoning_by_output_index
-            .remove(&thinking.output_index)
-            .and_then(|pending| pending.replay())
-            .and_then(|replay| encode_reasoning_signature(&replay))
-        {
+        if let Some((_, signature)) = self.reasoning_by_output_index.take(thinking.output_index) {
             self.emit(
                 traffic,
                 out,
@@ -1196,7 +1191,10 @@ mod tests {
     use serde_json::json;
 
     fn render(events: Vec<serde_json::Value>) -> String {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        render_with(LiveStreamTranslator::new("msg_1", "gpt-5.5"), events)
+    }
+
+    fn render_with(mut translator: LiveStreamTranslator, events: Vec<serde_json::Value>) -> String {
         let mut out = Vec::new();
         for event in events {
             out.extend(translator.accept(&event, None).unwrap());
@@ -1665,29 +1663,47 @@ mod tests {
         assert_eq!(second.matches("event: ping").count(), 1);
     }
 
+    fn signing_translator() -> LiveStreamTranslator {
+        let mut request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "input": [],
+            "store": false,
+            "stream": true,
+            "parallel_tool_calls": true,
+            "text": {}
+        }))
+        .unwrap();
+        request.reasoning_account =
+            super::super::reasoning_signature::ReasoningAccount::new(Some("acct"));
+        LiveStreamTranslator::for_request("msg_1", "gpt-5.5", &request)
+    }
+
     #[test]
     fn live_stream_emits_signature_delta_before_thinking_stop() {
-        let out = render(vec![
-            json!({
-                "type":"response.output_item.added",
-                "output_index":0,
-                "item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque"}
-            }),
-            json!({
-                "type":"response.reasoning_summary_text.delta",
-                "output_index":0,
-                "delta":"plan"
-            }),
-            json!({
-                "type":"response.output_item.done",
-                "output_index":0,
-                "item":{"type":"reasoning","id":"rs_1"}
-            }),
-            json!({
-                "type":"response.completed",
-                "response":{"id":"resp_1","usage":{}}
-            }),
-        ]);
+        let out = render_with(
+            signing_translator(),
+            vec![
+                json!({
+                    "type":"response.output_item.added",
+                    "output_index":0,
+                    "item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque"}
+                }),
+                json!({
+                    "type":"response.reasoning_summary_text.delta",
+                    "output_index":0,
+                    "delta":"plan"
+                }),
+                json!({
+                    "type":"response.output_item.done",
+                    "output_index":0,
+                    "item":{"type":"reasoning","id":"rs_1"}
+                }),
+                json!({
+                    "type":"response.completed",
+                    "response":{"id":"resp_1","usage":{}}
+                }),
+            ],
+        );
         let thinking_delta = out.find(r#""type":"thinking_delta""#).unwrap();
         let signature_delta = out.find(r#""type":"signature_delta""#).unwrap();
         let thinking_stop = out[signature_delta..]
@@ -1696,12 +1712,12 @@ mod tests {
             .unwrap();
         assert!(thinking_delta < signature_delta);
         assert!(signature_delta < thinking_stop);
-        assert!(out.contains("ccp:codex:v1:"));
+        assert!(out.contains("duolane:codex:v1:def0b17f603285ef:cnNfMQ:opaque"));
     }
 
     #[test]
     fn signature_only_reasoning_is_semantic_output() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut translator = signing_translator();
         let mut out = Vec::new();
         for event in [
             json!({

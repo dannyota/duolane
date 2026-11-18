@@ -6,7 +6,7 @@ use crate::providers::codex::events::{
 
 use super::IncompleteResponsePolicy;
 use super::read_rewrite::sanitize_read_args;
-use super::reasoning_signature::{PendingReasoning, ReasoningReplay, encode_reasoning_signature};
+use super::reasoning_signature::{ReasoningAccount, ReasoningSigner};
 use super::request::ResponsesInputItem;
 
 #[derive(Debug, Clone)]
@@ -205,30 +205,18 @@ struct ActiveThinking {
     anthropic_index: usize,
 }
 
-fn reasoning_input_item(replay: ReasoningReplay) -> ResponsesInputItem {
-    ResponsesInputItem::Reasoning {
-        id: replay.id,
-        summary: Vec::new(),
-        encrypted_content: replay.encrypted_content,
-    }
-}
-
 fn finalize_active_thinking(
     active: ActiveThinking,
     out: &mut Vec<ReducerEvent>,
-    reasoning_by_output_index: &mut std::collections::HashMap<usize, PendingReasoning>,
+    reasoning_by_output_index: &mut ReasoningSigner,
     output_items_by_index: &mut std::collections::BTreeMap<usize, ResponsesInputItem>,
 ) {
-    if let Some(replay) = reasoning_by_output_index
-        .remove(&active.output_index)
-        .and_then(|pending| pending.replay())
-        && let Some(signature) = encode_reasoning_signature(&replay)
-    {
+    if let Some((replay, signature)) = reasoning_by_output_index.take(active.output_index) {
         out.push(ReducerEvent::ThinkingSignature {
             index: active.anthropic_index,
             signature,
         });
-        output_items_by_index.insert(active.output_index, reasoning_input_item(replay));
+        output_items_by_index.insert(active.output_index, replay.into_input_item());
     }
     out.push(ReducerEvent::ThinkingStop {
         index: active.anthropic_index,
@@ -238,7 +226,7 @@ fn finalize_active_thinking(
 fn close_thinking(
     out: &mut Vec<ReducerEvent>,
     active_thinking: &mut Option<ActiveThinking>,
-    reasoning_by_output_index: &mut std::collections::HashMap<usize, PendingReasoning>,
+    reasoning_by_output_index: &mut ReasoningSigner,
     output_items_by_index: &mut std::collections::BTreeMap<usize, ResponsesInputItem>,
 ) {
     if let Some(active) = active_thinking.take() {
@@ -255,16 +243,10 @@ fn emit_signature_only_reasoning(
     output_index: usize,
     anthropic_index: &mut usize,
     out: &mut Vec<ReducerEvent>,
-    reasoning_by_output_index: &mut std::collections::HashMap<usize, PendingReasoning>,
+    reasoning_by_output_index: &mut ReasoningSigner,
     output_items_by_index: &mut std::collections::BTreeMap<usize, ResponsesInputItem>,
 ) {
-    let Some(replay) = reasoning_by_output_index
-        .remove(&output_index)
-        .and_then(|pending| pending.replay())
-    else {
-        return;
-    };
-    let Some(signature) = encode_reasoning_signature(&replay) else {
+    let Some((replay, signature)) = reasoning_by_output_index.take(output_index) else {
         return;
     };
     let index = *anthropic_index;
@@ -272,13 +254,14 @@ fn emit_signature_only_reasoning(
     out.push(ReducerEvent::ThinkingStart { index });
     out.push(ReducerEvent::ThinkingSignature { index, signature });
     out.push(ReducerEvent::ThinkingStop { index });
-    output_items_by_index.insert(output_index, reasoning_input_item(replay));
+    output_items_by_index.insert(output_index, replay.into_input_item());
 }
 
 pub fn finish_metadata_from_upstream(
     input: &[u8],
+    account: &ReasoningAccount,
 ) -> Result<Option<FinishMetadata>, UpstreamStreamError> {
-    let events = reduce_upstream_bytes(input)?;
+    let events = reduce_upstream_bytes(input, account)?;
     Ok(events.into_iter().rev().find_map(|event| match event {
         ReducerEvent::Finish {
             continuation_eligible,
@@ -294,13 +277,17 @@ pub fn finish_metadata_from_upstream(
     }))
 }
 
-pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, UpstreamStreamError> {
-    reduce_upstream_bytes_with_policy(input, IncompleteResponsePolicy::Error)
+pub fn reduce_upstream_bytes(
+    input: &[u8],
+    account: &ReasoningAccount,
+) -> Result<Vec<ReducerEvent>, UpstreamStreamError> {
+    reduce_upstream_bytes_with_policy(input, IncompleteResponsePolicy::Error, account)
 }
 
 pub(crate) fn reduce_upstream_bytes_with_policy(
     input: &[u8],
     incomplete_response_policy: IncompleteResponsePolicy,
+    account: &ReasoningAccount,
 ) -> Result<Vec<ReducerEvent>, UpstreamStreamError> {
     let sse_events = parse_sse_events(input);
     let mut out = Vec::new();
@@ -311,8 +298,7 @@ pub(crate) fn reduce_upstream_bytes_with_policy(
         std::collections::BTreeMap::new();
     let mut item_id_to_output_index: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
-    let mut reasoning_by_output_index: std::collections::HashMap<usize, PendingReasoning> =
-        std::collections::HashMap::new();
+    let mut reasoning_by_output_index = ReasoningSigner::new(account.clone());
     let mut anthropic_index = 0usize;
     let mut active_thinking: Option<ActiveThinking> = None;
     let mut saw_tool_use = false;
@@ -466,10 +452,7 @@ pub(crate) fn reduce_upstream_bytes_with_policy(
 
             let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
             if item_type == "reasoning" {
-                reasoning_by_output_index
-                    .entry(output_index)
-                    .or_default()
-                    .capture(item);
+                reasoning_by_output_index.capture(output_index, item);
                 continue;
             }
             if item_type == "web_search_call" {
@@ -732,10 +715,7 @@ pub(crate) fn reduce_upstream_bytes_with_policy(
             if let Some(item_val) = item
                 && item_val.get("type").and_then(|v| v.as_str()) == Some("reasoning")
             {
-                reasoning_by_output_index
-                    .entry(output_index)
-                    .or_default()
-                    .capture(item_val);
+                reasoning_by_output_index.capture(output_index, item_val);
                 let had_active_summary =
                     active_thinking.is_some_and(|active| active.output_index == output_index);
                 close_thinking(
@@ -1169,7 +1149,7 @@ mod tests {
                 })
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap();
         let last = out.last().unwrap();
         if let ReducerEvent::Finish {
             stop_reason,
@@ -1223,7 +1203,7 @@ mod tests {
                 })
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap();
         let last = out.last().unwrap();
         if let ReducerEvent::Finish { stop_reason, .. } = last {
             assert_eq!(*stop_reason, "tool_use");
@@ -1245,7 +1225,7 @@ mod tests {
                 json!({"response":{"id":"resp_1","status":"completed","usage":{}}}),
             )
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap();
         assert!(matches!(out.first(), Some(ReducerEvent::Progress)));
         let Some(ReducerEvent::Finish { usage, .. }) = out.last() else {
             panic!("expected Finish");
@@ -1281,7 +1261,7 @@ mod tests {
                 })
             )
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap();
         assert!(out.iter().any(|event| {
             matches!(
                 event,
@@ -1306,7 +1286,7 @@ mod tests {
     #[test]
     fn reduce_upstream_error_event() {
         let upstream = sse("error", json!({"error":{"message":"upstream failure"}}));
-        let result = reduce_upstream_bytes(upstream.as_bytes());
+        let result = reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default());
         assert!(result.is_err());
         match result.unwrap_err().kind {
             UpstreamErrorKind::Failed => {}
@@ -1358,7 +1338,7 @@ mod tests {
                 })
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap();
         let has_web_search = out
             .iter()
             .any(|e| matches!(e, ReducerEvent::WebSearch { .. }));
@@ -1399,7 +1379,8 @@ mod tests {
                 })
             ),
         );
-        let err = reduce_upstream_bytes(upstream.as_bytes()).unwrap_err();
+        let err =
+            reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap_err();
         assert_eq!(err.kind, UpstreamErrorKind::Transient);
         assert!(err.message.contains("terminal"));
     }
@@ -1410,7 +1391,8 @@ mod tests {
             "response.incomplete",
             json!({"response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{}}}),
         );
-        let err = reduce_upstream_bytes(upstream.as_bytes()).unwrap_err();
+        let err =
+            reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap_err();
         assert_eq!(err.kind, UpstreamErrorKind::Transient);
         assert!(err.message.contains("max_output_tokens"));
     }
@@ -1424,6 +1406,7 @@ mod tests {
         let out = reduce_upstream_bytes_with_policy(
             upstream.as_bytes(),
             IncompleteResponsePolicy::AllowMaxOutputTokens,
+            &ReasoningAccount::default(),
         )
         .unwrap();
         let Some(ReducerEvent::Finish {
@@ -1461,6 +1444,7 @@ mod tests {
         let err = reduce_upstream_bytes_with_policy(
             upstream.as_bytes(),
             IncompleteResponsePolicy::AllowMaxOutputTokens,
+            &ReasoningAccount::default(),
         )
         .unwrap_err();
         assert_eq!(err.kind, UpstreamErrorKind::Transient);
@@ -1495,6 +1479,7 @@ mod tests {
             let err = reduce_upstream_bytes_with_policy(
                 upstream.as_bytes(),
                 IncompleteResponsePolicy::AllowMaxOutputTokens,
+                &ReasoningAccount::default(),
             )
             .unwrap_err();
 
@@ -1517,7 +1502,7 @@ mod tests {
             ),
         );
 
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap();
         let Some(ReducerEvent::Finish { stop_reason, .. }) = out.last() else {
             panic!("expected Finish");
         };
@@ -1535,7 +1520,7 @@ mod tests {
             sse("ping", json!({"cost":"0"})),
         );
 
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap();
         let Some(ReducerEvent::Finish { stop_reason, .. }) = out.last() else {
             panic!("expected Finish");
         };
@@ -1572,6 +1557,7 @@ mod tests {
         let out = reduce_upstream_bytes_with_policy(
             upstream.as_bytes(),
             IncompleteResponsePolicy::AllowMaxOutputTokens,
+            &ReasoningAccount::default(),
         )
         .unwrap();
         let Some(ReducerEvent::Finish { stop_reason, .. }) = out.last() else {
@@ -1586,7 +1572,7 @@ mod tests {
             "response.completed",
             json!({"response":{"id":"resp_1","status":"completed","incomplete_details":null,"usage":{}}}),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap();
         let last = out.last().unwrap();
         if let ReducerEvent::Finish {
             stop_reason,
@@ -1607,7 +1593,7 @@ mod tests {
             "response.completed",
             json!({"response":{"id":"resp_1","usage":{}}}),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap();
         let last = out.last().unwrap();
         if let ReducerEvent::Finish {
             continuation_eligible,
@@ -1650,9 +1636,10 @@ mod tests {
                 })
             ),
         );
-        let metadata = finish_metadata_from_upstream(upstream.as_bytes())
-            .unwrap()
-            .unwrap();
+        let metadata =
+            finish_metadata_from_upstream(upstream.as_bytes(), &ReasoningAccount::default())
+                .unwrap()
+                .unwrap();
         assert!(metadata.continuation_eligible);
         assert_eq!(metadata.response_id.as_deref(), Some("resp_1"));
         assert_eq!(metadata.output_items.len(), 1);
@@ -1755,7 +1742,7 @@ mod tests {
                 )
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap();
         assert!(matches!(
             out.iter()
                 .find(|event| matches!(event, ReducerEvent::ThinkingStart { .. })),
@@ -1818,7 +1805,7 @@ mod tests {
                 )
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap();
         assert!(!out.iter().any(|event| matches!(
             event,
             ReducerEvent::ThinkingStart { .. }
@@ -1852,7 +1839,7 @@ mod tests {
                 json!({"response":{"id":"resp_1","usage":{}}})
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap();
         let deltas: Vec<&str> = out
             .iter()
             .filter_map(|event| match event {
@@ -1894,7 +1881,7 @@ mod tests {
                 json!({"response":{"id":"resp_1","usage":{}}})
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), &ReasoningAccount::default()).unwrap();
         assert_eq!(
             out.iter()
                 .filter(|event| matches!(event, ReducerEvent::ThinkingStart { .. }))
@@ -1944,7 +1931,8 @@ mod tests {
                 json!({"response":{"id":"resp_1","usage":{}}})
             ),
         );
-        let events = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let account = ReasoningAccount::new(Some("acct"));
+        let events = reduce_upstream_bytes(upstream.as_bytes(), &account).unwrap();
         let signature_index = events
             .iter()
             .position(|event| matches!(event, ReducerEvent::ThinkingSignature { .. }))
@@ -1958,8 +1946,7 @@ mod tests {
         let ReducerEvent::ThinkingSignature { signature, .. } = &events[signature_index] else {
             unreachable!();
         };
-        let replay =
-            super::super::reasoning_signature::decode_reasoning_signature(signature).unwrap();
+        let replay = account.replay(Some(signature)).unwrap();
         assert_eq!(replay.id, "rs_1");
         assert_eq!(replay.encrypted_content, "opaque");
 

@@ -9,6 +9,7 @@ use super::constants::{CLIENT_ID, ISSUER, REFRESH_MARGIN_MS};
 use super::jwt::{TokenResponse, extract_account_id, validate_token_response};
 use super::token_store::{CodexTokenStore, StoredAuth};
 use crate::auth::AuthStorage;
+use crate::providers::codex::translate::reasoning_signature::ReasoningAccount;
 
 static CODEX_REFRESH_LOCK: LazyLock<Arc<AsyncMutex<()>>> =
     LazyLock::new(|| Arc::new(AsyncMutex::new(())));
@@ -65,6 +66,11 @@ impl<S: AuthStorage<StoredAuth>> CodexAuthManager<S> {
 
     pub async fn force_refresh(&self, rejected_access: &str) -> Result<StoredAuth, anyhow::Error> {
         self.refresh(true, Some(rejected_access)).await
+    }
+
+    pub fn reasoning_account(&self) -> ReasoningAccount {
+        let auth = self.load_auth().ok().flatten();
+        ReasoningAccount::new(auth.as_ref().and_then(|auth| auth.account_id.as_deref()))
     }
 
     fn load_auth(&self) -> Result<Option<StoredAuth>, anyhow::Error> {
