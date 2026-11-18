@@ -104,10 +104,6 @@ impl TrafficCapture {
         let _ = write_bytes(path, &payload);
     }
 
-    pub fn stream_capture(&self) -> StreamTrafficCapture {
-        StreamTrafficCapture::default()
-    }
-
     fn next_artifact_path(&self, name: &str, ensure_ext_json: bool) -> PathBuf {
         let mut counter: MutexGuard<'_, usize> = self
             .artifact_counter
@@ -177,153 +173,6 @@ fn write_bytes(path: PathBuf, value: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-pub struct StreamTrafficCapture {
-    upstream_sse: Vec<u8>,
-    upstream_events: Vec<Value>,
-    downstream_events: Vec<Value>,
-    malformed: Vec<Value>,
-    upstream_event_bytes: usize,
-    downstream_event_bytes: usize,
-    upstream_sse_truncated: u64,
-    upstream_events_truncated: u64,
-    downstream_events_truncated: u64,
-    malformed_truncated: u64,
-    upstream_frames_truncated: u64,
-}
-
-impl Default for StreamTrafficCapture {
-    fn default() -> Self {
-        Self {
-            upstream_sse: Vec::with_capacity(MAX_SSE_CAPTURE_BYTES.min(64 * 1024)),
-            upstream_events: Vec::new(),
-            downstream_events: Vec::new(),
-            malformed: Vec::new(),
-            upstream_event_bytes: 0,
-            downstream_event_bytes: 0,
-            upstream_sse_truncated: 0,
-            upstream_events_truncated: 0,
-            downstream_events_truncated: 0,
-            malformed_truncated: 0,
-            upstream_frames_truncated: 0,
-        }
-    }
-}
-
-impl StreamTrafficCapture {
-    pub fn upstream_event(&mut self, event: Option<&str>, value: &Value) {
-        let value = redact_traffic(value);
-        let frame = serde_json::to_vec(&value).unwrap_or_default();
-        let event = event.unwrap_or("message");
-        let frame_len = event.len().saturating_add(frame.len()).saturating_add(16);
-        if frame_len > MAX_STREAM_CAPTURE_FRAME_BYTES {
-            self.upstream_frames_truncated = self.upstream_frames_truncated.saturating_add(1);
-        } else if self.upstream_sse.len().saturating_add(frame_len) <= MAX_SSE_CAPTURE_BYTES {
-            self.upstream_sse.extend_from_slice(b"event: ");
-            self.upstream_sse.extend_from_slice(event.as_bytes());
-            self.upstream_sse.extend_from_slice(b"\ndata: ");
-            self.upstream_sse.extend_from_slice(&frame);
-            self.upstream_sse.extend_from_slice(b"\n\n");
-        } else {
-            self.upstream_sse_truncated = self.upstream_sse_truncated.saturating_add(1);
-        }
-        self.push_event(true, serde_json::json!({"event":event,"data":value}));
-    }
-
-    pub fn malformed(&mut self, stage: &str, kind: &str) {
-        if self.malformed.len() < MAX_STREAM_CAPTURE_EVENTS {
-            self.malformed
-                .push(serde_json::json!({"stage":stage,"kind":kind}));
-        } else {
-            self.malformed_truncated = self.malformed_truncated.saturating_add(1);
-        }
-    }
-
-    pub fn downstream_event(&mut self, event: &str, data: Value) {
-        self.push_event(
-            false,
-            serde_json::json!({"event":event,"data":redact_traffic(&data)}),
-        );
-    }
-
-    fn push_event(&mut self, upstream: bool, value: Value) {
-        let bytes = serde_json::to_vec(&value).map_or(0, |value| value.len());
-        let (events, total, truncated) = if upstream {
-            (
-                &mut self.upstream_events,
-                &mut self.upstream_event_bytes,
-                &mut self.upstream_events_truncated,
-            )
-        } else {
-            (
-                &mut self.downstream_events,
-                &mut self.downstream_event_bytes,
-                &mut self.downstream_events_truncated,
-            )
-        };
-        if events.len() < MAX_STREAM_CAPTURE_EVENTS
-            && total.saturating_add(bytes) <= MAX_STREAM_CAPTURE_EVENT_BYTES
-        {
-            *total += bytes;
-            events.push(value);
-        } else {
-            *truncated = truncated.saturating_add(1);
-        }
-    }
-
-    pub fn finish(self, traffic: &TrafficCapture, completion: Value) {
-        self.finish_named(traffic, completion, "061-grok-stream-summary");
-    }
-
-    pub fn finish_named(self, traffic: &TrafficCapture, completion: Value, summary_name: &str) {
-        let upstream_event_count = self.upstream_events.len();
-        let downstream_event_count = self.downstream_events.len();
-        if !self.upstream_sse.is_empty() {
-            traffic.write_bytes("032-upstream-response-body.sse", &self.upstream_sse);
-        }
-        traffic.write_json(
-            "033-upstream-response-capture",
-            &serde_json::json!({
-                "truncated": self.upstream_sse_truncated > 0 || self.upstream_frames_truncated > 0 || self.upstream_events_truncated > 0,
-                "captured_bytes": self.upstream_sse.len(),
-                "truncated_frames": self.upstream_sse_truncated,
-                "oversized_frames": self.upstream_frames_truncated,
-                "captured_events": self.upstream_events.len(),
-                "captured_event_bytes": self.upstream_event_bytes,
-                "truncated_events": self.upstream_events_truncated,
-                "malformed": self.malformed,
-                "truncated_malformed": self.malformed_truncated,
-            }),
-        );
-        for value in self.upstream_events {
-            traffic.write_json_event("040-upstream-event", &value);
-        }
-        for value in self.downstream_events {
-            traffic.write_json_event("050-downstream-event", &value);
-        }
-        traffic.write_json(
-            summary_name,
-            &serde_json::json!({
-                "completion": completion,
-                "upstream_sse": {
-                    "captured_bytes": self.upstream_sse.len(),
-                    "truncated_frames": self.upstream_sse_truncated,
-                    "oversized_frames": self.upstream_frames_truncated,
-                },
-                "upstream_events": {
-                    "captured": upstream_event_count,
-                    "captured_bytes": self.upstream_event_bytes,
-                    "truncated": self.upstream_events_truncated,
-                },
-                "downstream_events": {
-                    "captured": downstream_event_count,
-                    "captured_bytes": self.downstream_event_bytes,
-                    "truncated": self.downstream_events_truncated,
-                },
-            }),
-        );
-    }
-}
-
 pub fn sanitize_path_part(input: &str) -> String {
     let cleaned: String = input
         .chars()
@@ -363,8 +212,6 @@ fn redact_traffic_with_depth(value: &Value, depth: u16) -> Value {
             for (key, value) in map {
                 let normalized = key.to_lowercase();
                 if normalized == "image_url" {
-                    // Grok/OpenAI `input_image` parts carry data URLs; never
-                    // persist the payload in traffic captures.
                     out.insert(key.clone(), redact_traffic_value(value));
                 } else if normalized == "data" && looks_like_image_source(map) {
                     // Anthropic image blocks carry raw base64 under
@@ -453,8 +300,6 @@ fn looks_like_image_source(map: &Map<String, Value>) -> bool {
 fn redact_traffic_value(value: &Value) -> Value {
     match value {
         Value::String(s) => Value::String(format!("[redacted len={}]", s.len())),
-        // Structured values (e.g. Kimi's `{url: ...}` image_url) keep their
-        // shape so captures stay parseable; only the payload leaves.
         Value::Object(_) | Value::Array(_) => redact_traffic(value),
         _ => Value::String("[redacted]".to_string()),
     }
@@ -813,8 +658,6 @@ mod tests {
 
     #[test]
     fn redact_traffic_keeps_structured_image_url_shape() {
-        // Kimi-style object image_url: redact the payload but keep the object
-        // structure so captures stay parseable.
         let value = serde_json::json!({
             "image_url": {"url": "DATA:IMAGE/PNG;BASE64,iVBORw0KGgoAAAANSUhEUg"}
         });

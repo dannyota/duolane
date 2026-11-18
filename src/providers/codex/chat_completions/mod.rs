@@ -306,8 +306,6 @@ mod tests {
         RequestContext {
             req_id: "chat-test".into(),
             session_id: Some("session".into()),
-            session_seq: None,
-            provider: "codex".into(),
             traffic: None,
             monitor: Some(monitor),
             passthrough: None,

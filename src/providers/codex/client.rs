@@ -3199,8 +3199,6 @@ mod tests {
         RequestContext {
             req_id: "http-body-test".into(),
             session_id: None,
-            session_seq: None,
-            provider: "codex".into(),
             traffic: None,
             monitor: None,
             passthrough: None,
@@ -5273,8 +5271,6 @@ mod tests {
         let ctx = RequestContext {
             req_id: "r".into(),
             session_id: Some("s".into()),
-            session_seq: None,
-            provider: "codex".into(),
             traffic: None,
             monitor: None,
             passthrough: None,
@@ -5303,8 +5299,6 @@ mod tests {
         let ctx = RequestContext {
             req_id: "r".into(),
             session_id: None,
-            session_seq: None,
-            provider: "codex".into(),
             traffic: None,
             monitor: None,
             passthrough: None,
@@ -5331,8 +5325,6 @@ mod tests {
         let ctx = RequestContext {
             req_id: "r".into(),
             session_id: None,
-            session_seq: None,
-            provider: "codex".into(),
             traffic: None,
             monitor: None,
             passthrough: None,
@@ -5353,8 +5345,6 @@ mod tests {
         let ctx = RequestContext {
             req_id: "r".into(),
             session_id: Some("bad\nsession".into()),
-            session_seq: None,
-            provider: "codex".into(),
             traffic: None,
             monitor: None,
             passthrough: None,
@@ -5448,8 +5438,6 @@ mod tests {
         let ctx = RequestContext {
             req_id: "r".into(),
             session_id: None,
-            session_seq: None,
-            provider: "codex".into(),
             traffic: None,
             monitor: None,
             passthrough: None,

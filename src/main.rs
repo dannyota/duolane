@@ -47,27 +47,9 @@ enum Commands {
     #[command(hide = true)]
     Demo,
     /// List supported provider models
-    Models {
-        #[arg(long)]
-        full: bool,
-    },
+    Models,
     /// Manage Codex authentication
     Codex {
-        #[command(subcommand)]
-        command: ProviderGroup,
-    },
-    /// Manage Kimi authentication
-    Kimi {
-        #[command(subcommand)]
-        command: ProviderGroup,
-    },
-    /// Manage Cursor authentication
-    Cursor {
-        #[command(subcommand)]
-        command: ProviderGroup,
-    },
-    /// Manage Grok authentication
-    Grok {
         #[command(subcommand)]
         command: ProviderGroup,
     },
@@ -182,14 +164,11 @@ fn main() -> Result<()> {
             tui::run_attached_monitor(|| monitor.snapshot(), url.to_string())?;
             Ok(())
         }
-        Commands::Models { full } => {
-            print_models(&Registry::with_default_alias(), full);
+        Commands::Models => {
+            print_models(&Registry::with_default_alias());
             Ok(())
         }
         Commands::Codex { command } => run_provider_cli("codex", command),
-        Commands::Kimi { command } => run_provider_cli("kimi", command),
-        Commands::Cursor { command } => run_provider_cli("cursor", command),
-        Commands::Grok { command } => run_provider_cli("grok", command),
     }
 }
 
@@ -323,46 +302,13 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
     }
 }
 
-fn print_models(registry: &Registry, full: bool) {
-    let grouped = registry.grouped_models();
-    let signed_out = registry.signed_out();
-    for provider in ["codex", "kimi", "grok", "cursor"] {
-        if let Some(hint) = signed_out.get(provider) {
-            println!("{provider}: not signed in, {hint}");
-            continue;
-        }
-        let Some(models) = grouped.get(provider) else {
-            continue;
-        };
-        if full || provider != "cursor" {
-            println!("{provider}: {}", models.join(", "));
-        } else {
-            println!("{provider}: {}", compact_cursor_list(models));
-        }
+fn print_models(registry: &Registry) {
+    let provider = "codex";
+    if let Some(hint) = registry.signed_out().get(provider) {
+        println!("{provider}: not signed in, {hint}");
+    } else if let Some(models) = registry.grouped_models().get(provider) {
+        println!("{provider}: {}", models.join(", "));
     }
-}
-
-fn compact_cursor_list(models: &[String]) -> String {
-    let mut legacy = Vec::new();
-    let mut dynamic = Vec::new();
-    for model in models {
-        if !model.contains(':') {
-            legacy.push(model.clone());
-        } else {
-            dynamic.push(model.clone());
-        }
-    }
-    let mut out = String::new();
-    if !legacy.is_empty() {
-        out.push_str(&legacy.join(", "));
-        out.push_str("; ");
-    }
-    out.push_str(&format!("{} cursor model aliases", dynamic.len()));
-    if !dynamic.is_empty() {
-        out.push_str(", example: cursor:gpt-5.5");
-    }
-    out.push_str(" run `claude-codex models --full` for all aliases");
-    out
 }
 
 fn listen_url(bind_address: &str, port: u16) -> String {
@@ -379,7 +325,7 @@ fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
     if cfg.exists() {
         println!("Config: {}", cfg.display());
     }
-    print_models(registry, false);
+    print_models(registry);
     println!();
     println!("Configure Claude Code:");
     println!("  export ANTHROPIC_BASE_URL=\"http://localhost:{port}\"");

@@ -82,7 +82,6 @@ fn valid_slug(slug: &str) -> bool {
         && !slug.ends_with("-fast")
         && !slug.ends_with("-ultrafast")
         && !crate::registry::is_anthropic_alias(slug)
-        && !crate::registry::is_cursor_model(slug)
 }
 
 /// Malformed entries are skipped; required metadata must not grant access by
@@ -207,8 +206,6 @@ mod tests {
             "gpt-test-ultrafast",
             "opus",
             "claude-sonnet-5",
-            "cursor",
-            "cursor:test",
             "-test",
         ] {
             assert!(!valid_slug(slug), "{slug:?}");

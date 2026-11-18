@@ -1911,8 +1911,6 @@ mod tests {
         RequestContext {
             req_id: format!("request-{session_id}"),
             session_id: Some(session_id.to_string()),
-            session_seq: None,
-            provider: "codex".to_string(),
             traffic: None,
             monitor: None,
             passthrough: None,
@@ -2302,8 +2300,6 @@ mod tests {
         let ctx = RequestContext {
             req_id: "empty-terminal".to_string(),
             session_id: None,
-            session_seq: None,
-            provider: "codex".to_string(),
             traffic: None,
             monitor: None,
             passthrough: None,
@@ -2551,8 +2547,6 @@ mod tests {
         let ctx = RequestContext {
             req_id: "request".to_string(),
             session_id: None,
-            session_seq: None,
-            provider: "codex".to_string(),
             traffic: None,
             monitor: Some(monitor.clone()),
             passthrough: None,
@@ -2584,8 +2578,6 @@ mod tests {
         let ctx = RequestContext {
             req_id: "incremental-http".to_string(),
             session_id: None,
-            session_seq: None,
-            provider: "codex".to_string(),
             traffic: None,
             monitor: None,
             passthrough: None,

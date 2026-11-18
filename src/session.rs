@@ -91,11 +91,7 @@ pub(crate) fn record_session_request_with_affinity_update(
         && is_alias_routable_provider(provider_name)
         && !crate::registry::is_anthropic_alias(normalize_incoming_model(model).as_str())
     {
-        next.affinity_provider = Some(match provider_name {
-            "codex" => AliasProvider::Codex,
-            "kimi" => AliasProvider::Kimi,
-            _ => next.affinity_provider.unwrap_or(AliasProvider::Codex),
-        });
+        next.affinity_provider = Some(AliasProvider::Codex);
     }
 
     if !store.map.contains_key(id) {
@@ -115,7 +111,7 @@ pub(crate) fn record_session_request_with_affinity_update(
 }
 
 fn is_alias_routable_provider(name: &str) -> bool {
-    matches!(name, "codex" | "kimi")
+    name == "codex"
 }
 
 #[cfg(test)]
@@ -165,20 +161,27 @@ mod tests {
     #[test]
     fn auxiliary_request_does_not_change_session_affinity() {
         let session_id = "session-affinity-auxiliary-request-test";
-        let initial = record_session_request(Some(session_id), None, "codex", "gpt-5.6-sol", 1)
-            .expect("initial session");
-        assert_eq!(initial.affinity_provider, Some(AliasProvider::Codex));
-
         let after_review = record_session_request_with_affinity_update(
             Some(session_id),
-            Some(&initial),
-            "kimi",
-            "kimi-for-coding",
+            None,
+            "codex",
+            "gpt-5.6-sol",
             false,
+            1,
+        )
+        .expect("auxiliary session");
+        assert_eq!(after_review.seq, 1);
+        assert_eq!(after_review.affinity_provider, None);
+
+        let primary = record_session_request(
+            Some(session_id),
+            Some(&after_review),
+            "codex",
+            "gpt-5.6-sol",
             2,
         )
-        .expect("updated session");
-        assert_eq!(after_review.seq, 2);
-        assert_eq!(after_review.affinity_provider, Some(AliasProvider::Codex));
+        .expect("primary session");
+        assert_eq!(primary.seq, 2);
+        assert_eq!(primary.affinity_provider, Some(AliasProvider::Codex));
     }
 }

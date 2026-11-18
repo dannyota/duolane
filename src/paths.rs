@@ -64,10 +64,6 @@ pub fn resolve_state_dir(deps: &DirResolverEnv) -> PathBuf {
     join_with_sep(&base, &["claude-code-proxy"], false)
 }
 
-pub fn legacy_config_dir(deps: &DirResolverEnv) -> PathBuf {
-    join_with_sep(&deps.home, &[".config", "claude-code-proxy"], false)
-}
-
 pub fn config_dir() -> PathBuf {
     resolve_config_dir(&DirResolverEnv::default())
 }
@@ -80,50 +76,8 @@ pub fn codex_auth_file(deps: &DirResolverEnv) -> PathBuf {
     resolve_config_dir(deps).join("codex").join("auth.json")
 }
 
-pub fn kimi_auth_file(deps: &DirResolverEnv) -> PathBuf {
-    resolve_config_dir(deps).join("kimi").join("auth.json")
-}
-
-pub fn cursor_auth_file(deps: &DirResolverEnv) -> PathBuf {
-    resolve_config_dir(deps).join("cursor").join("auth.json")
-}
-
-/// Where `cursor-agent login` keeps its token when it writes a file, not the Keychain.
-pub fn cursor_agent_auth_file(deps: &DirResolverEnv) -> PathBuf {
-    let base = |var: &str, fallback: &str| {
-        PathBuf::from(
-            deps.env
-                .get(var)
-                .cloned()
-                .unwrap_or_else(|| format!("{}{fallback}", deps.home)),
-        )
-    };
-    let dir = if cfg!(target_os = "macos") {
-        PathBuf::from(&deps.home).join(".cursor")
-    } else if cfg!(windows) {
-        base("APPDATA", "\\AppData\\Roaming").join("Cursor")
-    } else {
-        base("XDG_CONFIG_HOME", "/.config").join("cursor")
-    };
-    dir.join("auth.json")
-}
-
-pub fn kimi_device_id_file(deps: &DirResolverEnv) -> PathBuf {
-    resolve_config_dir(deps).join("kimi").join("device_id")
-}
-
 pub fn log_file() -> PathBuf {
     resolve_state_dir(&DirResolverEnv::default()).join("proxy.log")
-}
-
-pub fn provider_auth_file(provider: &str) -> PathBuf {
-    let deps = DirResolverEnv::default();
-    resolve_config_dir(&deps).join(provider).join("auth.json")
-}
-
-pub fn provider_legacy_auth_file(provider: &str) -> PathBuf {
-    let deps = DirResolverEnv::default();
-    legacy_config_dir(&deps).join(provider).join("auth.json")
 }
 
 fn join_with_sep(base: &str, parts: &[&str], win32: bool) -> PathBuf {

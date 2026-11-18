@@ -1,9 +1,6 @@
 #[path = "support/isolated_codex.rs"]
 mod isolated_codex;
 
-// End-to-end tests for local server health, provider routing, Kimi, Codex HTTP,
-// and Codex WebSocket through in-process mock upstreams with isolated auth.
-
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
@@ -41,20 +38,6 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     }
-}
-
-/// Write a valid Kimi auth.json under `config_dir`.
-fn write_kimi_auth(config_dir: &std::path::Path) {
-    let dir = config_dir.join("kimi");
-    std::fs::create_dir_all(&dir).unwrap();
-    let auth = json!({
-        "access": "test-access",
-        "refresh": "test-refresh",
-        "expires": 4102444800000_i64,
-        "scope": "openid",
-        "userId": "user_test"
-    });
-    std::fs::write(dir.join("auth.json"), serde_json::to_vec(&auth).unwrap()).unwrap();
 }
 
 /// Write a Codex CLI style `auth.json` and point the proxy at it for the test's
@@ -999,74 +982,6 @@ async fn smoke_codex_model_routes_to_real_provider() {
             .unwrap()
             .contains("No Codex credentials")
     );
-}
-
-#[test]
-fn smoke_kimi_model_is_registered() {
-    // Kimi uses reqwest::blocking::Client internally, which panics when
-    // dropped from an async context (it joins a dedicated runtime thread).
-    // Test routing at the Registry level instead of through the HTTP stack.
-    let registry = Registry::with_default_alias();
-    let provider = registry.provider_for_model("kimi-for-coding", None);
-    assert!(
-        provider.is_some(),
-        "kimi-for-coding must resolve to a registered provider"
-    );
-    assert_eq!(
-        provider.unwrap().name(),
-        "kimi",
-        "kimi-for-coding must route to the kimi provider"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Kimi smoke: mock upstream verifies request shape and returns a valid
-// streaming response. Uses multi-thread runtime because KimiHttpClient uses
-// reqwest::blocking::Client internally.
-// ---------------------------------------------------------------------------
-
-#[allow(clippy::await_holding_lock)]
-#[tokio::test(flavor = "multi_thread")]
-async fn smoke_kimi_messages_uses_mock_upstream() {
-    let _guard = env_lock();
-    let config = TempDir::new().unwrap();
-    write_kimi_auth(config.path());
-
-    let captured = Arc::new(Mutex::new(None));
-    let upstream = spawn_http_upstream({
-        let captured = captured.clone();
-        move |body: Value| {
-            let _ = captured.lock().map(|mut g| *g = Some(body));
-            concat!(
-                "data: {\"choices\":[{\"delta\":{\"content\":\"kimi ok\"}}]}\n\n",
-                "data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
-                "data: [DONE]\n\n"
-            )
-            .as_bytes()
-            .to_vec()
-        }
-    })
-    .await;
-
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_KIMI_BASE_URL", &upstream);
-    let _compaction_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "1");
-    let response = call_messages("kimi-for-coding").await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let value: Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(value["content"][0]["text"], "kimi ok");
-
-    let sent = captured.lock().unwrap().clone().unwrap();
-    assert_eq!(sent["model"], "kimi-for-coding");
-    assert_eq!(sent["stream"], true);
-    assert!(sent.get("input").is_none());
-    assert!(!sent.to_string().contains("compaction_trigger"));
 }
 
 // ---------------------------------------------------------------------------

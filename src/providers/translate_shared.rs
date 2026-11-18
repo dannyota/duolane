@@ -81,13 +81,7 @@ pub fn parallel_tool_calls(req: &MessagesRequest) -> Option<bool> {
 }
 
 pub fn read_effort(req: &MessagesRequest) -> Result<Option<&str>, anyhow::Error> {
-    read_effort_with_allowed(req, &["low", "medium", "high", "xhigh", "max"])
-}
-
-pub fn read_effort_with_allowed<'a>(
-    req: &'a MessagesRequest,
-    allowed: &[&str],
-) -> Result<Option<&'a str>, anyhow::Error> {
+    let allowed = ["low", "medium", "high", "xhigh", "max"];
     let output_config = match req.extra.get("output_config") {
         Some(Value::Object(m)) => m,
         _ => return Ok(None),
@@ -127,34 +121,6 @@ pub fn image_source_to_url(source: &ImageSource) -> String {
         source.data.clone()
     } else {
         format!("data:{};base64,{}", source.media_type, source.data)
-    }
-}
-
-pub fn image_block_to_url(block: &Value) -> String {
-    let source_type = block
-        .get("source")
-        .and_then(|s| s.get("type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("base64");
-    if source_type == "url" {
-        block
-            .get("source")
-            .and_then(|s| s.get("url"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    } else {
-        let media_type = block
-            .get("source")
-            .and_then(|s| s.get("media_type"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("image/png");
-        let data = block
-            .get("source")
-            .and_then(|s| s.get("data"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        format!("data:{media_type};base64,{data}")
     }
 }
 

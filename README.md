@@ -22,7 +22,7 @@ your ChatGPT plan, in the same session, and flip between them whenever you want.
 
 [Quickstart](#quickstart) · [Switching models](#switching-models) ·
 [How it works](#how-it-works) · [Configuration](#configuration) ·
-[Other backends](#other-backends) · [Limitations](#limitations)
+[Limitations](#limitations)
 
 ## What you need
 
@@ -159,15 +159,6 @@ OpenAI-compatible clients can send it as `Authorization: Bearer <token>`.
 Alias remapping is optional. For example,
 `ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.6-terra` makes `/model sonnet` use Codex.
 
-## Other backends
-
-The same proxy can also route to **Kimi**, **Grok**, and **Cursor** models, each
-with its own login. Run `claude-codex models` to see the ids of every backend
-you are signed into and how to sign in to the rest, and
-`claude-codex <backend> auth status` to check a login. Cursor reuses an existing
-`cursor-agent login`, so no second login is needed. These backends keep the
-behavior of the upstream project this is based on.
-
 ## Limitations
 
 - Switching plans in the middle of an active tool call (for example pressing Esc
@@ -178,6 +169,6 @@ behavior of the upstream project this is based on.
 ## Credits
 
 Built on [`raine/claude-code-proxy`](https://github.com/raine/claude-code-proxy),
-which provides the Codex, Kimi, Grok, and Cursor backends. This fork adds using
+which provides the Codex backend. This fork adds using
 your Claude subscription as a backend alongside Codex, reasoning that survives a
 mid-conversation switch, and reading the Codex login from the Codex CLI.

@@ -7,8 +7,8 @@ use claude_codex::logging::{create_logger, redact_value};
 use claude_codex::paths::{self, DirResolverEnv};
 use claude_codex::retry::{RETRY_INITIAL_DELAY_MS, RETRY_MAX_DELAY_MS, compute_backoff_delay};
 use claude_codex::traffic::{
-    MAX_SSE_CAPTURE_BYTES, TrafficCaptureOptions, create_traffic_capture, redact_traffic,
-    sanitize_path_part, traffic_capture_enabled_for_env,
+    TrafficCaptureOptions, create_traffic_capture, redact_traffic, sanitize_path_part,
+    traffic_capture_enabled_for_env,
 };
 use serde_json::Map;
 use serde_json::json;
@@ -172,27 +172,20 @@ fn traffic_capture_helpers() {
 
     capture.write_text("020-note", "hello");
     capture.write_json("030-req", &json!({"token":"abc"}));
-    let event = json!({"type":"response.completed","refresh_token":"secret"});
-    let mut stream_capture = capture.stream_capture();
-    for _ in 0..(MAX_SSE_CAPTURE_BYTES / 100 + 2) {
-        stream_capture.upstream_event(Some("response.completed"), &event);
-    }
-    stream_capture.finish(&capture, json!({"kind":"test"}));
-    let transcript = std::fs::read_to_string(
+    let captured = std::fs::read_to_string(
         std::fs::read_dir(capture.root())
             .unwrap()
             .find_map(|entry| {
                 let path = entry.ok()?.path();
                 path.file_name()?
                     .to_string_lossy()
-                    .ends_with("032-upstream-response-body.sse")
+                    .ends_with("030-req.json")
                     .then_some(path)
             })
             .unwrap(),
     )
     .unwrap();
-    assert!(transcript.len() <= MAX_SSE_CAPTURE_BYTES);
-    assert!(!transcript.contains("secret"));
+    assert!(!captured.contains("abc"));
     unsafe {
         env::remove_var("CCP_TRAFFIC_LOG");
     }
@@ -237,10 +230,10 @@ fn config_env_precedence_and_defaults() {
     env.insert("PORT".to_string(), "19999".to_string());
     assert_eq!(load_config_for_env(&env).port, 19999);
 
-    env.insert("CCP_ALIAS_PROVIDER".to_string(), "kimi".to_string());
+    env.insert("CCP_ALIAS_PROVIDER".to_string(), "codex".to_string());
     assert!(matches!(
         load_config_for_env(&env).alias_provider,
-        AliasProvider::Kimi
+        AliasProvider::Codex
     ));
 }
 

@@ -811,8 +811,6 @@ mod tests {
                 crate::provider::RequestContext {
                     req_id: "oversized".into(),
                     session_id: None,
-                    session_seq: None,
-                    provider: "codex".into(),
                     traffic: None,
                     monitor: None,
                     passthrough: None,
@@ -872,8 +870,6 @@ mod tests {
                 crate::provider::RequestContext {
                     req_id: "image-test".into(),
                     session_id: None,
-                    session_seq: None,
-                    provider: "codex".into(),
                     traffic: None,
                     monitor: None,
                     passthrough: None,

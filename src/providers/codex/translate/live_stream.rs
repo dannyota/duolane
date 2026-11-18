@@ -1580,7 +1580,7 @@ mod tests {
                 "item": {
                     "type": "web_search_call",
                     "id": "ws_1",
-                    "action": {"query": "grok reasoning effort"}
+                    "action": {"query": "reasoning effort"}
                 }
             }),
             json!({
@@ -1598,7 +1598,7 @@ mod tests {
                 "annotation": {
                     "type": "url_citation",
                     "title": "Reasoning",
-                    "url": "https://docs.x.ai/docs/guides/reasoning"
+                    "url": "https://docs.example.test/guides/reasoning"
                 }
             }),
             json!({
@@ -1616,7 +1616,7 @@ mod tests {
         let result = out.find("web_search_tool_result").unwrap();
         let text = out.find("See the official docs.").unwrap();
         assert!(tool < result && result < text);
-        assert!(out.contains("https://docs.x.ai/docs/guides/reasoning"));
+        assert!(out.contains("https://docs.example.test/guides/reasoning"));
         assert!(out.contains(r#""web_search_requests":1"#));
     }
 
