@@ -13,16 +13,25 @@ env:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install pinned Rust
         run: |
-          version="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          version="$(tr -d '\r' < rust-toolchain.toml | sed -n 's/^channel = "\(.*\)"$/\1/p')"
           test -n "$version"
           rustup toolchain install "$version" --profile minimal --component rustfmt,clippy
           test "$(rustc --version | cut -d ' ' -f 2)" = "$version"
+      - name: Read the cargo-deny pin
+        run: echo "CARGO_DENY=$(tr -d '\r' < .tool-versions | awk '$1 == "cargo-deny" { print $2 }')" >> "$GITHUB_ENV"
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-deny@${{ env.CARGO_DENY }}
+          fallback: none
+      - name: Dependency policy
+        run: cargo deny --locked check
       - name: Test
         run: cargo test --locked -- --test-threads=1
 
@@ -63,6 +72,7 @@ jobs:
             ext: .exe
             archive: zip
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     env:
       TARGET: ${{ matrix.target }}
       PLATFORM: ${{ matrix.platform }}
@@ -74,7 +84,7 @@ jobs:
       - name: Install pinned Rust
         shell: bash
         run: |
-          version="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          version="$(tr -d '\r' < rust-toolchain.toml | sed -n 's/^channel = "\(.*\)"$/\1/p')"
           test -n "$version"
           rustup toolchain install "$version" --profile minimal --component rustfmt,clippy --target "$TARGET"
           test "$(rustc --version | cut -d ' ' -f 2)" = "$version"
@@ -128,6 +138,7 @@ jobs:
   smoke-windows:
     needs: build
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -140,6 +151,7 @@ jobs:
   release:
     needs: [build, smoke-windows]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -155,6 +167,7 @@ jobs:
       - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           body_path: notes.md
+          fail_on_unmatched_files: true
           files: |
             *.tar.gz
             *.zip

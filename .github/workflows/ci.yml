@@ -33,10 +33,22 @@ jobs:
         run: make lengths
       - name: Comment gate
         run: make comments
-      - name: Workflow pin gate
+      - name: Workflow and tool pin gate
         run: make pins
+      - name: Action pins match their tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/check-workflow-pins.py --tags
+      - name: Read the Node pin
+        run: echo "NODE_VERSION=$(tr -d '\r' < .tool-versions | awk '$1 == "node" { print $2 }')" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
       - name: Install Markdown tools
-        run: npm ci --ignore-scripts --no-audit --no-fund
+        run: |
+          test "$(node --version)" = "v$NODE_VERSION"
+          npm ci --ignore-scripts --no-fund
       - name: Markdown checks
         run: make docs
 
@@ -49,7 +61,7 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust
         run: |
-          version="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          version="$(tr -d '\r' < rust-toolchain.toml | sed -n 's/^channel = "\(.*\)"$/\1/p')"
           test -n "$version"
           rustup toolchain install "$version" --profile minimal --component rustfmt,clippy
           test "$(rustc --version | cut -d ' ' -f 2)" = "$version"
@@ -87,7 +99,7 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust
         run: |
-          version="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          version="$(tr -d '\r' < rust-toolchain.toml | sed -n 's/^channel = "\(.*\)"$/\1/p')"
           test -n "$version"
           rustup toolchain install "$version" --profile minimal --component rustfmt,clippy
           test "$(rustc --version | cut -d ' ' -f 2)" = "$version"
@@ -122,12 +134,12 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust
         run: |
-          version="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          version="$(tr -d '\r' < rust-toolchain.toml | sed -n 's/^channel = "\(.*\)"$/\1/p')"
           test -n "$version"
           rustup toolchain install "$version" --profile minimal --component rustfmt,clippy
           test "$(rustc --version | cut -d ' ' -f 2)" = "$version"
       - name: Read the cargo-deny pin
-        run: echo "CARGO_DENY=$(awk '$1 == "cargo-deny" { print $2 }' .tool-versions)" >> "$GITHUB_ENV"
+        run: echo "CARGO_DENY=$(tr -d '\r' < .tool-versions | awk '$1 == "cargo-deny" { print $2 }')" >> "$GITHUB_ENV"
       - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-deny@${{ env.CARGO_DENY }}
@@ -146,7 +158,7 @@ jobs:
         env:
           GITLEAKS_LINUX_X64_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
         run: |
-          version="$(awk '$1 == "gitleaks" { print $2 }' .tool-versions)"
+          version="$(tr -d '\r' < .tool-versions | awk '$1 == "gitleaks" { print $2 }')"
           archive="gitleaks_${version}_linux_x64.tar.gz"
           curl -fsSL --proto '=https' -o "$RUNNER_TEMP/$archive" \
             "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${archive}"
@@ -204,16 +216,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every job to pass or skip
+      - name: Require every needed job to succeed
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          EVENT: ${{ github.event_name }}
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          for result in $RESULTS; do
-            case "$result" in
-              success | skipped) ;;
-              *)
-                echo "a required job ended with $result"
-                exit 1
-                ;;
-            esac
-          done
+          python3 -I - <<'PYTHON'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS"])
+          expected = {"gates", "rust", "macos", "deny", "gitleaks", "crate-age"}
+          if set(needs) != expected:
+              sys.exit(f"needed jobs {sorted(needs)} differ from {sorted(expected)}")
+          failed = []
+          for name, job in sorted(needs.items()):
+              result = job["result"]
+              optional = name == "crate-age" and os.environ["EVENT"] != "pull_request"
+              if result != "success" and not (optional and result == "skipped"):
+                  failed.append(f"{name}: {result}")
+          if failed:
+              sys.exit("required jobs did not succeed: " + ", ".join(failed))
+          print("every required job succeeded")
+          PYTHON

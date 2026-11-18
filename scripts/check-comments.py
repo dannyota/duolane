@@ -8,6 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ALLOWLIST = Path("scripts/comments-allowlist.txt")
 RAW_STRING = re.compile(r'(?:br|cr|r)(#*)"')
+ATTRIBUTE = re.compile(r"#\s*!?\s*\[")
+DOC_KEY = re.compile(r"(?<![\w$])doc\s*=(?!=)")
 
 
 def skip_quoted(text, start, quote):
@@ -17,61 +19,102 @@ def skip_quoted(text, start, quote):
     return i + 1
 
 
-def comment_spans(text):
-    spans = []
+def scan(text):
+    comments, literals = [], []
     i, n = 0, len(text)
     while i < n:
+        start = i
         if text.startswith("//", i):
             end = text.find("\n", i)
-            end = n if end < 0 else end
-            spans.append((i, end))
-            i = end
+            i = n if end < 0 else end
+            comments.append((start, i))
             continue
         if text.startswith("/*", i):
-            depth, j = 1, i + 2
-            while j < n and depth:
-                if text.startswith("/*", j):
-                    depth, j = depth + 1, j + 2
-                elif text.startswith("*/", j):
-                    depth, j = depth - 1, j + 2
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if text.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif text.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
                 else:
-                    j += 1
-            spans.append((i, j))
-            i = j
+                    i += 1
+            comments.append((start, i))
             continue
         raw = RAW_STRING.match(text, i)
         if raw and not (i and (text[i - 1].isalnum() or text[i - 1] == "_")):
             close = '"' + raw.group(1)
             end = text.find(close, raw.end())
             i = n if end < 0 else end + len(close)
+            literals.append((start, i))
             continue
         if text[i] == '"':
             i = skip_quoted(text, i + 1, '"')
+            literals.append((start, i))
             continue
         if text[i] == "'":
             if text.startswith("\\", i + 1):
                 i = skip_quoted(text, i + 1, "'")
+                literals.append((start, i))
             elif i + 2 < n and text[i + 2] == "'":
                 i += 3
+                literals.append((start, i))
             else:
                 i += 1
             continue
         i += 1
-    return spans
+    return comments, literals
+
+
+def comment_spans(text):
+    return scan(text)[0]
+
+
+def masked(text, spans):
+    chars = list(text)
+    for start, end in spans:
+        for k in range(start, min(end, len(chars))):
+            if chars[k] != "\n":
+                chars[k] = " "
+    return "".join(chars)
+
+
+def doc_attribute_positions(code):
+    positions = set()
+    for attribute in ATTRIBUTE.finditer(code):
+        depth, j = 0, attribute.end() - 1
+        while j < len(code):
+            if code[j] == "[":
+                depth += 1
+            elif code[j] == "]":
+                depth -= 1
+                if not depth:
+                    break
+            j += 1
+        for key in DOC_KEY.finditer(code, attribute.end(), j):
+            positions.add(key.start())
+    return positions
 
 
 def findings(path, text):
-    for start, end in comment_spans(text):
+    comments, literals = scan(text)
+    lines = text.split("\n")
+    found = []
+    for start, end in comments:
         line = text.count("\n", 0, start) + 1
         for offset, fragment in enumerate(text[start:end].split("\n")):
             fragment = fragment.strip()
             if fragment:
-                yield f"{path}:{line + offset}: {fragment}"
+                found.append((line + offset, 0, fragment))
+    for position in doc_attribute_positions(masked(text, comments + literals)):
+        line = text.count("\n", 0, position) + 1
+        found.append((line, 1, lines[line - 1].strip()))
+    for line, _, fragment in sorted(found):
+        yield f"{path}:{line}: {fragment}"
 
 
 def tracked_rust_files():
     listed = subprocess.run(
-        ["git", "ls-files", "-z", "--", "*.rs"],
+        ["git", "ls-files", "-z", "--", "*.rs", "*.inc"],
         cwd=ROOT, check=True, capture_output=True,
     ).stdout.decode()
     return [name for name in listed.split("\0") if name]

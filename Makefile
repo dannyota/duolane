@@ -39,7 +39,7 @@ comments: ## Test and run the code comment gate
 	python3 -I scripts/test/check-comments-test.py
 	python3 -I scripts/check-comments.py
 
-pins: ## Test and run the workflow action pin gate
+pins: ## Test and run the action pin gate and the tool pin consistency check
 	python3 -I scripts/test/check-workflow-pins-test.py
 	python3 -I scripts/check-workflow-pins.py
 

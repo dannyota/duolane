@@ -1,5 +1,7 @@
 #!/usr/bin/env -S python3 -I
 # Usage: python3 -I scripts/test/check-workflow-pins-test.py
+import importlib.util
+import json
 import shutil
 import subprocess
 import sys
@@ -8,8 +10,15 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent.parent / "check-workflow-pins.py"
+sys.dont_write_bytecode = True
+SPEC = importlib.util.spec_from_file_location("check_workflow_pins", SCRIPT)
+check_workflow_pins = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(check_workflow_pins)
+
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+PINS = {"rust": "1.100.0", "node": "24.22.3", "cargo-deny": "0.20.2", "gitleaks": "8.30.1",
+        "prettier": "3.10.1", "markdownlint-cli2": "0.24.1"}
 
 
 class Gate(unittest.TestCase):
@@ -19,11 +28,21 @@ class Gate(unittest.TestCase):
         (self.root / "scripts").mkdir()
         (self.root / ".github/workflows").mkdir(parents=True)
         shutil.copy(SCRIPT, self.root / "scripts/check-workflow-pins.py")
+        self.tools()
 
-    def workflow(self, name, *uses):
-        steps = "".join(f"      {line}\n" for line in uses)
-        text = f"name: x\njobs:\n  a:\n    steps:\n{steps}"
-        (self.root / ".github/workflows" / name).write_text(text)
+    def tools(self, pins=PINS, channel="1.100.0", declared=None, locked=None):
+        declared = declared or {"markdownlint-cli2": "0.24.1", "prettier": "3.10.1"}
+        locked = locked or declared
+        (self.root / ".tool-versions").write_text("".join(f"{k} {v}\n" for k, v in pins.items()))
+        (self.root / "rust-toolchain.toml").write_text(f'[toolchain]\nchannel = "{channel}"\n')
+        (self.root / "package.json").write_text(json.dumps({"private": True, "devDependencies": declared}))
+        packages = {"": {"devDependencies": declared}}
+        packages.update({f"node_modules/{k}": {"version": v} for k, v in locked.items()})
+        (self.root / "package-lock.json").write_text(json.dumps({"packages": packages}))
+
+    def workflow(self, name, *lines):
+        body = "".join(f"      {line}\n" for line in lines)
+        (self.root / ".github/workflows" / name).write_text(f"name: x\njobs:\n  a:\n    steps:\n{body}")
 
     def run_gate(self, *args):
         result = subprocess.run(
@@ -32,20 +51,28 @@ class Gate(unittest.TestCase):
         )
         return result.returncode, (result.stdout + result.stderr).strip()
 
+    def assert_rejected(self, *lines, name="ci.yml", line=5):
+        self.workflow(name, *lines)
+        code, output = self.run_gate()
+        self.assertEqual(code, 1, output)
+        self.assertIn(f".github/workflows/{name}:{line}: expected a block 'uses:", output)
+
     def test_full_pins_pass_and_list(self):
-        self.workflow("ci.yml", f"- uses: actions/checkout@{SHA_A} # v7.0.1")
+        self.workflow("ci.yml", f"- uses: actions/checkout@{SHA_A} # v7.0.1", "# uses: anything@v1")
         self.workflow(
-            "codeql.yml",
+            "codeql.yaml",
             f"- uses: github/codeql-action/init@{SHA_B} # v4.39.3",
             f"- name: analyze\n        uses: github/codeql-action/analyze@{SHA_B} # v4.39.3",
         )
-        self.assertEqual(self.run_gate(), (0, "check-workflow-pins: ok (2 actions in 2 files)"))
+        self.assertEqual(self.run_gate(), (
+            0, "check-workflow-pins: ok (2 actions in 2 files, tool pins agree)",
+        ))
         self.assertEqual(self.run_gate("--list"), (0, "\n".join([
             f"actions/checkout 7.0.1 {SHA_A}",
             f"github/codeql-action 4.39.3 {SHA_B}",
         ])))
 
-    def test_bad_pins_fail(self):
+    def test_bad_block_pins_fail(self):
         for uses in [
             "- uses: actions/checkout@v7",
             "- uses: actions/checkout@v7.0.1 # v7.0.1",
@@ -53,29 +80,85 @@ class Gate(unittest.TestCase):
             f"- uses: actions/checkout@{SHA_A}",
             f"- uses: actions/checkout@{SHA_A} # v7",
             f"- uses: actions/checkout@{SHA_A} # stable",
+            f"- uses: actions/checkout@{SHA_A} # v7.0.1 extra",
             f'- uses: "actions/checkout@{SHA_A}" # v7.0.1',
             "- uses: ./local-action",
             "- uses: docker://alpine:3",
+            "- uses:",
         ]:
             with self.subTest(uses=uses):
-                self.workflow("ci.yml", uses)
+                self.assert_rejected(uses)
+
+    def test_other_key_spellings_fail(self):
+        for uses in [
+            "- {uses: actions/checkout@v7}",
+            f"- {{name: x, uses: actions/checkout@{SHA_A}}}",
+            "- [ {uses: actions/checkout@v7} ]",
+            '- "uses": actions/checkout@v7',
+            "- 'uses': actions/checkout@v7",
+            f'- "uses": actions/checkout@{SHA_A} # v7.0.1',
+            "- uses : actions/checkout@v7",
+            f"- uses : actions/checkout@{SHA_A} # v7.0.1",
+            "- uses\t: actions/checkout@v7",
+            "- ? uses",
+            "  ? 'uses'",
+        ]:
+            with self.subTest(uses=uses):
+                self.assert_rejected(uses)
+        self.assert_rejected("- name: x\n        uses: >-\n          actions/checkout@v7", line=6)
+
+    def test_every_workflow_file_is_checked(self):
+        self.workflow("ci.yml", f"- uses: actions/checkout@{SHA_A} # v7.0.1")
+        self.assert_rejected("- uses: actions/checkout@v7", name="other.yaml")
+
+    def test_other_extensions_fail(self):
+        for name in ["notes.md", "ci.yml.bak", "ci.YML", "release"]:
+            with self.subTest(name=name):
+                self.workflow(name, f"- uses: actions/checkout@{SHA_A} # v7.0.1")
                 code, output = self.run_gate()
                 self.assertEqual(code, 1)
-                self.assertIn(".github/workflows/ci.yml:5: expected owner/repo@", output)
-
-    def test_every_file_is_checked(self):
-        self.workflow("ci.yml", f"- uses: actions/checkout@{SHA_A} # v7.0.1")
-        self.workflow("other.yaml", "- uses: actions/checkout@v7")
-        code, output = self.run_gate()
-        self.assertEqual(code, 1)
-        self.assertIn(".github/workflows/other.yaml:5:", output)
+                self.assertIn(f".github/workflows/{name}: workflows must be .yml or .yaml files", output)
+                (self.root / ".github/workflows" / name).unlink()
 
     def test_one_action_has_one_pin(self):
         self.workflow("ci.yml", f"- uses: actions/checkout@{SHA_A} # v7.0.1")
-        self.workflow("release.yml", f"- uses: actions/checkout@{SHA_B} # v7.0.0")
-        self.assertEqual(self.run_gate(), (
-            1, ".github/workflows/release.yml:5: actions/checkout has another pin in a workflow",
+        self.workflow("release.yml", f"- uses: Actions/Checkout@{SHA_B} # v7.0.0")
+        code, output = self.run_gate()
+        self.assertEqual((code, output), (
+            1, "check-workflow-pins: .github/workflows/release.yml:5: Actions/Checkout has another pin in a workflow",
         ))
+
+    def test_tool_pins_must_agree(self):
+        self.workflow("ci.yml", f"- uses: actions/checkout@{SHA_A} # v7.0.1")
+        cases = [
+            ({"channel": "1.99.0"}, "rust-toolchain.toml says rust 1.99.0, .tool-versions says 1.100.0"),
+            ({"declared": {"markdownlint-cli2": "0.24.1", "prettier": "3.10.0"}},
+             "package.json says prettier 3.10.0, .tool-versions says 3.10.1"),
+            ({"locked": {"markdownlint-cli2": "0.24.0", "prettier": "3.10.1"}},
+             "package-lock.json says markdownlint-cli2 0.24.0, .tool-versions says 0.24.1"),
+            ({"pins": {k: v for k, v in PINS.items() if k != "node"}}, ".tool-versions: missing node"),
+        ]
+        for change, message in cases:
+            with self.subTest(message=message):
+                self.tools(**change)
+                code, output = self.run_gate()
+                self.assertEqual(code, 1, output)
+                self.assertIn(message, output)
+        self.tools()
+        (self.root / "package-lock.json").write_text(json.dumps({"packages": {
+            "": {"devDependencies": {"prettier": "3.10.1"}},
+            "node_modules/prettier": {"version": "3.10.1"},
+            "node_modules/markdownlint-cli2": {"version": "0.24.1"},
+        }}))
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("package-lock.json devDependencies differ from package.json", output)
+
+    def test_tag_mismatch_is_reported(self):
+        pins = {"actions/checkout": (SHA_A, "7.0.1"), "github/codeql-action": (SHA_B, "4.39.3")}
+        tags = {("actions/checkout", "7.0.1"): SHA_A, ("github/codeql-action", "4.39.3"): "c" * 40}
+        problems = check_workflow_pins.tag_mismatches(pins, lambda repo, version: tags[(repo, version)])
+        self.assertEqual(problems, [f"github/codeql-action pin {SHA_B} is not v4.39.3 ({'c' * 40})"])
 
 
 if __name__ == "__main__":
