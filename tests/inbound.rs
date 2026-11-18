@@ -285,7 +285,7 @@ async fn inbound_token_guards_every_route_and_never_reaches_upstream() {
         .unwrap(),
     );
     let base = format!("http://127.0.0.1:{port}");
-    let client = reqwest::Client::builder()
+    let client = duolane::tls::client_builder()
         .no_proxy()
         .timeout(Duration::from_secs(5))
         .build()

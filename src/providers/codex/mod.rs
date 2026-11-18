@@ -1799,7 +1799,7 @@ mod tests {
 
     fn authenticated_live_test_client(base_url: String) -> Arc<CodexHttpClient> {
         let client = CodexHttpClient::new_for_test(
-            reqwest::Client::builder().no_proxy().build().unwrap(),
+            crate::tls::client_builder().no_proxy().build().unwrap(),
             base_url,
             1_000,
             1_000,
@@ -1834,7 +1834,7 @@ mod tests {
         event: &serde_json::Value,
     ) {
         websocket
-            .send(Message::Text(event.to_string()))
+            .send(Message::text(event.to_string()))
             .await
             .unwrap();
     }

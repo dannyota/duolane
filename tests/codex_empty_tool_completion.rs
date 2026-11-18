@@ -79,7 +79,7 @@ async fn real_process_empty_tool_completion_preserves_negative_cases() {
                                 Message::Text(_) => {
                                     for event in next_events(&state) {
                                         if socket
-                                            .send(Message::Text(event.to_string()))
+                                            .send(Message::text(event.to_string()))
                                             .await
                                             .is_err()
                                         {
@@ -131,7 +131,7 @@ async fn real_process_empty_tool_completion_preserves_negative_cases() {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         let _proxy = Child(command.spawn().unwrap());
-        let client = reqwest::Client::builder()
+        let client = duolane::tls::client_builder()
             .no_proxy()
             .timeout(Duration::from_secs(30))
             .build()

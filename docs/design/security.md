@@ -104,6 +104,12 @@ Rejections use the Anthropic error shape and never echo request values:
   allowed only for a loopback host, for tests and local development. The Codex,
   Codex images, and Anthropic base URL settings are checked at startup and may
   not carry user info, a query, or a fragment.
+- TLS uses rustls with the ring provider. HTTP clients verify certificates
+  through the operating system: the Keychain on macOS, and the system CA bundle
+  on Linux, where `SSL_CERT_FILE` and `SSL_CERT_DIR` apply and a missing bundle
+  stops startup. The WebSocket client uses the system roots, honoring those
+  variables, plus the bundled Mozilla roots. A private CA for a TLS-inspecting
+  proxy therefore belongs in the Keychain on macOS.
 - duolane never decompresses upstream data.
 
 ## Limits

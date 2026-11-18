@@ -158,7 +158,7 @@ async fn send_codex_response(websocket: &mut tokio_tungstenite::WebSocketStream<
         r#"{"type":"response.completed","response":{"id":"resp_proxy","usage":{"input_tokens":5,"output_tokens":2}}}"#,
     ] {
         websocket
-            .send(Message::Text(event.to_string()))
+            .send(Message::text(event.to_string()))
             .await
             .unwrap();
     }
@@ -233,7 +233,7 @@ async fn spawn_transport_origin(
                         r#"{"type":"response.output_text.delta","output_index":0,"delta":"partial output"}"#,
                     ] {
                         websocket
-                            .send(Message::Text(event.to_string()))
+                            .send(Message::text(event.to_string()))
                             .await
                             .unwrap();
                     }
