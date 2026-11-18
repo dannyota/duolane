@@ -2,4 +2,5 @@ disallowed-methods = [
   { path = "reqwest::Client::new", reason = "use tls::client_builder, which installs the rustls crypto provider" },
   { path = "reqwest::Client::builder", reason = "use tls::client_builder, which installs the rustls crypto provider" },
   { path = "reqwest::ClientBuilder::new", reason = "use tls::client_builder, which installs the rustls crypto provider" },
+  { path = "reqwest::get", reason = "use a client from tls::client_builder, which installs the rustls crypto provider" },
 ]
