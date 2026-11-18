@@ -127,6 +127,7 @@ async fn real_process_empty_tool_completion_preserves_negative_cases() {
             .env("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "0")
             .env("DUOLANE_CODEX_SERVER_COMPACTION", "0")
             .env("DUOLANE_ALIAS_PROVIDER", "codex")
+            .env("DUOLANE_ZERO_RETRY_DELAY_FOR_TESTS", "1")
             .env("NO_PROXY", "127.0.0.1,localhost")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());

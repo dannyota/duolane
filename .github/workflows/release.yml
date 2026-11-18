@@ -32,8 +32,14 @@ jobs:
           fallback: none
       - name: Dependency policy
         run: cargo deny --locked check
+      - name: Read the cargo-nextest pin
+        run: echo "CARGO_NEXTEST=$(tr -d '\r' < .tool-versions | awk '$1 == "cargo-nextest" { print $2 }')" >> "$GITHUB_ENV"
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-nextest@${{ env.CARGO_NEXTEST }}
+          fallback: none
       - name: Test
-        run: cargo test --locked -- --test-threads=1
+        run: cargo nextest run --locked
 
   build:
     needs: checks
