@@ -211,10 +211,7 @@ async fn reasoning_survives_codex_to_claude_to_codex() {
     );
     assert_eq!(same_account[4]["content"][0], opus_text);
     let other_account = &codex_inputs[2];
-    assert!(
-        !other_account.to_string().contains("enc-secret"),
-        "{other_account}"
-    );
+    assert!(!other_account.to_string().contains("enc-secret"));
     assert_eq!(
         other_account[1]["content"][0],
         json!({"type": "output_text", "text": wrap_reasoning("plan")})
