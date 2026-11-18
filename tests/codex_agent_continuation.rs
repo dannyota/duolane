@@ -112,15 +112,19 @@ fn configure_environment(config_dir: &Path, upstream_url: &str) -> Vec<EnvGuard>
 }
 
 fn write_codex_auth(config_dir: &Path) {
+    write_codex_login(config_dir, "test-access", "acct_test");
+}
+
+fn write_codex_login(config_dir: &Path, access: &str, account: &str) {
     let auth_dir = config_dir.join("codex");
     std::fs::create_dir_all(&auth_dir).unwrap();
     std::fs::write(
         auth_dir.join("auth.json"),
         serde_json::to_vec(&json!({
             "tokens": {
-                "access_token": "test-access",
+                "access_token": access,
                 "refresh_token": "test-refresh",
-                "account_id": "acct_test"
+                "account_id": account
             }
         }))
         .unwrap(),
@@ -215,8 +219,8 @@ enum MockOutcome {
         call: FunctionCallReply,
         acknowledged: oneshot::Sender<()>,
     },
-    RawEvent {
-        event: Value,
+    RawEvents {
+        events: Vec<Value>,
         acknowledged: oneshot::Sender<()>,
     },
 }
@@ -281,11 +285,26 @@ impl PendingRequest {
         self.captured
     }
 
+    async fn respond_with_events(self, events: Vec<Value>) -> CapturedRequest {
+        let (acknowledged, acknowledgement) = oneshot::channel();
+        self.outcome
+            .send(MockOutcome::RawEvents {
+                events,
+                acknowledged,
+            })
+            .unwrap_or_else(|_| panic!("upstream socket closed before responding"));
+        tokio::time::timeout(REQUEST_TIMEOUT, acknowledgement)
+            .await
+            .expect("mock events acknowledgement timed out")
+            .expect("mock events acknowledgement sender dropped");
+        self.captured
+    }
+
     async fn respond_rate_limited(self) -> CapturedRequest {
         let (acknowledged, acknowledgement) = oneshot::channel();
         self.outcome
-            .send(MockOutcome::RawEvent {
-                event: json!({
+            .send(MockOutcome::RawEvents {
+                events: vec![json!({
                     "type": "response.failed",
                     "response": {
                         "status": "failed",
@@ -296,7 +315,7 @@ impl PendingRequest {
                             "retry_after_seconds": 0
                         }
                     }
-                }),
+                })],
                 acknowledged,
             })
             .unwrap_or_else(|_| {
@@ -368,6 +387,24 @@ impl InstrumentedUpstream {
             .expect("timed out waiting for response.create")
             .expect("mock upstream stopped before response.create");
         pending.captured.assert_protocol_headers(expected_session);
+        pending
+    }
+
+    async fn next_request_for_login(&mut self, access: &str, account: &str) -> PendingRequest {
+        let pending = tokio::time::timeout(REQUEST_TIMEOUT, self.requests.recv())
+            .await
+            .expect("timed out waiting for response.create")
+            .expect("mock upstream stopped before response.create");
+        let header = |name: &str| {
+            pending
+                .captured
+                .headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        assert_eq!(header("authorization"), Some(format!("Bearer {access}")));
+        assert_eq!(header("chatgpt-account-id").as_deref(), Some(account));
         pending
     }
 
@@ -578,17 +615,19 @@ async fn handle_socket(
                         }
                         let _ = acknowledged.send(());
                     }
-                    MockOutcome::RawEvent {
-                        event,
+                    MockOutcome::RawEvents {
+                        events,
                         acknowledged,
                     } => {
-                        if websocket
-                            .send(Message::Text(event.to_string()))
-                            .await
-                            .is_err()
-                        {
-                            let _ = acknowledged.send(());
-                            return;
+                        for event in events {
+                            if websocket
+                                .send(Message::Text(event.to_string()))
+                                .await
+                                .is_err()
+                            {
+                                let _ = acknowledged.send(());
+                                return;
+                            }
                         }
                         let _ = acknowledged.send(());
                     }
@@ -2117,5 +2156,125 @@ async fn tool_turn_with_noncanonical_arguments_continues_with_delta() {
     assert_eq!(delta[0]["type"], "function_call_output");
     assert_eq!(delta[0]["call_id"], call_id.as_str());
     assert_eq!(harness.upstream.snapshot().len(), 2);
+    harness.shutdown().await;
+}
+
+async fn drained(request: JoinHandle<DrainedResponse>) -> DrainedResponse {
+    tokio::time::timeout(REQUEST_TIMEOUT, request)
+        .await
+        .expect("downstream request task timed out")
+        .expect("downstream request task failed")
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn codex_login_change_misses_pool_and_continuation_and_withholds_old_reasoning() {
+    let _environment_lock = env_lock();
+    let mut harness = TestHarness::start().await;
+    let config_dir = harness._config_dir.path().to_path_buf();
+    let case = unique("login-change");
+    let headers = IdentityHeaders::main(&tagged(&case, "session"));
+    let [p1, p2, p3] = ["prompt-1", "prompt-2", "prompt-3"].map(|label| tagged(&case, label));
+    let [r1, r2, r3] = ["reply-1", "reply-2", "reply-3"].map(|label| tagged(&case, label));
+    let other_encrypted = tagged(&case, "encrypted-reasoning-of-other-account");
+
+    let first = harness
+        .round_trip(
+            messages_body(false, vec![message("user", &p1)]),
+            headers.clone(),
+            &p1,
+            &tagged(&case, "resp-1"),
+            &r1,
+        )
+        .await;
+
+    write_codex_login(&config_dir, "other-access", "acct_other");
+    let second_history = vec![
+        message("user", &p1),
+        message("assistant", &r1),
+        message("user", &p2),
+    ];
+    let second_request = harness.start_request(
+        messages_body(false, second_history.clone()),
+        headers.clone(),
+    );
+    let second = harness
+        .upstream
+        .next_request_for_login("other-access", "acct_other")
+        .await
+        .respond_with_events(vec![
+            json!({"type": "response.output_item.added", "output_index": 0,
+                "item": {"type": "reasoning", "id": "rs_other", "encrypted_content": other_encrypted}}),
+            json!({"type": "response.reasoning_summary_text.delta", "output_index": 0, "delta": "plan"}),
+            json!({"type": "response.output_item.done", "output_index": 0,
+                "item": {"type": "reasoning", "id": "rs_other", "encrypted_content": other_encrypted}}),
+            json!({"type": "response.output_item.added", "output_index": 1,
+                "item": {"type": "message", "id": "msg-2"}}),
+            json!({"type": "response.output_text.delta", "output_index": 1, "delta": r2}),
+            json!({"type": "response.output_item.done", "output_index": 1,
+                "item": {"type": "message", "id": "msg-2"}}),
+            json!({"type": "response.completed",
+                "response": {"id": tagged(&case, "resp-2"), "usage": {"input_tokens": 5, "output_tokens": 2}}}),
+        ])
+        .await;
+    let second_reply = drained(second_request).await;
+    second_reply.assert_success(&r2);
+    assert_ne!(second.socket_ordinal, first.socket_ordinal);
+    assert_full_input(&second, &[("user", &p1), ("assistant", &r1), ("user", &p2)]);
+
+    let second_content: Value = serde_json::from_str(&second_reply.body).unwrap();
+    assert!(
+        second_content["content"][0]["signature"]
+            .as_str()
+            .is_some_and(|signature| signature.starts_with("duolane:codex:v1:")),
+        "{second_content}"
+    );
+    let mut third_history = second_history;
+    third_history.extend([
+        json!({"role": "assistant", "content": second_content["content"]}),
+        message("user", &p3),
+    ]);
+    let third_request = harness.start_request(messages_body(false, third_history), headers);
+    let rejected = harness
+        .upstream
+        .next_request_for_login("other-access", "acct_other")
+        .await;
+    write_codex_login(&config_dir, "test-access-2", "acct_test");
+    rejected
+        .respond_with_events(vec![json!({
+            "type": "error",
+            "status": 401,
+            "error": {"type": "invalid_request_error", "code": "token_expired", "message": "expired"}
+        })])
+        .await;
+    let rebuilt = harness
+        .upstream
+        .next_request_for_login("test-access-2", "acct_test")
+        .await
+        .respond(&tagged(&case, "resp-3"), &r3, false)
+        .await;
+    drained(third_request).await.assert_success(&r3);
+
+    assert!(rebuilt.previous_response_id().is_none(), "{}", rebuilt.body);
+    assert!(
+        harness
+            .upstream
+            .snapshot()
+            .iter()
+            .filter(|request| request.socket_ordinal == rebuilt.socket_ordinal)
+            .count()
+            == 1,
+        "the rebuilt request must open its own socket"
+    );
+    let rebuilt_body = rebuilt.body.to_string();
+    assert!(!rebuilt_body.contains(&other_encrypted), "{rebuilt_body}");
+    assert!(
+        rebuilt.body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["type"] != "reasoning"),
+        "{rebuilt_body}"
+    );
     harness.shutdown().await;
 }

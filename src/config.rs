@@ -357,6 +357,30 @@ pub fn allowed_hosts() -> Vec<String> {
         .collect()
 }
 
+pub fn upstream_url_settings() -> Vec<(&'static str, String)> {
+    let codex = read_file_config(&paths::config_dir()).and_then(|file| file.codex);
+    let (base_url, images_base_url) = codex.map_or((None, None), |codex| {
+        (codex.base_url, codex.images_base_url)
+    });
+    let env = |name: &str| std::env::var_os(name).map(|raw| raw.to_string_lossy().into_owned());
+    [
+        ("DUOLANE_CODEX_BASE_URL", env("DUOLANE_CODEX_BASE_URL")),
+        ("codex.baseUrl", base_url),
+        (
+            "DUOLANE_CODEX_IMAGES_BASE_URL",
+            env("DUOLANE_CODEX_IMAGES_BASE_URL"),
+        ),
+        ("codex.imagesBaseUrl", images_base_url),
+        (
+            "DUOLANE_ANTHROPIC_BASE_URL",
+            env("DUOLANE_ANTHROPIC_BASE_URL"),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(setting, value)| Some((setting, value?)))
+    .collect()
+}
+
 pub fn anthropic_base_url() -> String {
     let env: HashMap<_, _> = std::env::vars().collect();
     if let Some(raw) = env.get("DUOLANE_ANTHROPIC_BASE_URL") {

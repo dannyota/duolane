@@ -159,11 +159,11 @@ pub async fn serve_listener(
 ) -> anyhow::Result<()> {
     let local_addr = listener.local_addr()?;
     let policy = crate::inbound_auth::InboundPolicy::from_config(local_addr.ip())?;
-    let port = local_addr.port();
+    crate::upstream_url::check_upstream_urls()?;
     create_logger("server").info(
         "server listening",
         Some(serde_json::Map::from_iter([
-            ("port".to_string(), json!(port)),
+            ("port".to_string(), json!(local_addr.port())),
             (
                 "bindAddress".to_string(),
                 json!(local_addr.ip().to_string()),
@@ -1000,7 +1000,7 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
         let response = OpenAiError::invalid(
             format!(
                 "Unknown model \"{normalized_model}\". {}",
-                state.registry.unknown_codex_model_message()
+                state.registry.unknown_codex_model_message().await
             ),
             Some("model"),
         )
@@ -1182,7 +1182,7 @@ async fn handler_chat_completions(
         let response = OpenAiError::invalid(
             format!(
                 "Unknown model \"{normalized_model}\". {}",
-                state.registry.unknown_codex_model_message()
+                state.registry.unknown_codex_model_message().await
             ),
             Some("model"),
         )
@@ -1501,7 +1501,7 @@ async fn dispatch_request(
                 "invalid_request_error",
                 format!(
                     "Missing \"model\" in request body. {}",
-                    state.registry.unknown_model_message()
+                    state.registry.unknown_model_message().await
                 ),
             );
             log_request_completed(
@@ -1588,7 +1588,7 @@ async fn dispatch_request(
                 "invalid_request_error",
                 format!(
                     "Unknown model \"{normalized_model}\". {}",
-                    state.registry.unknown_model_message()
+                    state.registry.unknown_model_message().await
                 ),
             );
             log_request_completed(

@@ -1,12 +1,12 @@
 # Ratchet caps at exact line counts. Never add entries or raise caps; lower a cap when its file shrinks.
 1135 src/monitor.rs
 725 src/monitor/mock.rs
-3045 src/providers/codex/client.rs
+3042 src/providers/codex/client.rs
 702 src/providers/codex/images.rs
-1808 src/providers/codex/mod.rs
+1766 src/providers/codex/mod.rs
 1186 src/providers/codex/translate/live_stream.rs
 1110 src/providers/codex/translate/reducer.rs
 1294 src/providers/codex/translate/request.rs
-2334 src/providers/codex/websocket.rs
+2333 src/providers/codex/websocket.rs
 2125 src/server.rs
 1784 src/tui.rs

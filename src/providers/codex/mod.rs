@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod chat_completions;
+mod cli;
 pub mod client;
 pub mod compaction;
 pub mod continuation;
@@ -90,6 +91,22 @@ impl CodexProvider {
         ctx: RequestContext,
         conversation_identity: Option<ConversationIdentity>,
     ) -> Response {
+        let response = self
+            .handle_messages_for_account(&body, ctx.clone(), conversation_identity.clone())
+            .await;
+        if response.extensions().get::<CodexAccountChanged>().is_none() {
+            return response;
+        }
+        self.handle_messages_for_account(&body, ctx, conversation_identity)
+            .await
+    }
+
+    async fn handle_messages_for_account(
+        &self,
+        body: &MessagesRequest,
+        ctx: RequestContext,
+        conversation_identity: Option<ConversationIdentity>,
+    ) -> Response {
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
         let want_stream = body.stream;
         let model = body.model.as_deref().unwrap_or("opus");
@@ -106,12 +123,12 @@ impl CodexProvider {
                 ),
             );
         }
-        if search::is_standalone_search_request(&body) {
+        if search::is_standalone_search_request(body) {
             if let Some(monitor) = ctx.monitor.as_ref() {
                 monitor.model_resolved(&ctx.req_id, &resolved.model);
             }
             let (search_request, query) = match search::build_search_request(
-                &body,
+                body,
                 &resolved.model,
                 ctx.session_id.as_deref(),
             ) {
@@ -186,19 +203,19 @@ impl CodexProvider {
             );
         }
         let use_responses_lite =
-            apply_model_lane_for_request(&mut resolved.model, &body, config::codex_full_lane());
+            apply_model_lane_for_request(&mut resolved.model, body, config::codex_full_lane());
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &resolved.model);
         }
 
         let mut translated = match translate_request(
-            &body,
+            body,
             TranslateOptions {
                 session_id: ctx.session_id.clone(),
                 service_tier: resolved.service_tier.clone(),
                 model: resolved.model.clone(),
                 use_responses_lite,
-                reasoning_account: self.client.auth_manager().reasoning_account(),
+                reasoning_account: self.client.auth_manager().reasoning_account().await,
             },
         ) {
             Ok(t) => t,
@@ -211,7 +228,7 @@ impl CodexProvider {
             }
         };
 
-        let compact_boundary = is_compact_messages_request(&body);
+        let compact_boundary = is_compact_messages_request(body);
         let server_compaction_enabled = config::codex_server_compaction();
         let mut compaction_attempt = None;
         if !server_compaction_enabled && let Some(session_id) = ctx.session_id.as_deref() {
@@ -221,7 +238,7 @@ impl CodexProvider {
             && compact_boundary
             && let Some(session_id) = ctx.session_id.as_deref()
         {
-            let attempt = begin_compaction(session_id, &translated.model);
+            let attempt = begin_compaction(session_id, &translated);
             compaction_attempt = Some(attempt);
             log_compaction_event(
                 "server_compaction_triggered",
@@ -337,7 +354,7 @@ impl CodexProvider {
                     attempt: compaction_attempt,
                 },
                 configured_transport,
-                tail_is_successful_tool_result(&body),
+                tail_is_successful_tool_result(body),
             )
             .await;
             log.info(
@@ -361,7 +378,7 @@ impl CodexProvider {
         let request_continuation = continuation.clone();
         let mut continuation = Some(continuation);
         let mut attempt = 0_u32;
-        let successful_tool_tail = tail_is_successful_tool_result(&body);
+        let successful_tool_tail = tail_is_successful_tool_result(body);
         let upstream = loop {
             let response = match client
                 .post_codex_for_owner(&translated, &ctx, continuation.as_ref())
@@ -582,7 +599,7 @@ impl Provider for CodexProvider {
     }
 
     fn cli(&self) -> &'static dyn CliHandlers {
-        &CODEX_CLI
+        &cli::CODEX_CLI
     }
 
     async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
@@ -626,7 +643,7 @@ impl Provider for CodexProvider {
                 service_tier: resolved.service_tier.clone(),
                 model: resolved.model.clone(),
                 use_responses_lite,
-                reasoning_account: self.client.auth_manager().reasoning_account(),
+                reasoning_account: self.client.auth_manager().reasoning_account().await,
             },
         ) {
             Ok(t) => t,
@@ -1643,9 +1660,17 @@ fn usage_limit_response(limit: &events::CodexUsageLimit) -> Response {
         .into_response()
 }
 
+#[derive(Clone)]
+struct CodexAccountChanged;
+
 fn map_codex_error_to_response(err: &client::CodexError) -> Response {
     if let Some(limit) = err.usage_limit.as_ref() {
         return usage_limit_response(limit);
+    }
+    if err.detail.as_deref() == Some(client::CODEX_ACCOUNT_CHANGED_DETAIL) {
+        let mut response = json_error(StatusCode::CONFLICT, "api_error", &err.message);
+        response.extensions_mut().insert(CodexAccountChanged);
+        return response;
     }
     let message = codex_error_message(err);
     if is_context_window_overflow(message) {
@@ -1739,73 +1764,6 @@ fn codex_error_message(err: &client::CodexError) -> &str {
     }
 }
 
-pub(crate) struct CodexCli;
-
-impl CliHandlers for CodexCli {
-    fn login(&self) -> Result<(), anyhow::Error> {
-        anyhow::bail!(
-            "Codex auth is provided by the Codex CLI. Run `codex login` to create ~/.codex/auth.json; this proxy reads it directly."
-        )
-    }
-
-    fn device(&self) -> Result<(), anyhow::Error> {
-        anyhow::bail!(
-            "Codex auth is provided by the Codex CLI. Run `codex login` to create ~/.codex/auth.json; this proxy reads it directly."
-        )
-    }
-
-    fn status(&self) -> Result<(), anyhow::Error> {
-        let store = file_store();
-        let stored = store.load_auth()?;
-        match stored {
-            Some(auth) => {
-                println!(
-                    "Account: {}",
-                    crate::text::terminal_text(auth.account_id.as_deref().unwrap_or("(none)"))
-                );
-                println!("{}", format_expiry(auth.expires, now_ms()));
-                println!("Storage: {} (Codex CLI)", store.auth_path());
-                Ok(())
-            }
-            None => anyhow::bail!(
-                "No Codex credentials. Run `codex login` to create {}",
-                store.auth_path()
-            ),
-        }
-    }
-
-    fn logout(&self) -> Result<(), anyhow::Error> {
-        println!(
-            "Codex credentials are managed by the Codex CLI; run `codex logout` to remove them"
-        );
-        Ok(())
-    }
-}
-
-pub(crate) static CODEX_CLI: CodexCli = CodexCli;
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-fn format_expiry(expires: u64, now: u64) -> String {
-    let remaining = (i128::from(expires) - i128::from(now)).div_euclid(1000);
-    let iso = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(expires) * 1_000_000)
-        .ok()
-        .and_then(|dt| {
-            let fmt = time::format_description::parse_borrowed::<2>(
-                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z",
-            )
-            .ok()?;
-            dt.format(&fmt).ok()
-        })
-        .unwrap_or_else(|| "invalid".to_string());
-    format!("Expires: {iso} (in {remaining}s)")
-}
-
 #[cfg(test)]
 mod tests {
     use futures_util::{SinkExt, StreamExt};
@@ -1840,7 +1798,7 @@ mod tests {
                 format: None,
             },
             reasoning: None,
-            reasoning_account: Default::default(),
+            reasoning_account: ReasoningAccount::new(Some("acct")),
         }
     }
 
@@ -2662,23 +2620,6 @@ mod tests {
         assert!(!models.contains(&"gpt-6-sol-ultrafast".to_string()));
     }
 
-    #[test]
-    fn format_expiry_with_future_expiry() {
-        let expires = 4102444800000;
-        let now = 4102444790000;
-        let output = format_expiry(expires, now);
-        assert!(output.starts_with("Expires: 2100-01-01T00:00:00.000Z (in "));
-        assert!(output.ends_with("s)"));
-    }
-
-    #[test]
-    fn format_expiry_with_past_expiry() {
-        let expires = 946684800000;
-        let now = 946684810000;
-        let output = format_expiry(expires, now);
-        assert!(output.starts_with("Expires: 2000-01-01T00:00:00.000Z (in -"));
-    }
-
     #[tokio::test]
     async fn live_upstream_status_and_retry_after_are_preserved() {
         let err = client::CodexError {
@@ -2838,7 +2779,7 @@ mod tests {
         websocket::invalidate_codex_websocket_pool_owner(&owner);
         let request = live_test_request("one");
         let continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
-        let compaction_attempt = begin_compaction(session_id, &request.model);
+        let compaction_attempt = begin_compaction(session_id, &request);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2943,7 +2884,7 @@ mod tests {
         websocket::invalidate_codex_websocket_pool_owner(&owner);
         let request = live_test_request("one");
         let continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
-        let compaction_attempt = begin_compaction(session_id, &request.model);
+        let compaction_attempt = begin_compaction(session_id, &request);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3022,7 +2963,7 @@ mod tests {
         websocket::invalidate_codex_websocket_pool_owner(&owner);
         let request = live_test_request("one");
         let continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
-        let compaction_attempt = begin_compaction(session_id, &request.model);
+        let compaction_attempt = begin_compaction(session_id, &request);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3103,7 +3044,7 @@ mod tests {
         continuation::clear_continuation_for_owner(Some(&owner));
         let request = live_test_request("one");
         let stale_continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
-        let stale_compaction = begin_compaction(session_id, &request.model);
+        let stale_compaction = begin_compaction(session_id, &request);
         let stale_cleanup = LiveRequestStateCleanup::new(
             stale_continuation,
             Some(session_id.to_string()),
@@ -3111,7 +3052,7 @@ mod tests {
         );
 
         let newer_continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
-        let newer_compaction = begin_compaction(session_id, &request.model);
+        let newer_compaction = begin_compaction(session_id, &request);
         drop(stale_cleanup);
 
         assert!(continuation::is_current_turn_for_owner(&newer_continuation));
@@ -3207,7 +3148,7 @@ mod tests {
         websocket::invalidate_codex_websocket_pool_owner(&owner);
         let request = live_test_request("one");
         let continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
-        let compaction_attempt = begin_compaction(session_id, &request.model);
+        let compaction_attempt = begin_compaction(session_id, &request);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

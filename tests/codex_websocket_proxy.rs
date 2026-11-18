@@ -454,7 +454,7 @@ async fn codex_websocket_inherits_environment_proxy_configuration() {
         let mut guards = clear_proxy_environment();
         guards.extend(configure_codex(
             config_dir.path(),
-            "http://codex.invalid/backend-api/codex/responses",
+            "http://localhost:9/backend-api/codex/responses",
         ));
         guards.push(EnvGuard::set("HTTP_PROXY", &proxy_url));
         guards.push(EnvGuard::set(
@@ -468,7 +468,7 @@ async fn codex_websocket_inherits_environment_proxy_configuration() {
     let captured = captured.await.unwrap();
     assert_eq!(
         captured.target,
-        "http://codex.invalid/backend-api/codex/responses"
+        "http://localhost:9/backend-api/codex/responses"
     );
     assert!(captured.has_proxy_authorization);
     proxy_task.await.unwrap();
@@ -484,7 +484,7 @@ async fn codex_websocket_inherits_environment_proxy_configuration() {
         let mut guards = clear_proxy_environment();
         guards.extend(configure_codex(
             config_dir.path(),
-            "http://all-proxy.invalid/backend-api/codex/responses",
+            "http://localhost:9/backend-api/codex/all-proxy",
         ));
         guards.push(EnvGuard::set("ALL_PROXY", &all_proxy_url));
         let (status, body) = call_messages("proxy-env-all").await;
@@ -494,7 +494,7 @@ async fn codex_websocket_inherits_environment_proxy_configuration() {
     let captured = captured.await.unwrap();
     assert_eq!(
         captured.target,
-        "http://all-proxy.invalid/backend-api/codex/responses"
+        "http://localhost:9/backend-api/codex/all-proxy"
     );
     proxy_task.await.unwrap();
 
