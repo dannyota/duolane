@@ -95,7 +95,7 @@ your Claude login, and the Claude route then fails.
 | `ANTHROPIC_DEFAULT_OPUS_MODEL`   | Claude Code's model for the Opus alias    |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | Claude Code's model for the Sonnet alias  |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL`  | Claude Code's small background model      |
-| `ENABLE_TOOL_SEARCH`             | Set to `true` to keep MCP tool search on  |
+| `ENABLE_TOOL_SEARCH`             | Set to `true` to defer MCP tool schemas   |
 
 File settings live in `~/.config/duolane/config.json`.
 

@@ -3,8 +3,8 @@ set -euo pipefail
 
 tag="$1"
 repo="${GITHUB_REPOSITORY:-dannyota/duolane}"
-compare="$(gh api "repos/$repo/releases/generate-notes" -f tag_name="$tag" --jq .body \
-  | grep -o "https://github.com/$repo/compare/[^ ]*" || true)"
+body="$(gh api "repos/$repo/releases/generate-notes" -f tag_name="$tag" --jq .body)"
+compare="$(printf '%s\n' "$body" | grep -o "https://github.com/$repo/compare/[^ ]*" || true)"
 
 echo "## What's Changed"
 if [ -z "$compare" ]; then

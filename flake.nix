@@ -40,7 +40,7 @@
 
             meta = with pkgs.lib; {
               description = cargoToml.package.description;
-              homepage = cargoToml.package.homepage;
+              homepage = cargoToml.package.repository;
               license = licenses.mit;
               mainProgram = "duolane";
             };

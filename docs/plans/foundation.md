@@ -23,7 +23,7 @@
 - A conversation that moves Claude to Codex to Claude keeps its reasoning, and Anthropic receives no duolane signature or encrypted content.
 - A body with no block to convert stays byte-identical on the Claude route, and a converted body changes only the converted blocks.
 - A rejected refresh does not delete the Codex login, and a token rotated by the Codex CLI is picked up.
-- `--help`, `duolane serve`, `duolane monitor`, and `duolane codex status` keep working through renames, comment removal, and file splits.
+- `--help`, `duolane serve`, `duolane monitor`, and `duolane codex auth status` keep working through renames, comment removal, and file splits.
 
 ## Slices
 

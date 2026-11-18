@@ -78,9 +78,9 @@ install_from_release() {
 		local release_json
 
 		if command -v curl &>/dev/null; then
-			release_json=$(curl -fsSL --retry 3 --retry-connrefused --connect-timeout 10 --max-time 30 "$latest_url")
+			release_json=$(curl -fsSL --retry 3 --retry-connrefused --connect-timeout 10 --max-time 30 "$latest_url" || true)
 		elif command -v wget &>/dev/null; then
-			release_json=$(wget --tries=3 --timeout=30 -qO- "$latest_url")
+			release_json=$(wget --tries=3 --timeout=30 -qO- "$latest_url" || true)
 		else
 			log_error "Neither curl nor wget found. Please install one of them."
 			exit 1
@@ -91,7 +91,10 @@ install_from_release() {
 		if [ -z "$version" ]; then
 			log_error "Failed to fetch latest version"
 			echo ""
-			echo "This might be due to network issues or GitHub API rate limits."
+			echo "No release may exist yet, or GitHub may be unreachable or rate limited."
+			echo "To install from source:"
+			echo "  cargo install --git https://github.com/${REPO} --locked"
+			echo ""
 			echo "You can specify a version manually:"
 			echo "  DUOLANE_VERSION=v0.1.0 bash install.sh"
 			echo ""

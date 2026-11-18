@@ -11,7 +11,8 @@
 - The product is now `duolane`, with new command, crate, environment variable,
   directory, and header names.
 - The OpenAI-compatible endpoints return HTTP 400 for non-Codex models.
-- Dependencies are refreshed to close known advisories.
+- Dependencies are refreshed to close known vulnerabilities. Three advisories
+  for crates used through `ratatui` remain until its upgrade.
 
 ### Removed
 
