@@ -35,10 +35,16 @@ Direct owner instructions and platform safety rules come first. An accepted ADR 
 |Role|Who|Duty|
 |-|-|-|
 |Primary|The session the owner talks to|Designs, writes documentation, decides, briefs, verifies, owns Git|
-|Implementer|Codex `gpt-6.1-terra` high for routine work, Codex `gpt-6.1-sol` high for hard work, or a Claude Opus subagent|One bounded task in named paths, with tests; never commits|
-|Reviewer|Codex read-only, `gpt-6.1-sol` high, or `gpt-6-astra` high for work `gpt-6.1-sol` wrote|Independent review of designs, ADRs, and code|
+|Implementer|Codex Terra high for routine work, Codex Sol high for hard work|One bounded task in named paths, with tests; never commits|
+|Reviewer|Codex read-only: Sol high for Terra's work, Astra high for Sol's work and the primary's work|Independent review of designs, ADRs, and code|
 
-When Codex is unavailable, a Claude Opus subagent implements and a Claude Fable subagent reviews. A reviewer always runs on a different model from the author. No worker or subagent runs on Sonnet. The owner chooses the primary session's model.
+|Codex model|Current id|Claude stand-in when Codex is unavailable|
+|-|-|-|
+|Terra|`gpt-6.1-terra`|Sonnet|
+|Sol|`gpt-6.2-sol`|Opus|
+|Astra|`gpt-6.2-astra`|Fable|
+
+Always use the latest model of each family, and update these ids when a newer one ships (owner, 2026-11-18). Astra and Fable design and review only; they never write code. A reviewer always runs on a different model from the author. The owner chooses the primary session's model.
 
 ## Rules for every task
 
