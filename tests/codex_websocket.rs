@@ -1,3 +1,6 @@
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;

@@ -1,3 +1,6 @@
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
 #[path = "support/isolated_codex.rs"]
 mod isolated_codex;
 

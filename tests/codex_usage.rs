@@ -1,3 +1,6 @@
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
 use duolane::providers::codex::translate::{
     accumulate::accumulate_response, live_stream::LiveStreamTranslator,
     stream::translate_stream_bytes,

@@ -1,3 +1,6 @@
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
 use assert_cmd::Command;
 use predicates::str::contains;
 use std::env;

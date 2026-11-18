@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "../tests/support/hermetic.rs"]
+mod hermetic;
+
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
 use duolane::{
