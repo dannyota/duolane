@@ -12,7 +12,7 @@ The [security design](../docs/design/security.md) owns the requirements. These r
 
 - Stay on the latest stable Rust, crates, tools, and GitHub Actions. Move major versions one at a time, each with the full test suite.
 - Before adding a crate, check its latest version, license, maintenance, and transitive dependencies, and record the reason in the owning design or plan.
-- `cargo deny check` findings block merge once the plan's lockfile slice lands. Suppress only a verified false positive, with its reason.
+- `cargo deny check advisories` findings block merge once the plan's lockfile slice lands, and the full `cargo deny check` blocks merge once `deny.toml` exists. Suppress only a verified false positive, with its reason.
 
 ## Workflows
 

@@ -2,7 +2,7 @@
 
 A web page or a network host must not be able to use the owner's logins through
 duolane. duolane attaches the Codex login to requests it accepts, so reaching
-its port must not be enough.
+its port from a browser or the network must not be enough.
 
 ## Trust boundaries
 
@@ -22,14 +22,14 @@ A bind address is loopback when its canonical IP is a loopback address. This
 includes `127.0.0.0/8`, `::1`, and `::ffff:127.0.0.1`.
 
 1. The default bind address is `127.0.0.1`.
-2. duolane refuses to start on a non-loopback address unless an inbound token of
-   at least 32 characters is set. Inbound traffic is plain HTTP, including the
-   token and the Claude login, so such a bind is supported only on an encrypted
-   path such as an SSH tunnel, WireGuard, or a TLS-terminating proxy. duolane
-   prints this warning at startup.
+2. Any configured inbound token has at least 32 characters. duolane refuses to
+   start on a non-loopback address without one. Inbound traffic is plain HTTP,
+   including the token and the Claude login, so such a bind is supported only on
+   an encrypted path such as an SSH tunnel, WireGuard, or a TLS-terminating
+   proxy. duolane prints this warning at startup.
 3. On a loopback bind, the `Host` header must be present once and its host must
-   exactly match `localhost`, `127.0.0.1`, or `[::1]`, ignoring case. Any port
-   is allowed. Prefix and suffix matches are forbidden.
+   exactly match `localhost`, `127.0.0.1`, `[::1]`, or the literal bind address,
+   ignoring case. Any port is allowed. Prefix and suffix matches are forbidden.
 4. Additional exact hosts can be configured for a local tunnel or reverse proxy.
    Configuring one requires an inbound token.
 5. Any request with an `Origin` header is rejected. duolane sends no CORS
@@ -78,11 +78,20 @@ includes `127.0.0.0/8`, `::1`, and `::ffff:127.0.0.1`.
 | Resource                            | Limit                     |
 | ----------------------------------- | ------------------------- |
 | Anthropic Messages request body     | 64 MiB                    |
-| OpenAI-compatible request body      | 16 MiB                    |
+| `/v1/responses` and chat request    | 16 MiB                    |
+| Image generation request            | 256 KiB                   |
+| Image edit request                  | 64 MiB                    |
+| Transcription request               | 26 MiB                    |
+| Inbound header read timeout         | 30 seconds                |
+| Open inbound connections            | 256                       |
 | Buffered upstream response          | 64 MiB                    |
+| Image response                      | 128 MiB                   |
+| Transcription response              | 1 MiB                     |
 | One upstream SSE or WebSocket frame | 8 MiB                     |
 | Upstream connect timeout            | 15 seconds                |
-| Upstream idle timeout               | 5 minutes                 |
+| Wait for Claude response headers    | 15 minutes                |
+| Wait for Codex response headers     | 5 minutes                 |
+| Idle time between streamed bytes    | 5 minutes                 |
 | Monitor text per field              | 1 KiB                     |
 | Monitor recent requests             | 200                       |
 | Monitor per-session usage entries   | 1,000, for 24 hours       |
@@ -93,8 +102,8 @@ includes `127.0.0.0/8`, `::1`, and `::ffff:127.0.0.1`.
 | Error captures kept                 | Newest 200, up to 7 days  |
 
 A streamed Claude response has no total size limit, because duolane forwards it
-without buffering. The idle timeout still applies. Text is truncated on a
-character boundary.
+without buffering. The limit on idle time between bytes still applies. Text is
+truncated on a character boundary.
 
 ## Stored data
 

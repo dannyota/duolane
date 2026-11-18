@@ -8,4 +8,4 @@ The [engineering standard](../docs/standards/engineering.md) owns placement and 
 - Create a directory with its first real file, never a placeholder.
 - Update the design in the same change as the behavior it defines. Update the README in the same change as a public command, flag, or environment variable.
 - Check relative links and heading anchors after a rename or move.
-- Never cite plans, tasks, or review findings in code, tests, or living documents. Cite the design or ADR, or state the rule.
+- Never cite plans, tasks, or review findings in code, tests, or human documents. Cite the design or ADR, or state the rule.

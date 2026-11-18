@@ -17,6 +17,9 @@ subscription and switch between them mid-conversation.
 | `POST /v1/images/generations`, `POST /v1/images/edits` | Images through Codex        | Off by default |
 | `POST /v1/audio/transcriptions`                        | Transcription through Codex | Off by default |
 
+The off-by-default routes serve Codex models only and answer HTTP 400 for any
+other model.
+
 ## Routing
 
 | Requested model                   | Backend   | Behavior                                 |
@@ -63,8 +66,12 @@ Two formats live in Claude Code transcripts, outside duolane:
 | Reasoning text  | `<previous_reasoning>\n<text>\n</previous_reasoning>`                    |
 
 The account tag is the first 16 hexadecimal characters of the SHA-256 of the
-ChatGPT account id. Both formats are frozen from the first release. A new
-version adds a new prefix, and duolane keeps recognizing every released one.
+ChatGPT account id. Without a known account id, duolane issues no Codex
+signature. Both formats are frozen from the first release. A new version adds a
+new prefix, and duolane keeps recognizing every released one.
+
+An Anthropic signature is any non-empty signature without a released duolane
+prefix.
 
 | Thinking block                 | Sent to Anthropic | Sent to Codex               |
 | ------------------------------ | ----------------- | --------------------------- |
@@ -87,7 +94,7 @@ so the conversation stays valid.
    ([gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol)).
 2. **Conversions are deterministic.** The same history produces the same bytes
    on every turn, so the prompt cache and Anthropic's prefix check keep working.
-3. **Encrypted Codex reasoning never reaches Anthropic.**
+3. **Encrypted Codex reasoning in a duolane signature never reaches Anthropic.**
 4. **Encrypted reasoning returns only to the account that produced it.**
 5. **Stream failures are visible.** An interrupted or incomplete upstream stream
    is never reported as a successful turn, and a tool call with incomplete
