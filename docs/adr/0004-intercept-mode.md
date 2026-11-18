@@ -22,13 +22,15 @@ command, and trust limited to the Claude Code API host.
   `ANTHROPIC_BASE_URL` unset and reaches duolane as an HTTP proxy.
 - duolane terminates TLS only for `api.anthropic.com`. It tunnels every other
   host without reading it.
-- Trust is per process: only Claude Code trusts duolane's certificate, through
-  `NODE_EXTRA_CA_CERTS`. duolane installs nothing in an operating system trust
-  store and needs no `sudo`.
+- Trust is per process: Claude Code and the programs it starts trust duolane's
+  certificate, through `NODE_EXTRA_CA_CERTS`. duolane installs nothing in an
+  operating system trust store and needs no `sudo`.
 - The certificate authority is limited to `api.anthropic.com` by a critical name
   constraint, and its private key is discarded once it has signed one leaf.
-- `duolane intercept setup` configures everything, and
-  `duolane intercept cleanup` finds and removes everything setup created.
+- `duolane claude` starts Claude Code in this mode and changes nothing
+  persistent. `duolane intercept setup` writes the same settings for background
+  agents, and `duolane intercept cleanup` finds and removes everything setup
+  created.
 - The [intercept design](../design/intercept.md) owns the rules.
 
 ## Consequences
@@ -41,9 +43,9 @@ command, and trust limited to the Claude Code API host.
 
 ## Alternatives rejected
 
-- Installing the certificate in the system trust store with `sudo`. Every
-  application on the machine would trust it, and macOS has no documented way to
-  limit a trusted root to one host.
+- Installing the certificate in the system or user trust store. Other
+  applications on the machine would trust it too, and it would need removing
+  from that store later.
 - A certificate authority without a name constraint. Its key could impersonate
   any site.
 - Redirecting `api.anthropic.com` with `/etc/hosts` or packet filter rules. It
@@ -52,4 +54,5 @@ command, and trust limited to the Claude Code API host.
 ## History
 
 - 2026-11-19: accepted. The owner first asked for `sudo` setup, then chose
-  per-process trust after seeing that Claude Code supports it.
+  per-process trust after seeing that Claude Code supports it. Design review
+  made the wrapper command the default and settings changes opt-in.
