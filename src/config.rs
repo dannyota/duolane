@@ -43,6 +43,8 @@ struct FileConfig {
     pub codex: Option<CodexConfig>,
     #[serde(rename = "authToken")]
     pub auth_token: Option<String>,
+    #[serde(rename = "allowedHosts")]
+    pub allowed_hosts: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -184,6 +186,25 @@ pub fn config_path() -> PathBuf {
     paths::config_dir().join("config.json")
 }
 
+pub fn check_config_file() -> anyhow::Result<()> {
+    let path = config_path();
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => anyhow::bail!("cannot read {}: {error}", path.display()),
+    };
+    serde_json::from_str::<FileConfig>(&raw)
+        .map(|_| ())
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "cannot parse {}: invalid JSON or setting at line {}, column {}",
+                path.display(),
+                error.line(),
+                error.column()
+            )
+        })
+}
+
 pub fn port() -> u16 {
     load_config().port
 }
@@ -320,6 +341,20 @@ pub fn auth_token() -> Option<String> {
         .or_else(|| read_file_config(&paths::config_dir())?.auth_token)
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty())
+}
+
+pub fn allowed_hosts() -> Vec<String> {
+    let hosts = match std::env::var("DUOLANE_ALLOWED_HOSTS") {
+        Ok(raw) => raw.split(',').map(str::to_string).collect(),
+        Err(_) => read_file_config(&paths::config_dir())
+            .and_then(|file| file.allowed_hosts)
+            .unwrap_or_default(),
+    };
+    hosts
+        .iter()
+        .map(|host| host.trim().to_ascii_lowercase())
+        .filter(|host| !host.is_empty())
+        .collect()
 }
 
 pub fn anthropic_base_url() -> String {

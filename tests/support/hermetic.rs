@@ -28,6 +28,13 @@ extern "C" fn isolate_process_environment() {
         .unwrap_or_else(|err| fail(&format!("cannot create private root: {err}")));
     let root = dir.path().to_path_buf();
     std::mem::forget(dir);
+    let inherited: Vec<_> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| name.as_encoded_bytes().starts_with(b"DUOLANE_"))
+        .collect();
+    for name in inherited {
+        unsafe { std::env::remove_var(name) };
+    }
     let vars = [
         ("HOME", root.join("home")),
         ("USERPROFILE", root.join("home")),
@@ -47,7 +54,6 @@ extern "C" fn isolate_process_environment() {
         unsafe { std::env::set_var(name, &path) };
     }
     unsafe {
-        std::env::remove_var("DUOLANE_CODEX_AUTH_FILE");
         if atexit(remove_root) != 0 {
             fail("cannot register cleanup");
         }

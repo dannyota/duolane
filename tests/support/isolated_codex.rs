@@ -1,13 +1,12 @@
 pub fn rerun_without_credentials(test_name: &str) -> bool {
-    if std::env::var("DUOLANE_TEST_ISOLATED_CODEX").as_deref() != Ok(test_name) {
+    if std::env::var("ISOLATED_CODEX_TEST").as_deref() != Ok(test_name) {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", test_name, "--nocapture"])
             .env_clear()
-            .env("DUOLANE_TEST_ISOLATED_CODEX", test_name)
+            .env("ISOLATED_CODEX_TEST", test_name)
             .env("TMP", std::env::temp_dir())
             .env("TEMP", std::env::temp_dir())
             .env("TMPDIR", std::env::temp_dir())
-            .env("DUOLANE_CODEX_BASE_URL", "http://127.0.0.1:1/responses")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -34,5 +33,6 @@ pub fn rerun_without_credentials(test_name: &str) -> bool {
         );
         return true;
     }
+    unsafe { std::env::set_var("DUOLANE_CODEX_BASE_URL", "http://127.0.0.1:1/responses") };
     false
 }

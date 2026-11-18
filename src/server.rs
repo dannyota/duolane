@@ -148,6 +148,7 @@ pub async fn serve_listener(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let local_addr = listener.local_addr()?;
+    let policy = crate::inbound_auth::InboundPolicy::from_config(local_addr.ip())?;
     let port = local_addr.port();
     create_logger("server").info(
         "server listening",
@@ -167,14 +168,10 @@ pub async fn serve_listener(
             ),
         ])),
     );
-    let app = app_with_monitor(Arc::new(Registry::with_default_alias()), monitor);
-    let app = match crate::config::auth_token() {
-        Some(token) => app.layer(axum::middleware::from_fn_with_state(
-            Arc::<str>::from(token),
-            crate::inbound_auth::require_token,
-        )),
-        None => app,
-    };
+    let app = crate::inbound_auth::guard(
+        app_with_monitor(Arc::new(Registry::with_default_alias()), monitor),
+        policy,
+    );
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
