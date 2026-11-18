@@ -40,8 +40,10 @@ includes `127.0.0.0/8`, `::1`, and `::ffff:127.0.0.1`.
    `/v1/images/edits` accepts either type. Multipart is a type browsers can send
    cross-site, so rule 5 is its defense. `GET` and `HEAD` are exempt.
 7. When a token is set, every route except `/healthz` requires it. The token
-   travels in the `x-duolane-key` header or as a bearer token. `duolane monitor`
-   sends the configured token.
+   travels in the `x-duolane-key` header, because `Authorization` carries the
+   Claude login. A bearer token is also accepted for OpenAI-compatible clients;
+   a bearer value that is not the token is the Claude login and is forwarded.
+   `duolane monitor` sends the configured token.
 8. `/monitor` also accepts only loopback peers. Remote monitoring is
    unsupported.
 9. Token comparison reveals neither the token length nor the position of a
@@ -55,7 +57,11 @@ includes `127.0.0.0/8`, `::1`, and `::ffff:127.0.0.1`.
 - The Codex login is read from `$CODEX_HOME/auth.json`, by default
   `~/.codex/auth.json`, and is never deleted, even after a rejected refresh.
 - Writes to that file are atomic, flushed to disk, readable only by the user,
-  and keep every field duolane does not own.
+  and keep every field duolane does not own. duolane re-reads the file before
+  each write for that reason.
+- duolane takes the access token's expiry from its JWT `exp` claim. When the
+  claim cannot be read, it assumes one hour, so a stale token surfaces as a 401
+  and a forced refresh rather than being trusted indefinitely.
 - duolane processes serialize a refresh with a file lock that has a 10 second
   timeout. Under the lock, duolane re-reads the file before spending a refresh
   token.

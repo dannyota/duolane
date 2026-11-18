@@ -45,7 +45,7 @@ When Codex is unavailable, a Claude Opus subagent implements and a Claude Fable 
 1. Start with `git status --short`. Existing changes belong to someone else unless the brief says otherwise.
 2. Put security before features and convenience. Never read, print, or commit credential values, including `~/.codex/auth.json`.
 3. Keep the Claude route byte-exact and keep reasoning portable across backends, as [architecture](docs/design/architecture.md#invariants) defines.
-4. Write no new code comments except the exceptions in the [engineering standard](docs/standards/engineering.md#code-comments). Until the plan's comment slice lands, keep existing comments unless their code is deleted, so their decisions can move into the design. This rule takes precedence over any global rule to delete comments in touched code.
+4. Write no code comments except the exceptions in the [engineering standard](docs/standards/engineering.md#code-comments). Put decisions in the design that owns them.
 5. Tests stay hermetic: mock upstreams, toy credentials, and temporary config and state directories.
 6. Report exact files and checks, including failures and skipped checks. Never claim verification that did not run.
 

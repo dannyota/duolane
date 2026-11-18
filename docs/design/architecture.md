@@ -38,6 +38,18 @@ other model.
   is set.
 - A request that continues a message thread is rejected on the Codex route,
   because only Anthropic supports threads.
+- Session history never moves a Claude model to Codex. A Codex request earlier
+  in a session cannot pull the Claude aliases off the Anthropic backend.
+- A backend without a login appears in model listings and in the unknown-model
+  error with a hint on how to sign in. Routing ignores login state, so signing
+  in later needs no restart.
+- `GET /v1/models` answers in Anthropic's format for Claude Code's gateway model
+  discovery. Claude Code adds only ids that start with `claude` or `anthropic`,
+  so the Claude aliases are what reach its `/model` picker. Codex ids are still
+  listed for other clients.
+- Every response carries a `request-id` header, which Claude Code records as the
+  transcript `requestId`. duolane keeps an upstream value and otherwise sets its
+  own, before the body streams.
 
 ## Claude route
 
@@ -48,13 +60,25 @@ subscription login when only `ANTHROPIC_BASE_URL` is set. An
 ([gateway docs](https://code.claude.com/docs/en/llm-gateway),
 [connection docs](https://code.claude.com/docs/en/llm-gateway-connect.md)).
 
+The relay keeps the original path, query, and body bytes. It removes these
+request headers:
+
+- hop-by-hop headers and `content-length`, which the client recomputes;
+- `accept-encoding`, so Anthropic answers without compression, because duolane
+  never decompresses and must not relay a body under a stale encoding; and
+- the inbound token header.
+
+It removes hop-by-hop headers, `content-length`, and `content-encoding` from the
+response. `anthropic-*`, `request-id`, and rate limit headers reach Claude Code.
+
 ## Codex route
 
 duolane translates Messages requests into Responses API requests and translates
 the stream back. It uses the login that the Codex CLI stored, and has no Codex
 login of its own. A token refresh writes the rotated tokens back so the Codex
 CLI keeps working. The [security design](security.md#credentials) owns these
-rules.
+rules, and the [Codex route design](codex.md) owns translation, lanes, retries,
+and errors.
 
 ## Reasoning across backends
 
