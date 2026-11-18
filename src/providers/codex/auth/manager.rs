@@ -12,6 +12,8 @@ use crate::auth::AuthStorage;
 use crate::providers::codex::translate::reasoning_signature::ReasoningAccount;
 
 const MAX_REFRESH_RESPONSE_BYTES: usize = 64 * 1024;
+const SAVE_ATTEMPTS: u32 = 3;
+const SAVE_RETRY_PAUSE: Duration = Duration::from_millis(100);
 
 static CODEX_REFRESH_LOCK: LazyLock<Arc<AsyncMutex<()>>> =
     LazyLock::new(|| Arc::new(AsyncMutex::new(())));
@@ -46,13 +48,6 @@ impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
         }
     }
 
-    fn now_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
-    }
-
     pub async fn get_auth(&self) -> Result<StoredAuth, anyhow::Error> {
         let stored = self.load_auth().await?.ok_or_else(|| {
             anyhow::anyhow!(
@@ -60,7 +55,7 @@ impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
             )
         })?;
 
-        if stored.expires > Self::now_ms() + REFRESH_MARGIN_MS {
+        if stored.expires > now_ms() + REFRESH_MARGIN_MS {
             return Ok(stored);
         }
 
@@ -87,22 +82,21 @@ impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
             return Ok(Some(auth));
         }
 
-        self.with_store(|store| store.load_auth()).await
-    }
-
-    async fn with_store<T: Send + 'static>(
-        &self,
-        task: impl FnOnce(&CodexTokenStore<S>) -> Result<T, anyhow::Error> + Send + 'static,
-    ) -> Result<T, anyhow::Error> {
-        let store = self.store.clone();
-        tokio::task::spawn_blocking(move || task(&store))
-            .await
-            .map_err(|e| anyhow::anyhow!("Codex auth file task failed: {e}"))?
+        with_store(&self.store, |store| store.load_auth()).await
     }
 
     async fn refresh(&self, force: bool, stale_access: &str) -> Result<StoredAuth, anyhow::Error> {
-        let _refresh_guard = self.refresh_lock.lock().await;
-        let _file_lock = self.with_store(|store| store.lock_for_refresh()).await?;
+        let refresh_guard = self.refresh_lock.clone().lock_owned().await;
+        let file_lock = match with_store(&self.store, |store| store.lock_for_refresh()).await {
+            Ok(file_lock) => file_lock,
+            Err(err) if force => return Err(err),
+            Err(err) => {
+                return match self.load_auth().await {
+                    Ok(Some(current)) if current.expires > now_ms() => Ok(current),
+                    _ => Err(err),
+                };
+            }
+        };
 
         let current = self
             .load_auth()
@@ -110,71 +104,133 @@ impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
             .ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
 
         if current.access != stale_access
-            || (!force && current.expires > Self::now_ms() + REFRESH_MARGIN_MS)
+            || (!force && current.expires > now_ms() + REFRESH_MARGIN_MS)
         {
             return Ok(current);
         }
 
-        self.refresh_now(&current).await
-    }
-
-    async fn refresh_now(&self, current: &StoredAuth) -> Result<StoredAuth, anyhow::Error> {
-        if current.refresh.is_empty() {
-            anyhow::bail!("No refresh token stored; run `codex login` to sign in again");
-        }
-
-        let form = [
-            ("client_id", CLIENT_ID.to_string()),
-            ("grant_type", "refresh_token".to_string()),
-            ("refresh_token", current.refresh.clone()),
-        ];
-
-        let resp = self
-            .refresh_client
-            .post(&self.token_endpoint)
-            .form(&form)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("refresh network error: {e}"))?;
-
-        let status = resp.status().as_u16();
-        if status == 401 || status == 403 {
-            drop(resp);
-            if let Some(latest) = self.load_auth().await?
-                && latest.refresh != current.refresh
-            {
-                return Ok(latest);
-            }
-            anyhow::bail!(
-                "Codex rejected the stored refresh token ({status}); run `codex login` to sign in again"
-            );
-        }
-
-        if !resp.status().is_success() {
-            anyhow::bail!("Token refresh failed: {status}");
-        }
-
-        let body = read_refresh_body(resp).await?;
-        let tokens: TokenResponse = serde_json::from_slice(&body)
-            .map_err(|e| anyhow::anyhow!("failed to parse token response: {e}"))?;
-        validate_token_response(&tokens)?;
-        let account_id = extract_account_id(&tokens).or_else(|| current.account_id.clone());
-        let expires = Self::now_ms() + (tokens.expires_in.unwrap_or(3600) * 1000);
-        let next = StoredAuth {
-            access: tokens.access_token,
-            refresh: tokens.refresh_token,
-            expires,
-            account_id,
-        };
-        let saved = next.clone();
-        self.with_store(move |store| store.save_auth(saved)).await?;
-        Ok(next)
+        let exchange = exchange_refresh_token(
+            self.refresh_client.clone(),
+            self.token_endpoint.clone(),
+            self.store.clone(),
+            current,
+        );
+        tokio::spawn(async move {
+            let _held = (refresh_guard, file_lock);
+            exchange.await
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Codex token refresh task failed: {e}"))?
     }
 
     #[cfg(test)]
     pub fn set_test_auth(&self, auth: StoredAuth) {
         if let Ok(mut guard) = self.test_auth.lock() {
             *guard = Some(auth);
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+async fn with_store<S: AuthStorage<StoredAuth> + 'static, T: Send + 'static>(
+    store: &Arc<CodexTokenStore<S>>,
+    task: impl FnOnce(&CodexTokenStore<S>) -> Result<T, anyhow::Error> + Send + 'static,
+) -> Result<T, anyhow::Error> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || task(&store))
+        .await
+        .map_err(|e| anyhow::anyhow!("Codex auth file task failed: {e}"))?
+}
+
+async fn exchange_refresh_token<S: AuthStorage<StoredAuth> + 'static>(
+    client: reqwest::Client,
+    token_endpoint: String,
+    store: Arc<CodexTokenStore<S>>,
+    current: StoredAuth,
+) -> Result<StoredAuth, anyhow::Error> {
+    if current.refresh.is_empty() {
+        anyhow::bail!("No refresh token stored; run `codex login` to sign in again");
+    }
+
+    let form = [
+        ("client_id", CLIENT_ID.to_string()),
+        ("grant_type", "refresh_token".to_string()),
+        ("refresh_token", current.refresh.clone()),
+    ];
+
+    let resp = client
+        .post(&token_endpoint)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("refresh network error: {e}"))?;
+
+    let status = resp.status().as_u16();
+    if resp.status().is_client_error() {
+        drop(resp);
+        if let Some(latest) = with_store(&store, |store| store.load_auth()).await?
+            && latest.refresh != current.refresh
+        {
+            return Ok(latest);
+        }
+        if matches!(status, 408 | 429) {
+            anyhow::bail!("Token refresh failed: {status}");
+        }
+        anyhow::bail!(
+            "Codex rejected the stored refresh token ({status}); run `codex login` to sign in again"
+        );
+    }
+
+    if !resp.status().is_success() {
+        anyhow::bail!("Token refresh failed: {status}");
+    }
+
+    let body = read_refresh_body(resp).await?;
+    let tokens: TokenResponse = serde_json::from_slice(&body)
+        .map_err(|e| anyhow::anyhow!("failed to parse token response: {e}"))?;
+    validate_token_response(&tokens)?;
+    let account_id = extract_account_id(&tokens).or_else(|| current.account_id.clone());
+    let expires = now_ms() + (tokens.expires_in.unwrap_or(3600) * 1000);
+    let next = StoredAuth {
+        access: tokens.access_token,
+        refresh: tokens.refresh_token,
+        expires,
+        account_id,
+    };
+    with_store(&store, move |store| {
+        persist_refreshed(store, &current.refresh, next)
+    })
+    .await
+}
+
+fn persist_refreshed<S: AuthStorage<StoredAuth>>(
+    store: &CodexTokenStore<S>,
+    spent_refresh: &str,
+    next: StoredAuth,
+) -> Result<StoredAuth, anyhow::Error> {
+    let mut attempt = 1;
+    loop {
+        let saved = match store.load_auth() {
+            Ok(Some(latest)) if latest.refresh != spent_refresh => return Ok(latest),
+            Ok(Some(_)) => store.save_auth(next.clone()),
+            Ok(None) => anyhow::bail!(
+                "the Codex login was removed during a token refresh; run `codex login` to sign in again"
+            ),
+            Err(err) => Err(err),
+        };
+        match saved {
+            Ok(()) => return Ok(next),
+            Err(err) if attempt >= SAVE_ATTEMPTS => return Err(err),
+            Err(_) => {
+                attempt += 1;
+                std::thread::sleep(SAVE_RETRY_PAUSE);
+            }
         }
     }
 }
@@ -369,6 +425,51 @@ mod tests {
                 assert_eq!(manager.store.load_auth().unwrap(), Some(rejected));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn refresh_keeps_a_login_the_codex_cli_rotated_during_the_exchange() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let backing = InMemoryAuthStore::new();
+        let server_backing = backing.clone();
+        let rotated_by_cli = StoredAuth {
+            access: "cli-access".into(),
+            refresh: "cli-refresh".into(),
+            expires: u64::MAX,
+            account_id: Some("acct_1".into()),
+        };
+        let server_rotated = rotated_by_cli.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            server_backing.save(server_rotated).unwrap();
+            let body = br#"{"access_token":"duolane-access","refresh_token":"duolane-refresh","expires_in":3600}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+        });
+
+        let store = CodexTokenStore::new(backing);
+        store
+            .save_auth(StoredAuth {
+                access: "stale-access".into(),
+                refresh: "spent-refresh".into(),
+                expires: 0,
+                account_id: Some("acct_1".into()),
+            })
+            .unwrap();
+        let manager =
+            CodexAuthManager::new_with_token_endpoint(store, format!("http://{addr}/oauth/token"));
+
+        let auth = manager.get_auth().await.unwrap();
+        server.join().unwrap();
+        assert_eq!(auth, rotated_by_cli);
+        assert_eq!(manager.store.load_auth().unwrap(), Some(rotated_by_cli));
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -437,24 +437,6 @@ pub fn translate_request(
     translate_request_inner(req, opts, true)
 }
 
-pub fn translate_openai_compatible_request(
-    req: &MessagesRequest,
-    model: String,
-    session_id: Option<String>,
-) -> Result<ResponsesRequest, anyhow::Error> {
-    translate_request_inner(
-        req,
-        TranslateOptions {
-            session_id,
-            service_tier: None,
-            model,
-            use_responses_lite: false,
-            reasoning_account: ReasoningAccount::default(),
-        },
-        false,
-    )
-}
-
 fn translate_request_inner(
     req: &MessagesRequest,
     opts: TranslateOptions,
@@ -1729,8 +1711,7 @@ mod tests {
             .remove("pattern");
 
         let normal = translate_request(&req, opts()).unwrap();
-        let compatible =
-            translate_openai_compatible_request(&req, "gpt-5.5".to_string(), None).unwrap();
+        let compatible = translate_request_inner(&req, opts(), false).unwrap();
         let lite = translate_request(
             &req,
             TranslateOptions {

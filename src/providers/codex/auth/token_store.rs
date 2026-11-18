@@ -75,6 +75,10 @@ impl CodexCliAuthStore {
         self.lock_timeout = lock_timeout;
         self
     }
+
+    fn target_path(&self) -> PathBuf {
+        std::fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone())
+    }
 }
 
 impl AuthStorage<StoredAuth> for CodexCliAuthStore {
@@ -133,15 +137,13 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
     }
 
     fn save(&self, value: StoredAuth) -> Result<(), anyhow::Error> {
-        let mut doc: serde_json::Value = match std::fs::read(&self.path) {
+        let path = self.target_path();
+        let mut doc: serde_json::Value = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| anyhow::anyhow!("{} is not valid JSON: {e}", self.path.display()))?,
+                .map_err(|e| anyhow::anyhow!("{} is not valid JSON: {e}", path.display()))?,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
             Err(err) => {
-                return Err(anyhow::anyhow!(
-                    "failed to read {}: {err}",
-                    self.path.display()
-                ));
+                return Err(anyhow::anyhow!("failed to read {}: {err}", path.display()));
             }
         };
         if !doc.is_object() {
@@ -168,7 +170,7 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
             "last_refresh".into(),
             serde_json::Value::String(now_rfc3339()),
         );
-        write_atomic(&self.path, &serde_json::to_vec_pretty(&doc)?)
+        write_atomic(&path, &serde_json::to_vec_pretty(&doc)?)
     }
 
     fn clear(&self) -> Result<(), anyhow::Error> {
@@ -180,13 +182,13 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
     }
 
     fn lock_for_refresh(&self) -> Result<Option<File>, anyhow::Error> {
-        let name = self
-            .path
+        let path = self.target_path();
+        let name = path
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("auth path has no file name"))?;
         let mut lock_name = name.to_os_string();
         lock_name.push(".duolane.lock");
-        let lock_path = self.path.with_file_name(lock_name);
+        let lock_path = path.with_file_name(lock_name);
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
@@ -204,7 +206,10 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
         let deadline = Instant::now() + self.lock_timeout;
         loop {
             match file.try_lock() {
-                Ok(()) => return Ok(Some(file)),
+                Ok(()) => {
+                    remove_stale_temp_files(&path);
+                    return Ok(Some(file));
+                }
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(REFRESH_LOCK_POLL);
                 }
@@ -255,6 +260,21 @@ fn now_rfc3339() -> String {
         .unwrap_or_default()
 }
 
+fn remove_stale_temp_files(path: &Path) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let prefix = format!(".{}.tmp.", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), anyhow::Error> {
     let name = path
         .file_name()
@@ -275,7 +295,19 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), anyhow::Error> {
         let _ = std::fs::remove_file(&tmp);
         anyhow::bail!("failed to persist {}: {err}", path.display());
     }
-    sync_directory(dir).map_err(|err| anyhow::anyhow!("failed to sync {}: {err}", dir.display()))
+    if let Err(err) = sync_directory(dir) {
+        crate::logging::create_logger("codex").warn(
+            "codex_auth_directory_sync_failed",
+            Some(serde_json::Map::from_iter([
+                (
+                    "dir".to_string(),
+                    serde_json::json!(dir.display().to_string()),
+                ),
+                ("error".to_string(), serde_json::json!(err.to_string())),
+            ])),
+        );
+    }
+    Ok(())
 }
 
 fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

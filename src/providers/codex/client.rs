@@ -502,6 +502,7 @@ const MAX_BUFFERED_TRANSPORT_ATTEMPTS: u32 = MAX_BUFFERED_TRANSPORT_RETRIES + 1;
 const HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS: u64 = 300_000;
 const IMAGE_HEADER_TIMEOUT_MS: u64 = 300_000;
 const HTTP_RESPONSE_HEADERS_DETAIL: &str = "http_response_headers";
+const LOOPBACK_NO_PROXY: &str = "localhost,127.0.0.0/8,::1,::ffff:127.0.0.0/104";
 
 #[derive(Clone)]
 struct ProxyEnvironment {
@@ -524,9 +525,11 @@ impl ProxyEnvironment {
             };
         }
 
-        let no_proxy_value = std::env::var("NO_PROXY")
-            .or_else(|_| std::env::var("no_proxy"))
-            .ok();
+        let no_proxy_value = match std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy"))
+        {
+            Ok(value) if !value.trim().is_empty() => format!("{value},{LOOPBACK_NO_PROXY}"),
+            _ => LOOPBACK_NO_PROXY.to_string(),
+        };
         Self {
             http_proxy: proxy_env_value("HTTP_PROXY", "http_proxy")
                 .unwrap_or_else(|name| panic!("invalid {name} proxy URL")),
@@ -534,10 +537,8 @@ impl ProxyEnvironment {
                 .unwrap_or_else(|name| panic!("invalid {name} proxy URL")),
             all_proxy: proxy_env_value("ALL_PROXY", "all_proxy")
                 .unwrap_or_else(|name| panic!("invalid {name} proxy URL")),
-            no_proxy: no_proxy_value
-                .as_deref()
-                .and_then(reqwest::NoProxy::from_string),
-            no_proxy_value,
+            no_proxy: reqwest::NoProxy::from_string(&no_proxy_value),
+            no_proxy_value: Some(no_proxy_value),
         }
     }
 
@@ -951,7 +952,7 @@ impl CodexHttpClient {
         })
     }
 
-    pub async fn post_native_responses(
+    pub(crate) async fn post_native_responses(
         &self,
         body: &serde_json::Value,
         ctx: &RequestContext,
@@ -1073,7 +1074,7 @@ impl CodexHttpClient {
             .await
     }
 
-    pub async fn post_search(
+    pub(crate) async fn post_search(
         &self,
         body: &SearchRequest,
         ctx: &RequestContext,
@@ -1138,7 +1139,7 @@ impl CodexHttpClient {
         }
     }
 
-    pub async fn stream_codex_http_events(
+    pub(crate) async fn stream_codex_http_events(
         self: &Arc<Self>,
         body: &ResponsesRequest,
         ctx: &RequestContext,
@@ -1245,19 +1246,6 @@ impl CodexHttpClient {
             }
             return Ok((resp, headers, started_at));
         }
-    }
-
-    pub async fn stream_codex_auto_events(
-        self: &Arc<Self>,
-        body: &ResponsesRequest,
-        ctx: &RequestContext,
-        continuation: Option<&super::continuation::ContinuationCandidate>,
-    ) -> Result<super::websocket::CodexWebSocketEventReceiver, CodexError> {
-        let reservation =
-            continuation.map(super::continuation::ContinuationReservation::from_public_candidate);
-        self.stream_codex_auto_events_for_owner(body, ctx, reservation.as_ref())
-            .await
-            .map(super::websocket::CodexWebSocketEventStream::into_receiver)
     }
 
     pub(crate) async fn stream_codex_auto_events_for_owner(
