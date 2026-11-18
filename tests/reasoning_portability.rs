@@ -56,6 +56,10 @@ fn write_codex_auth(path: &Path, account_id: &str) {
 }
 
 async fn send(body: Value, expected: StatusCode) -> Value {
+    send_raw(body.to_string(), expected).await
+}
+
+async fn send_raw(body: String, expected: StatusCode) -> Value {
     let response = app(Arc::new(Registry::with_default_alias()))
         .oneshot(
             Request::builder()
@@ -63,7 +67,7 @@ async fn send(body: Value, expected: StatusCode) -> Value {
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
                 .header("x-claude-code-session-id", "portability-session")
-                .body(Body::from(body.to_string()))
+                .body(Body::from(body))
                 .unwrap(),
         )
         .await
@@ -157,20 +161,35 @@ async fn reasoning_survives_codex_to_claude_to_codex() {
     );
 
     let mention = r#"the marker duolane:codex: and "signature" : "duolane:codex:v1:x" as text"#;
-    let mention_body =
-        json!({"model": "claude-opus-4-8", "max_tokens": 64, "messages": [user(mention)]});
-    send(mention_body.clone(), StatusCode::OK).await;
-    assert_eq!(claude_requests.lock().unwrap()[1], mention_body.to_string());
+    let forwarded = [
+        json!({"model": "claude-opus-4-8", "max_tokens": 64, "messages": [user(mention)]}),
+        json!({"model": "claude-opus-4-8", "max_tokens": 64, "messages": [
+            {"role": "assistant", "content": [{
+                "type": "tool_use", "id": "toolu_1", "name": "Write",
+                "input": {"signature": "duolane:codex:v1:c1383c10f6fe17fb:cnNfMQ:enc-secret"}
+            }]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}
+            ]}
+        ]}),
+    ];
+    for body in forwarded.map(|body| body.to_string()) {
+        send_raw(body.clone(), StatusCode::OK).await;
+        assert_eq!(claude_requests.lock().unwrap().last(), Some(&body));
+    }
 
     let missed_block = json!({"role": "user", "content": codex_reply["content"]});
-    let refused = send(
-        json!({"model": "claude-opus-4-8", "max_tokens": 64, "messages": [missed_block]}),
-        StatusCode::INTERNAL_SERVER_ERROR,
-    )
-    .await;
-    assert_eq!(refused["error"]["type"], "api_error");
-    assert!(!refused.to_string().contains("enc-secret"), "{refused}");
-    assert_eq!(claude_requests.lock().unwrap().len(), 2);
+    let refused = [
+        json!({"model": "claude-opus-4-8", "max_tokens": 64, "messages": [missed_block]})
+            .to_string(),
+        r#"{"model":"claude-opus-4-8","max_tokens":64,"messages":[{"role":"user","content":[{"type":"thinking","thinking":"plan","signature":"duolane:codex:v1:c1383c10f6fe17fb:cnNfMQ:enc-secret"}]}]}"#.to_string(),
+    ];
+    for body in refused {
+        let reply = send_raw(body, StatusCode::BAD_REQUEST).await;
+        assert_eq!(reply["error"]["type"], "invalid_request_error");
+        assert!(!reply.to_string().contains("enc-secret"), "{reply}");
+    }
+    assert_eq!(claude_requests.lock().unwrap().len(), 3);
 
     history.extend([assistant(&claude_answer), user("three")]);
     let next_codex_turn = json!({"model": "gpt-5.5", "max_tokens": 64, "messages": history});

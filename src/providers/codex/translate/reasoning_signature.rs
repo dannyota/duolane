@@ -7,8 +7,7 @@ use serde_json::Value;
 use super::request::ResponsesInputItem;
 
 const FAMILY_PREFIX: &str = "duolane:";
-const SIGNATURE_KEY: &[u8] = b"\"signature\"";
-const CODEX_SIGNATURE_VALUE: &[u8] = b"\"duolane:codex:";
+const CODEX_FAMILY_PREFIX: &str = "duolane:codex:";
 const PREFIX: &str = "duolane:codex:v1:";
 const ACCOUNT_TAG_BYTES: usize = 8;
 const MAX_ID_BYTES: usize = 4 * 1024;
@@ -18,17 +17,8 @@ pub(crate) fn is_proxy_reasoning_signature(signature: &str) -> bool {
     signature.starts_with(FAMILY_PREFIX)
 }
 
-pub(crate) fn contains_codex_signature(body: &[u8]) -> bool {
-    body.windows(SIGNATURE_KEY.len())
-        .enumerate()
-        .filter(|(_, window)| *window == SIGNATURE_KEY)
-        .any(|(start, _)| {
-            body.get(start + SIGNATURE_KEY.len()..)
-                .map(<[u8]>::trim_ascii_start)
-                .and_then(|rest| rest.strip_prefix(b":"))
-                .map(<[u8]>::trim_ascii_start)
-                .is_some_and(|rest| rest.starts_with(CODEX_SIGNATURE_VALUE))
-        })
+pub(crate) fn is_codex_signature(signature: &str) -> bool {
+    signature.starts_with(CODEX_FAMILY_PREFIX)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
