@@ -25,9 +25,9 @@ use std::time::{Duration, Instant};
 use crate::anthropic::error::json_error;
 use crate::anthropic::schema::{CountTokensResponse, MessagesRequest};
 use crate::anthropic::sse::parse_sse_events;
+use crate::anthropic::sse::usage_from_anthropic_sse;
 use crate::config;
 use crate::logging::create_logger;
-use crate::monitor::usage_from_anthropic_sse;
 use crate::provider::{CliHandlers, Provider, RequestContext};
 use crate::request_identity::ConversationIdentity;
 use crate::retry::{compute_backoff_delay, sleep};
@@ -1762,7 +1762,7 @@ impl CliHandlers for CodexCli {
             Some(auth) => {
                 println!(
                     "Account: {}",
-                    auth.account_id.as_deref().unwrap_or("(none)")
+                    crate::text::terminal_text(auth.account_id.as_deref().unwrap_or("(none)"))
                 );
                 println!("{}", format_expiry(auth.expires, now_ms()));
                 println!("Storage: {} (Codex CLI)", store.auth_path());

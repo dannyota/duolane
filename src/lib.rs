@@ -18,6 +18,7 @@ pub mod request_identity;
 pub mod retry;
 pub mod server;
 pub mod session;
+pub mod text;
 pub mod traffic;
 pub mod tui;
 

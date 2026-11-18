@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use http::StatusCode;
 use serde_json::{Value, json};
 
-use crate::provider::RequestContext;
+use crate::provider::{MAX_BUFFERED_RESPONSE_BYTES, RequestContext};
 
 use super::client::{CodexError, CodexHttpClient};
 use request::TranslatedRequest;
@@ -121,6 +121,11 @@ async fn collect_body(
                         monitor.generation_started(&ctx.req_id);
                     }
                     started = true;
+                }
+                if bytes.len().saturating_add(chunk.len()) > MAX_BUFFERED_RESPONSE_BYTES {
+                    return Err(ChatError::upstream(
+                        "Codex response body exceeds the size limit",
+                    ));
                 }
                 bytes.extend_from_slice(&chunk);
                 if let Some(ctx) = ctx

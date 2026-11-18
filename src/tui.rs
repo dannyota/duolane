@@ -427,7 +427,7 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, anyhow::Error>
 }
 
 fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorSnapshot) {
-    let area = frame.area();
+    let (area, state) = (frame.area(), &state.for_terminal());
     frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
     let root = Layout::default()
@@ -2482,6 +2482,43 @@ mod tests {
         assert!(text.contains("streaming"), "{text}");
         assert!(text.contains("gpt-5.6-terra"), "{text}");
         assert!(text.contains("upstream connection closed"), "{text}");
+    }
+
+    #[test]
+    fn render_removes_control_characters_before_layout() {
+        let monitor = MonitorHandle::default();
+        let model = format!("gpt-{}5.6-terra", "\u{1b}".repeat(30));
+        monitor.request_started("req", Some("s\u{7}1".into()), None, EndpointKind::Messages);
+        monitor.provider_selected("req", "codex", model, None);
+        monitor.request_failed("req", Some(502), "upstream\u{1b}[2J\u{9b}31m closed");
+        let state: MonitorSnapshot = monitor.snapshot().into();
+        let mut app = MonitorApp {
+            listen_url: "http://127.0.0.1:3000".to_string(),
+            setup_text: String::new(),
+            show_setup: false,
+            show_help: false,
+            detail: None,
+            focus: FocusPane::Recent,
+            selected: 0,
+            recent_selected: 0,
+            tick: 0,
+            phase: MonitorPhase::Running,
+            shutdown: None,
+            shutdown_complete: None,
+        };
+
+        let buffer = draw(180, 48, |frame| render(frame, &mut app, &state));
+        let text = buffer_text(&buffer);
+
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .all(|cell| !cell.symbol().contains(char::is_control)),
+            "{text:?}"
+        );
+        assert!(text.contains("gpt-5.6-terra"), "{text}");
+        assert!(text.contains("upstream[2J31m closed"), "{text}");
     }
 
     #[test]

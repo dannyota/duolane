@@ -1,6 +1,11 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+
+use crate::anthropic::schema::MessagesRequest;
+
+const MAX_GIT_MARKER_BYTES: u64 = 4 * 1024;
 
 const WORKING_DIRECTORY_PREFIXES: [&str; 3] = [
     "Primary working directory:",
@@ -8,34 +13,46 @@ const WORKING_DIRECTORY_PREFIXES: [&str; 3] = [
     "Current working directory:",
 ];
 
-pub fn name_from_system(system: Option<&Value>) -> Option<String> {
-    system.and_then(name_from_value)
+pub async fn name_from_messages(body: &MessagesRequest) -> Option<String> {
+    let working_directory = working_directory_from_request(
+        body.extra.get("system"),
+        body.messages.iter().rev().map(|message| &message.content),
+    )?;
+    tokio::task::spawn_blocking(move || name_from_working_directory(&working_directory))
+        .await
+        .ok()
+        .flatten()
 }
 
-pub fn name_from_request<'a>(
+fn working_directory_from_request<'a>(
     system: Option<&Value>,
     message_contents: impl IntoIterator<Item = &'a Value>,
 ) -> Option<String> {
-    name_from_system(system).or_else(|| message_contents.into_iter().find_map(name_from_value))
+    system
+        .and_then(working_directory_from_value)
+        .or_else(|| {
+            message_contents
+                .into_iter()
+                .find_map(working_directory_from_value)
+        })
+        .map(str::to_string)
 }
 
-fn name_from_value(value: &Value) -> Option<String> {
+fn working_directory_from_value(value: &Value) -> Option<&str> {
     match value {
-        Value::String(text) => name_from_text(text),
-        Value::Array(values) => values.iter().find_map(name_from_value),
+        Value::String(text) => working_directory_from_text(text),
+        Value::Array(values) => values.iter().find_map(working_directory_from_value),
         Value::Object(object) => object
             .get("text")
             .and_then(Value::as_str)
-            .and_then(name_from_text)
-            .or_else(|| object.get("content").and_then(name_from_value)),
+            .and_then(working_directory_from_text)
+            .or_else(|| object.get("content").and_then(working_directory_from_value)),
         _ => None,
     }
 }
 
-fn name_from_text(text: &str) -> Option<String> {
-    text.lines()
-        .find_map(working_directory_from_line)
-        .and_then(name_from_working_directory)
+fn working_directory_from_text(text: &str) -> Option<&str> {
+    text.lines().find_map(working_directory_from_line)
 }
 
 fn working_directory_from_line(line: &str) -> Option<&str> {
@@ -64,7 +81,7 @@ fn repository_name(root: &Path) -> Option<String> {
         return path_name(root);
     }
 
-    let contents = std::fs::read_to_string(git_marker).ok()?;
+    let contents = read_git_marker(&git_marker)?;
     let git_dir = contents.trim().strip_prefix("gitdir:")?.trim();
     let git_dir = if Path::new(git_dir).is_absolute() {
         PathBuf::from(git_dir)
@@ -77,6 +94,19 @@ fn repository_name(root: &Path) -> Option<String> {
         .and_then(Path::parent)
         .and_then(path_name)
         .or_else(|| path_name(root))
+}
+
+fn read_git_marker(path: &Path) -> Option<String> {
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut contents = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_GIT_MARKER_BYTES + 1)
+        .read_to_string(&mut contents)
+        .ok()?;
+    (contents.len() as u64 <= MAX_GIT_MARKER_BYTES).then_some(contents)
 }
 
 fn path_name(path: &Path) -> Option<String> {
@@ -94,6 +124,18 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    fn name_from_request<'a>(
+        system: Option<&Value>,
+        message_contents: impl IntoIterator<Item = &'a Value>,
+    ) -> Option<String> {
+        working_directory_from_request(system, message_contents)
+            .and_then(|path| name_from_working_directory(&path))
+    }
+
+    fn name_from_system(system: Option<&Value>) -> Option<String> {
+        name_from_request(system, [])
+    }
 
     #[test]
     fn reads_primary_working_directory_from_claude_code_system_blocks() {

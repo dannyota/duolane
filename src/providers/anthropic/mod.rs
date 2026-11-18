@@ -1,7 +1,11 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::Response;
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 
 use crate::anthropic::error::json_error;
@@ -10,6 +14,10 @@ use crate::logging::create_logger;
 use crate::provider::{CliHandlers, Provider, RequestContext};
 use crate::providers::translate_shared::wrap_reasoning;
 use crate::registry::ANTHROPIC_STYLE_ALIASES;
+
+const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 fn sanitize_anthropic_request(raw: &[u8], req_id: &str) -> Option<Vec<u8>> {
     let mut doc: Value = serde_json::from_slice(raw).ok()?;
@@ -133,17 +141,30 @@ fn is_stripped_response_header(name: &str) -> bool {
 pub struct AnthropicProvider {
     client: reqwest::Client,
     base_url: String,
+    header_timeout: Duration,
+    idle_timeout: Duration,
 }
 
 impl AnthropicProvider {
     pub fn new() -> Self {
+        Self::with_timeouts(
+            crate::config::anthropic_base_url(),
+            RESPONSE_HEADER_TIMEOUT,
+            BODY_IDLE_TIMEOUT,
+        )
+    }
+
+    fn with_timeouts(base_url: String, header_timeout: Duration, idle_timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
+            .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("failed to build anthropic passthrough client");
         Self {
             client,
-            base_url: crate::config::anthropic_base_url(),
+            base_url,
+            header_timeout,
+            idle_timeout,
         }
     }
 
@@ -180,16 +201,18 @@ impl AnthropicProvider {
             None => reqwest::Body::from(passthrough.raw_body),
         };
 
-        let upstream = self
-            .client
-            .post(&url)
-            .headers(headers)
-            .body(outgoing)
-            .send()
-            .await;
+        let upstream = tokio::time::timeout(
+            self.header_timeout,
+            self.client
+                .post(&url)
+                .headers(headers)
+                .body(outgoing)
+                .send(),
+        )
+        .await;
 
         match upstream {
-            Ok(upstream) => {
+            Ok(Ok(upstream)) => {
                 let status = upstream.status();
                 let mut out_headers =
                     axum::http::HeaderMap::with_capacity(upstream.headers().len());
@@ -199,18 +222,45 @@ impl AnthropicProvider {
                     }
                     out_headers.append(name.clone(), value.clone());
                 }
-                let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
+                let body = idle_limited(upstream.bytes_stream(), self.idle_timeout);
+                let mut response = Response::new(Body::from_stream(body));
                 *response.status_mut() = status;
                 *response.headers_mut() = out_headers;
                 response
             }
-            Err(err) => json_error(
+            Ok(Err(err)) => json_error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
                 format!("anthropic upstream request failed: {err}"),
             ),
+            Err(_) => json_error(
+                StatusCode::GATEWAY_TIMEOUT,
+                "api_error",
+                "anthropic upstream sent no response headers in time",
+            ),
         }
     }
+}
+
+fn idle_limited(
+    stream: impl Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+    idle_timeout: Duration,
+) -> impl Stream<Item = std::io::Result<Bytes>> + Send + 'static {
+    futures_util::stream::unfold(Some(Box::pin(stream)), move |stream| async move {
+        let mut stream = stream?;
+        match tokio::time::timeout(idle_timeout, stream.next()).await {
+            Ok(Some(Ok(chunk))) => Some((Ok(chunk), Some(stream))),
+            Ok(Some(Err(error))) => Some((Err(std::io::Error::other(error)), None)),
+            Ok(None) => None,
+            Err(_) => Some((
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "anthropic upstream stream was idle too long",
+                )),
+                None,
+            )),
+        }
+    })
 }
 
 impl Default for AnthropicProvider {
@@ -396,5 +446,61 @@ mod tests {
     #[test]
     fn non_json_body_is_forwarded_verbatim() {
         assert!(sanitize_anthropic_request(b"not json", "req5").is_none());
+    }
+
+    async fn stalled_upstream(head: &'static [u8]) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            socket.write_all(head).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        format!("http://{address}")
+    }
+
+    fn passthrough_context() -> RequestContext {
+        RequestContext {
+            req_id: "req-timeout".into(),
+            session_id: None,
+            traffic: None,
+            monitor: None,
+            passthrough: Some(crate::provider::Passthrough {
+                raw_body: Bytes::from_static(b"{}"),
+                headers: axum::http::HeaderMap::new(),
+                path_and_query: "/v1/messages".into(),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_route_times_out_waiting_for_headers_and_between_body_bytes() {
+        let short = Duration::from_millis(200);
+        let silent = stalled_upstream(b"").await;
+        let provider = AnthropicProvider::with_timeouts(silent, short, Duration::from_secs(60));
+        let started = std::time::Instant::now();
+        let response = provider.relay(passthrough_context()).await;
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        let stalling = stalled_upstream(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n",
+        )
+        .await;
+        let provider = AnthropicProvider::with_timeouts(stalling, Duration::from_secs(60), short);
+        let response = provider.relay(passthrough_context()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        assert_eq!(
+            body.next().await.unwrap().unwrap(),
+            Bytes::from_static(b"hello")
+        );
+        let idle = tokio::time::timeout(Duration::from_secs(10), body.next())
+            .await
+            .expect("idle body must end before the test deadline");
+        assert!(matches!(idle, Some(Err(_))), "{idle:?}");
     }
 }

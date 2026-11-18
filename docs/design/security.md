@@ -124,6 +124,11 @@ Rejections use the Anthropic error shape and never echo request values:
 | Error capture                       | 256 KiB per file          |
 | Error captures kept                 | Newest 200, up to 7 days  |
 
+An error capture larger than its limit keeps valid JSON: an oversized field
+becomes its byte count and a prefix. `DUOLANE_LOG_VERBOSE` lifts the logged
+string limit, and opt-in traffic captures have no total size limit, because both
+are debugging aids the owner turns on deliberately.
+
 A streamed Claude response has no total size limit, because duolane forwards it
 without buffering. The limit on idle time between bytes still applies. Text is
 truncated on a character boundary.

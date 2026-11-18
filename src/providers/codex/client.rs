@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crate::anthropic::sse::parse_sse_events;
 use crate::config;
 use crate::logging::create_logger;
-use crate::provider::RequestContext;
+use crate::provider::{MAX_BUFFERED_RESPONSE_BYTES, RequestContext};
 use crate::request_identity::ConversationIdentity;
 use crate::retry::{compute_backoff_delay, should_retry_status, sleep};
 use crate::traffic::TrafficCapture;
@@ -340,7 +340,7 @@ pub struct CodexResponse {
 pub type CodexHttpEventReceiver =
     tokio::sync::mpsc::Receiver<Result<serde_json::Value, CodexError>>;
 
-const MAX_HTTP_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_UPSTREAM_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Default)]
 struct HttpSseDecoder {
@@ -398,7 +398,7 @@ impl HttpSseDecoder {
     }
 
     fn push_byte(&mut self, byte: u8) -> Result<(), CodexError> {
-        if self.frame.len() >= MAX_HTTP_SSE_FRAME_BYTES {
+        if self.frame.len() >= MAX_UPSTREAM_FRAME_BYTES {
             return Err(http_sse_error("Codex SSE frame exceeds the size limit"));
         }
         self.frame.push(byte);
@@ -2392,45 +2392,9 @@ impl CodexHttpClient {
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
 
-        let mut body_bytes = Vec::new();
-        let mut response_started = false;
-        loop {
-            let chunk = tokio::time::timeout(
-                Duration::from_millis(self.body_idle_timeout_ms),
-                resp.chunk(),
-            )
-            .await
-            .map_err(|_| CodexError {
-                status: 0,
-                message: format!(
-                    "Timed out waiting {}ms for the next Codex response body chunk",
-                    self.body_idle_timeout_ms
-                ),
-                detail: Some("http_response_body".to_string()),
-                retry_after: None,
-                usage_limit: None,
-                origin: CodexErrorOrigin::Http,
-            })?
-            .map_err(|e| CodexError {
-                status: 0,
-                message: format!("Transport error reading Codex response body: {e}"),
-                detail: Some("http_response_body".to_string()),
-                retry_after: None,
-                usage_limit: None,
-                origin: CodexErrorOrigin::Http,
-            })?;
-
-            let Some(chunk) = chunk else {
-                break;
-            };
-            if !response_started {
-                if let Some(monitor) = ctx.monitor.as_ref() {
-                    monitor.generation_started(&ctx.req_id);
-                }
-                response_started = true;
-            }
-            body_bytes.extend_from_slice(&chunk);
-        }
+        let body_bytes = self
+            .read_buffered_body(&mut resp, ctx, "Codex response body")
+            .await?;
 
         if let Some(traffic) = ctx.traffic.as_deref() {
             write_upstream_response_capture(
@@ -2448,6 +2412,51 @@ impl CodexHttpClient {
             headers,
             transport: ActualTransport::Http,
         })
+    }
+
+    async fn read_buffered_body(
+        &self,
+        resp: &mut reqwest::Response,
+        ctx: &RequestContext,
+        label: &str,
+    ) -> Result<Vec<u8>, CodexError> {
+        let body_error = |message: String| CodexError {
+            status: 0,
+            message,
+            detail: Some("http_response_body".to_string()),
+            retry_after: None,
+            usage_limit: None,
+            origin: CodexErrorOrigin::Http,
+        };
+        let mut body = Vec::new();
+        let mut response_started = false;
+        loop {
+            let chunk = tokio::time::timeout(
+                Duration::from_millis(self.body_idle_timeout_ms),
+                resp.chunk(),
+            )
+            .await
+            .map_err(|_| {
+                body_error(format!(
+                    "Timed out waiting {}ms for the next {label} chunk",
+                    self.body_idle_timeout_ms
+                ))
+            })?
+            .map_err(|e| body_error(format!("Transport error reading {label}: {e}")))?;
+            let Some(chunk) = chunk else {
+                return Ok(body);
+            };
+            if body.len().saturating_add(chunk.len()) > MAX_BUFFERED_RESPONSE_BYTES {
+                return Err(body_error(format!("{label} exceeds the size limit")));
+            }
+            if !response_started {
+                if let Some(monitor) = ctx.monitor.as_ref() {
+                    monitor.generation_started(&ctx.req_id);
+                }
+                response_started = true;
+            }
+            body.extend_from_slice(&chunk);
+        }
     }
 
     async fn attempt_post_search(
@@ -2504,44 +2513,9 @@ impl CodexHttpClient {
                 )
             })
             .collect();
-        let mut body = Vec::new();
-        let mut response_started = false;
-        loop {
-            let chunk = tokio::time::timeout(
-                Duration::from_millis(self.body_idle_timeout_ms),
-                response.chunk(),
-            )
-            .await
-            .map_err(|_| CodexError {
-                status: 0,
-                message: format!(
-                    "Timed out waiting {}ms for the next Codex search response body chunk",
-                    self.body_idle_timeout_ms
-                ),
-                detail: Some("http_response_body".to_string()),
-                retry_after: None,
-                usage_limit: None,
-                origin: CodexErrorOrigin::Http,
-            })?
-            .map_err(|e| CodexError {
-                status: 0,
-                message: format!("Transport error reading Codex search response body: {e}"),
-                detail: Some("http_response_body".to_string()),
-                retry_after: None,
-                usage_limit: None,
-                origin: CodexErrorOrigin::Http,
-            })?;
-            let Some(chunk) = chunk else {
-                break;
-            };
-            if !response_started {
-                if let Some(monitor) = ctx.monitor.as_ref() {
-                    monitor.generation_started(&ctx.req_id);
-                }
-                response_started = true;
-            }
-            body.extend_from_slice(&chunk);
-        }
+        let body = self
+            .read_buffered_body(&mut response, ctx, "Codex search response body")
+            .await?;
 
         if let Some(traffic) = ctx.traffic.as_deref() {
             write_upstream_response_capture(traffic, status, started_at.elapsed(), &headers, &body);

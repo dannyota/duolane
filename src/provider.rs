@@ -8,6 +8,8 @@ use axum::response::Response;
 use clap::Subcommand;
 use std::sync::Arc;
 
+pub const MAX_BUFFERED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone, Subcommand)]
 pub enum AuthCommand {
     #[command(about = "Sign in using browser-based authentication")]

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::config::AliasProvider;
-use crate::logging::REDACT_KEYS;
+use crate::logging::is_credential_key;
 use crate::paths;
 use crate::providers::codex::translate::reasoning_signature::is_proxy_reasoning_signature;
 
@@ -20,6 +20,7 @@ pub const MAX_SSE_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_STREAM_CAPTURE_EVENT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_STREAM_CAPTURE_EVENTS: usize = 1_024;
 pub const MAX_STREAM_CAPTURE_FRAME_BYTES: usize = 64 * 1024;
+pub const TRAFFIC_CAPTURE_WARNING: &str = "warning: DUOLANE_TRAFFIC_LOG is on. duolane stores request and response content, including conversation text, under its state directory.";
 
 #[derive(Debug)]
 pub struct TrafficCaptureOptions {
@@ -198,10 +199,20 @@ pub fn sanitize_path_part(input: &str) -> String {
 }
 
 pub fn redact_traffic(value: &Value) -> Value {
-    redact_traffic_with_depth(value, 0)
+    redact_traffic_with_depth(value, 0, false)
 }
 
-fn redact_traffic_with_depth(value: &Value, depth: u16) -> Value {
+const IDENTITY_KEYS: [&str; 7] = [
+    "email",
+    "user_id",
+    "account_id",
+    "identity",
+    "identity_id",
+    "subject",
+    "sub",
+];
+
+fn redact_traffic_with_depth(value: &Value, depth: u16, in_image: bool) -> Value {
     if depth > 100 {
         return Value::String("[depth-limit]".to_string());
     }
@@ -211,54 +222,52 @@ fn redact_traffic_with_depth(value: &Value, depth: u16) -> Value {
             let mut out = Map::new();
             for (key, value) in map {
                 let normalized = key.to_lowercase();
-                let redact = normalized == "image_url"
+                let redacted = if normalized == "image_url"
                     || (normalized == "data" && looks_like_image_source(map))
-                    || normalized == "encrypted_content"
+                {
+                    redact_image_field(value, depth + 1)
+                } else if normalized == "encrypted_content"
                     || (normalized == "signature"
                         && value.as_str().is_some_and(is_proxy_reasoning_signature))
-                    || REDACT_KEYS.contains(&normalized.as_str())
-                    || matches!(
-                        normalized.as_str(),
-                        "token"
-                            | "bearer_token"
-                            | "oauth_token"
-                            | "oauth_access_token"
-                            | "oauth_refresh_token"
-                            | "client_secret"
-                            | "secret"
-                            | "password"
-                            | "email"
-                            | "user_id"
-                            | "account_id"
-                            | "identity"
-                            | "identity_id"
-                            | "subject"
-                            | "sub"
-                    );
-                if redact {
-                    out.insert(key.clone(), redact_traffic_value(value));
+                    || is_credential_key(key)
+                    || IDENTITY_KEYS.contains(&normalized.as_str())
+                {
+                    redact_traffic_value(value)
                 } else {
-                    out.insert(key.clone(), redact_traffic_with_depth(value, depth + 1));
-                }
+                    redact_traffic_with_depth(value, depth + 1, in_image)
+                };
+                out.insert(key.clone(), redacted);
             }
             Value::Object(out)
         }
         Value::Array(values) => Value::Array(
             values
                 .iter()
-                .map(|value| redact_traffic_with_depth(value, depth + 1))
+                .map(|value| redact_traffic_with_depth(value, depth + 1, in_image))
                 .collect(),
         ),
-        Value::String(text) if is_data_url(text) => {
+        Value::String(text) if is_data_url(text) || (in_image && has_data_scheme(text)) => {
             Value::String(format!("[redacted data-url len={}]", text.len()))
         }
         _ => value.clone(),
     }
 }
 
+fn redact_image_field(value: &Value, depth: u16) -> Value {
+    match value {
+        Value::Object(_) | Value::Array(_) => redact_traffic_with_depth(value, depth, true),
+        _ => redact_traffic_value(value),
+    }
+}
+
 fn is_data_url(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.starts_with("data:image/") && lower.contains(";base64,")
+}
+
+fn has_data_scheme(text: &str) -> bool {
+    text.get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
 }
 
 fn looks_like_image_source(map: &Map<String, Value>) -> bool {
@@ -278,7 +287,6 @@ fn looks_like_image_source(map: &Map<String, Value>) -> bool {
 fn redact_traffic_value(value: &Value) -> Value {
     match value {
         Value::String(s) => Value::String(format!("[redacted len={}]", s.len())),
-        Value::Object(_) | Value::Array(_) => redact_traffic(value),
         _ => Value::String("[redacted]".to_string()),
     }
 }

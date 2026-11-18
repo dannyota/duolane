@@ -18,18 +18,19 @@ use tokio_tungstenite::{
         Message,
         client::IntoClientRequest,
         handshake::{client::generate_key, derive_accept_key},
-        protocol::Role,
+        protocol::{Role, WebSocketConfig},
     },
 };
 
 use crate::logging::create_logger;
-use crate::provider::RequestContext;
+use crate::provider::{MAX_BUFFERED_RESPONSE_BYTES, RequestContext};
 use crate::request_identity::ConversationIdentity;
 use crate::retry::sleep as retry_sleep;
-use crate::traffic::TrafficCapture;
+use crate::traffic::{MAX_SSE_CAPTURE_BYTES, TrafficCapture};
 
 use super::client::{
-    ActualTransport, CodexError, CodexErrorOrigin, CodexResponse, OwnerAwareCodexResponse,
+    ActualTransport, CodexError, CodexErrorOrigin, CodexResponse, MAX_UPSTREAM_FRAME_BYTES,
+    OwnerAwareCodexResponse,
 };
 use super::continuation::ContinuationReservation;
 
@@ -1137,6 +1138,35 @@ fn missing_terminal_error() -> CodexError {
     }
 }
 
+fn websocket_stream_error(message: impl Into<String>) -> CodexError {
+    CodexError {
+        status: 0,
+        message: message.into(),
+        detail: None,
+        retry_after: None,
+        usage_limit: None,
+        origin: CodexErrorOrigin::WebSocket,
+    }
+}
+
+fn websocket_idle_timeout_error(timeout_ms: u64) -> CodexError {
+    websocket_stream_error(format!("WebSocket idle timeout after {timeout_ms}ms"))
+}
+
+fn websocket_config() -> WebSocketConfig {
+    WebSocketConfig {
+        max_message_size: Some(MAX_UPSTREAM_FRAME_BYTES),
+        max_frame_size: Some(MAX_UPSTREAM_FRAME_BYTES),
+        ..WebSocketConfig::default()
+    }
+}
+
+fn capture_sse_event(sse_body: &mut Vec<u8>, traffic: Option<&TrafficCapture>, text: &str) {
+    if traffic.is_some() && sse_body.len() < MAX_SSE_CAPTURE_BYTES {
+        sse_body.extend_from_slice(&encode_sse(text));
+    }
+}
+
 fn response_start_timeout_error(timeout_ms: u64) -> CodexError {
     CodexError {
         status: 0,
@@ -1754,10 +1784,11 @@ async fn connect_via_http_proxy_tunnel(
     let subprotocols = requested_subprotocols(headers);
     let request = tunneled_websocket_request(url, headers, &websocket_key)
         .map_err(ConnectAttemptError::Origin)?;
-    let (websocket, response) = tokio_tungstenite::client_async(request, stream)
-        .await
-        .map_err(tungstenite_handshake_error)
-        .map_err(ConnectAttemptError::Origin)?;
+    let (websocket, response) =
+        tokio_tungstenite::client_async_with_config(request, stream, Some(websocket_config()))
+            .await
+            .map_err(tungstenite_handshake_error)
+            .map_err(ConnectAttemptError::Origin)?;
     validate_websocket_upgrade(
         response.version(),
         response.headers(),
@@ -1833,7 +1864,7 @@ async fn connect_via_http_upgrade(
         .await
         .map_err(|_| websocket_protocol_error("WebSocket upgrade stream was not available"))?;
     let upgraded: BoxedWebSocketIo = Box::new(upgraded);
-    Ok(WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await)
+    Ok(WebSocketStream::from_raw_socket(upgraded, Role::Client, Some(websocket_config())).await)
 }
 
 async fn connect_once(
@@ -2017,14 +2048,7 @@ where
                 Some(remaining) if !remaining.is_zero() => remaining,
                 _ => {
                     invalidate_pool_owner(pool_owner, pool_entry);
-                    return Err(CodexError {
-                        status: 0,
-                        message: format!("WebSocket idle timeout after {idle_timeout_ms}ms"),
-                        detail: None,
-                        retry_after: None,
-                        usage_limit: None,
-                        origin: CodexErrorOrigin::WebSocket,
-                    });
+                    return Err(websocket_idle_timeout_error(idle_timeout_ms));
                 }
             }
         } else {
@@ -2042,14 +2066,7 @@ where
             WebSocketRead::Timeout => {
                 invalidate_pool_owner(pool_owner, pool_entry);
                 return Err(if response_started {
-                    CodexError {
-                        status: 0,
-                        message: format!("WebSocket idle timeout after {idle_timeout_ms}ms"),
-                        detail: None,
-                        retry_after: None,
-                        usage_limit: None,
-                        origin: CodexErrorOrigin::WebSocket,
-                    }
+                    websocket_idle_timeout_error(idle_timeout_ms)
                 } else {
                     response_start_timeout_error(idle_timeout_ms)
                 });
@@ -2069,6 +2086,12 @@ where
 
         match frame {
             Some(Ok(Message::Text(text))) => {
+                if sse_body.len().saturating_add(text.len()) > MAX_BUFFERED_RESPONSE_BYTES {
+                    invalidate_pool_owner(pool_owner, pool_entry);
+                    return Err(websocket_stream_error(
+                        "Codex WebSocket response exceeds the size limit",
+                    ));
+                }
                 let parsed: serde_json::Value = match serde_json::from_str(&text) {
                     Ok(v) => v,
                     Err(_) => {
@@ -2110,14 +2133,9 @@ where
             }
             Some(Ok(Message::Binary(_))) => {
                 invalidate_pool_owner(pool_owner, pool_entry);
-                return Err(CodexError {
-                    status: 0,
-                    message: "WebSocket binary frames not supported".to_string(),
-                    detail: None,
-                    retry_after: None,
-                    usage_limit: None,
-                    origin: CodexErrorOrigin::WebSocket,
-                });
+                return Err(websocket_stream_error(
+                    "WebSocket binary frames not supported",
+                ));
             }
             Some(Ok(Message::Ping(data))) => {
                 let _ = ws.send(Message::Pong(data)).await;
@@ -2135,14 +2153,9 @@ where
             }
             Some(Err(e)) => {
                 invalidate_pool_owner(pool_owner, pool_entry);
-                return Err(CodexError {
-                    status: 0,
-                    message: format!("WebSocket stream error: {e}"),
-                    detail: None,
-                    retry_after: None,
-                    usage_limit: None,
-                    origin: CodexErrorOrigin::WebSocket,
-                });
+                return Err(websocket_stream_error(format!(
+                    "WebSocket stream error: {e}"
+                )));
             }
             None => {
                 invalidate_pool_owner(pool_owner, pool_entry);
@@ -2184,14 +2197,7 @@ where
                 Some(remaining) if !remaining.is_zero() => remaining,
                 _ => {
                     terminal_item = Some(Err(if response_started {
-                        CodexError {
-                            status: 0,
-                            message: format!("WebSocket idle timeout after {idle_timeout_ms}ms"),
-                            detail: None,
-                            retry_after: None,
-                            usage_limit: None,
-                            origin: CodexErrorOrigin::WebSocket,
-                        }
+                        websocket_idle_timeout_error(idle_timeout_ms)
                     } else {
                         response_start_timeout_error(idle_timeout_ms)
                     }));
@@ -2210,14 +2216,7 @@ where
                 WebSocketRead::Frame(frame) => frame,
                 WebSocketRead::Timeout => {
                     terminal_item = Some(Err(if response_started {
-                        CodexError {
-                            status: 0,
-                            message: format!("WebSocket idle timeout after {idle_timeout_ms}ms"),
-                            detail: None,
-                            retry_after: None,
-                            usage_limit: None,
-                            origin: CodexErrorOrigin::WebSocket,
-                        }
+                        websocket_idle_timeout_error(idle_timeout_ms)
                     } else {
                         response_start_timeout_error(idle_timeout_ms)
                     }));
@@ -2251,12 +2250,12 @@ where
                                 }),
                             );
                         }
-                        sse_body.extend_from_slice(&encode_sse(&text));
+                        capture_sse_event(&mut sse_body, traffic.as_deref(), &text);
                         continue;
                     }
                 };
 
-                sse_body.extend_from_slice(&encode_sse(&text));
+                capture_sse_event(&mut sse_body, traffic.as_deref(), &text);
                 if let Some(tc) = traffic.as_deref() {
                     tc.write_json_event("040-upstream-event", &parsed);
                 }

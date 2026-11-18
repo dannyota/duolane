@@ -12,6 +12,8 @@ use duolane::{
     paths,
     registry::{ANTHROPIC_STYLE_ALIASES, Registry},
     server::{self, ServerConfig},
+    text::terminal_text,
+    traffic::{TRAFFIC_CAPTURE_WARNING, traffic_capture_enabled},
     tui::{self, MonitorExit, MonitorUiConfig},
 };
 use std::io::IsTerminal;
@@ -96,6 +98,9 @@ fn main() -> Result<()> {
             };
             if exposed {
                 eprintln!("{PLAIN_HTTP_WARNING}");
+            }
+            if traffic_capture_enabled() {
+                eprintln!("{TRAFFIC_CAPTURE_WARNING}");
             }
             let registry = Registry::with_default_alias();
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -313,7 +318,7 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
             }
             duolane::provider::AuthCommand::Status => {
                 if let Err(err) = handlers.status() {
-                    println!("{err}");
+                    println!("{}", terminal_text(&err.to_string()));
                     std::process::exit(1);
                 }
                 Ok(())
@@ -331,7 +336,7 @@ fn print_models(registry: &Registry) {
     if let Some(hint) = registry.signed_out().get(provider) {
         println!("{provider}: not signed in, {hint}");
     } else if let Some(models) = registry.grouped_models().get(provider) {
-        println!("{provider}: {}", models.join(", "));
+        println!("{provider}: {}", terminal_text(&models.join(", ")));
     }
 }
 

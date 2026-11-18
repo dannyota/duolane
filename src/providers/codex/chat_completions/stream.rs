@@ -6,6 +6,7 @@ use futures_util::{Stream, StreamExt};
 use http::{HeaderMap, StatusCode};
 use serde_json::{Value, json};
 
+use crate::providers::codex::client::MAX_UPSTREAM_FRAME_BYTES;
 use crate::providers::codex::native::NativeResponseOutcome;
 use crate::{provider::RequestContext, traffic::MAX_SSE_CAPTURE_BYTES};
 
@@ -149,6 +150,11 @@ impl StreamState {
             if self.ended {
                 break;
             }
+        }
+        if !self.ended && self.pending.len() > MAX_UPSTREAM_FRAME_BYTES {
+            self.fail(ChatError::upstream(
+                "Codex SSE frame exceeds the size limit",
+            ));
         }
         if let Some(monitor) = self.ctx.monitor.as_ref() {
             monitor.stream_progress(
