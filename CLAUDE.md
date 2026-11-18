@@ -4,4 +4,4 @@
 
 - Discuss with the owner in Vietnamese. Write documents, code, and commits in English.
 - Start Codex jobs as [workflow](instructions/workflow.md#codex-jobs) describes.
-- Claude subagents use the latest Opus, never Sonnet.
+- Claude implementers use the latest Opus and Claude reviewers use Fable. Never use Sonnet.

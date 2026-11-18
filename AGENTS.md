@@ -38,14 +38,14 @@ Direct owner instructions and platform safety rules come first. An accepted ADR 
 |Implementer|Codex `gpt-6.1-terra` high for routine work, Codex `gpt-6.1-sol` high for hard work, or a Claude Opus subagent|One bounded task in named paths, with tests; never commits|
 |Reviewer|Codex read-only, `gpt-6.1-sol` high, or `gpt-6-astra` high for work `gpt-6.1-sol` wrote|Independent review of designs, ADRs, and code|
 
-No model reviews its own work. No worker or subagent runs on Sonnet. The owner chooses the primary session's model.
+When Codex is unavailable, a Claude Opus subagent implements and a Claude Fable subagent reviews. A reviewer always runs on a different model from the author. No worker or subagent runs on Sonnet. The owner chooses the primary session's model.
 
 ## Rules for every task
 
 1. Start with `git status --short`. Existing changes belong to someone else unless the brief says otherwise.
 2. Put security before features and convenience. Never read, print, or commit credential values, including `~/.codex/auth.json`.
 3. Keep the Claude route byte-exact and keep reasoning portable across backends, as [architecture](docs/design/architecture.md#invariants) defines.
-4. Write no code comments except the exceptions in the [engineering standard](docs/standards/engineering.md#code-comments). Delete other comments in code you touch.
+4. Write no new code comments except the exceptions in the [engineering standard](docs/standards/engineering.md#code-comments). Until the plan's comment slice lands, keep existing comments unless their code is deleted, so their decisions can move into the design. This rule takes precedence over any global rule to delete comments in touched code.
 5. Tests stay hermetic: mock upstreams, toy credentials, and temporary config and state directories.
 6. Report exact files and checks, including failures and skipped checks. Never claim verification that did not run.
 

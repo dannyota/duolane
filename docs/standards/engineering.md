@@ -7,17 +7,17 @@ on their own after every plan is gone.
 
 ## Ownership
 
-| Information                            | Owner                                 |
-| -------------------------------------- | ------------------------------------- |
-| Intended product or architecture       | `docs/design/`                        |
-| One accepted choice and its trade-offs | `docs/adr/`                           |
-| Current behavior                       | Code and tests                        |
-| Work order and delivery state          | `docs/plans/`                         |
-| Install and usage                      | `README.md`                           |
-| Contributor setup                      | `CONTRIBUTING.md`                     |
-| Vulnerability reporting                | `SECURITY.md`                         |
-| License and inherited copyright        | `LICENSE`                             |
-| Shared agent work rules                | `AGENTS.md` and `instructions/`       |
+| Information                            | Owner                           |
+| -------------------------------------- | ------------------------------- |
+| Intended product or architecture       | `docs/design/`                  |
+| One accepted choice and its trade-offs | `docs/adr/`                     |
+| Current behavior                       | Code and tests                  |
+| Work order and delivery state          | `docs/plans/`                   |
+| Install and usage                      | `README.md`                     |
+| Contributor setup                      | `CONTRIBUTING.md`               |
+| Vulnerability reporting                | `SECURITY.md`                   |
+| License and inherited copyright        | `LICENSE`                       |
+| Shared agent work rules                | `AGENTS.md` and `instructions/` |
 
 ## Writing
 
@@ -26,7 +26,9 @@ on their own after every plan is gone.
 - Use bullets for parallel items, numbers for ordered steps, tables for
   comparisons, and prose for connected reasoning.
 - Do not use em dashes, filler, or closing recaps.
-- Living documents describe the current state without dates or status history.
+- The README, guides, and agent rules describe the current state without status
+  history. Designs describe the intended state. Decision records and owner
+  attributions may carry dates.
 - Verify before asserting. Cite first-party documentation for the behavior of
   another product, and mark what stays unverified.
 - Never describe designed but unbuilt behavior as available in the README.
@@ -42,13 +44,16 @@ drift from the code and mislead agents (owner, 2026-11-18).
 - Write no doc comments, including `///` and `//!`.
 - A rule the code must keep belongs in the design that owns it, or in a test
   that fails when it breaks.
-- Delete other comments in code you touch.
 
 ## File size
 
-Markdown stays at or under 400 lines and non-test Rust at or under 700 lines.
-Split by concern and name each file after its concern. Plans under `docs/plans/`
-are exempt because they are deleted when their work lands.
+Markdown stays at or under 400 lines. Rust stays at or under 700 lines, not
+counting `#[cfg(test)]` modules or files under `tests/`. Split by concern and
+name each file after its concern. Plans under `docs/plans/` are exempt because
+they are deleted when their work lands.
+
+Prettier formats human Markdown and markdownlint checks it, using the repository
+configuration.
 
 ## ADR rules
 
@@ -58,9 +63,9 @@ approval and add a History line. Open a new record only for a new topic.
 
 ## Naming
 
-| Item         | Convention                                       |
-| ------------ | ------------------------------------------------ |
-| Rust file    | `<concern>.rs`                                   |
-| Rust test    | `<behavior_it_proves>`                           |
-| ADR          | `NNNN-<topic>.md`, sentence-case title           |
-| Workflow     | lowercase kebab case `.yml`, stable job IDs      |
+| Item      | Convention                                  |
+| --------- | ------------------------------------------- |
+| Rust file | `<concern>.rs`                              |
+| Rust test | `<behavior_it_proves>`                      |
+| ADR       | `NNNN-<topic>.md`, sentence-case title      |
+| Workflow  | lowercase kebab case `.yml`, stable job IDs |

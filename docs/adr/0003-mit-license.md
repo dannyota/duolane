@@ -10,8 +10,8 @@ grant that Apache-2.0 adds.
 
 ## Decision
 
-duolane stays under the MIT License. `LICENSE` keeps the inherited copyright line
-and adds the owner's.
+duolane stays under the MIT License. `LICENSE` keeps the inherited copyright
+line and adds the owner's.
 
 ## Consequences
 
@@ -20,8 +20,8 @@ and adds the owner's.
 
 ## Alternatives rejected
 
-- Apache-2.0. It adds an explicit patent grant the owner does not need, and would
-  require keeping the inherited MIT notice in a second file.
+- Apache-2.0. It adds an explicit patent grant the owner does not need, and
+  would require keeping the inherited MIT notice in a second file.
 
 ## History
 

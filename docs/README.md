@@ -13,9 +13,9 @@ of copying it.
 
 An accepted ADR wins over design text. Design wins over a plan.
 
-| Path         | Contents                          | Lifecycle                             |
-| ------------ | --------------------------------- | ------------------------------------- |
-| `design/`    | Intended product and architecture | Living; amended by accepted ADRs      |
-| `adr/`       | One decision per topic            | Updated with owner approval           |
-| `plans/`     | Remaining work and its order      | A plan is deleted when its work lands |
-| `standards/` | Writing and comment rules         | Living repository policy              |
+| Path         | Contents                          | Lifecycle                              |
+| ------------ | --------------------------------- | -------------------------------------- |
+| `design/`    | Intended product and architecture | Kept current; amended by accepted ADRs |
+| `adr/`       | One decision per topic            | Updated with owner approval            |
+| `plans/`     | Remaining work and its order      | A plan is deleted when its work lands  |
+| `standards/` | Writing and comment rules         | Living repository policy               |

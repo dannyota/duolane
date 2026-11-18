@@ -16,6 +16,7 @@ Bug reports and focused fixes are welcome. Read the
    cargo fmt --all -- --check
    cargo clippy --all-targets -- -D warnings
    cargo test -- --test-threads=1
+   cargo deny check advisories
    ```
 
 Code has no comments, as the

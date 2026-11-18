@@ -27,8 +27,10 @@ large conflict. The inherited name also contains two vendor trademarks, and the
 - Upstream fixes need deliberate review. The remotes `upstream` and `fcakyon`
   stay available for that purpose.
 - Style and structure can change freely.
-- The header sent to the ChatGPT backend changes with the product name, so a
-  live check must confirm it before the first release.
+- The `originator` and `User-Agent` sent to the ChatGPT backend change with the
+  product name, so a live check must confirm them before the first release.
+- Formats stored in Claude Code transcripts are defined fresh for duolane and
+  frozen from the first release.
 
 ## Alternatives rejected
 
