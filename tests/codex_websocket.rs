@@ -8,13 +8,6 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{WebSocketStream, accept_async, accept_hdr_async, connect_async};
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Spawn a WebSocket mock server that accepts one connection, captures
-/// handshake headers, reads one text message, and calls `handler` with
-/// headers and the stream. Returns the listener address as `http://addr/...`.
 #[allow(clippy::result_large_err)]
 async fn websocket_mock<F, Fut>(handler: F) -> String
 where
@@ -44,7 +37,6 @@ where
     format!("http://{addr}/backend-api/codex/responses")
 }
 
-/// Build a simple SSE event string
 fn sse_data(json: &str) -> Vec<u8> {
     let mut out = String::from("data: ");
     out.push_str(json);
@@ -52,16 +44,11 @@ fn sse_data(json: &str) -> Vec<u8> {
     out.into_bytes()
 }
 
-// ---------------------------------------------------------------------------
-// Handshake headers test
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn websocket_concurrent_requests() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
-    // Server that accepts 3 connections
     let server_handle = tokio::spawn(async move {
         for _ in 0..3 {
             let Ok((stream, _)) = listener.accept().await else {
@@ -99,27 +86,19 @@ async fn websocket_concurrent_requests() {
     server_handle.abort();
 }
 
-// ---------------------------------------------------------------------------
-// Request serialization test
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn websocket_request_serializes_response_create() {
     let url = websocket_mock(|_headers, mut ws| async move {
         let msg = ws.next().await.unwrap().unwrap().into_text().unwrap();
         let value: serde_json::Value = serde_json::from_str(&msg).unwrap();
-        // Must have type: response.create
         assert_eq!(value["type"], "response.create");
-        // Must not have stream field
         assert!(
             value.get("stream").is_none(),
             "WebSocket request must not have stream field"
         );
-        // Must have model and input
         assert!(value.get("model").is_some());
         assert!(value.get("input").is_some());
 
-        // Send completed event
         ws.send(Message::Text(
             r#"{"type":"response.completed","response":{"id":"resp_1","usage":{}}}"#.into(),
         ))
@@ -132,7 +111,6 @@ async fn websocket_request_serializes_response_create() {
     let (ws, _) = connect_async(ws_url).await.unwrap();
     let (mut writer, _reader) = ws.split();
 
-    // Build a request with the codex format
     let req = serde_json::json!({
         "type": "response.create",
         "model": "gpt-5.5",
@@ -146,10 +124,6 @@ async fn websocket_request_serializes_response_create() {
         .await
         .unwrap();
 }
-
-// ---------------------------------------------------------------------------
-// SSE event collection test
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn websocket_collects_sse_events_until_terminal() {
@@ -200,10 +174,6 @@ async fn websocket_collects_sse_events_until_terminal() {
     assert!(body_str.contains("hello"), "missing delta content");
 }
 
-// ---------------------------------------------------------------------------
-// Connect timeout test
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn websocket_connect_timeout_on_unreachable() {
     let start = std::time::Instant::now();
@@ -217,14 +187,9 @@ async fn websocket_connect_timeout_on_unreachable() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Idle timeout test
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn websocket_idle_timeout_no_events() {
     let url = websocket_mock(|_headers, _ws| async move {
-        // Accept connection but never send anything
         futures_util::future::pending::<()>().await;
     })
     .await;
@@ -247,10 +212,6 @@ async fn websocket_idle_timeout_no_events() {
 
     assert!(timeout.is_err() || timeout.is_ok());
 }
-
-// ---------------------------------------------------------------------------
-// Invalidation on error event
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn websocket_invalidation_on_error() {
@@ -289,10 +250,6 @@ async fn websocket_invalidation_on_error() {
     assert!(got_error, "expected response.failed event");
 }
 
-// ---------------------------------------------------------------------------
-// Soak test: many concurrent requests
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn websocket_soak_concurrent_requests() {
     let total = 10usize;
@@ -309,9 +266,7 @@ async fn websocket_soak_concurrent_requests() {
             tokio::spawn(async move {
                 let ws = accept_async(stream).await.unwrap();
                 let (mut _writer, mut reader) = ws.split();
-                // Read the request
                 let _msg = reader.next().await.unwrap().unwrap();
-                // Don't send anything - just let the client timeout
             });
         }
     });
@@ -342,10 +297,6 @@ async fn websocket_soak_concurrent_requests() {
     }
     server_handle.abort();
 }
-
-// ---------------------------------------------------------------------------
-// SSE framing tests
-// ---------------------------------------------------------------------------
 
 #[test]
 fn sse_framing_single_event() {

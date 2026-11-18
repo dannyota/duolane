@@ -1,4 +1,3 @@
-//! Process-level regression with isolated catalog, credentials and loopback upstream.
 use axum::{Json, Router, http::HeaderMap, routing::post};
 use serde_json::{Value, json};
 use std::{
@@ -17,7 +16,6 @@ impl Drop for Proxy {
 
 fn command(dir: &TempDir) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_duolane"));
-    // Avoid inherited credentials, routing overrides, proxy settings and logs.
     cmd.env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("USERPROFILE", dir.path())
@@ -101,7 +99,6 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
     let upstream_task = tokio::spawn(async move {
         axum::serve(upstream, app).await.unwrap();
     });
-    // Reserve a loopback port, then release it immediately before spawning.
     let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = reservation.local_addr().unwrap().port();
     drop(reservation);

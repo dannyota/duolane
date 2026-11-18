@@ -15,10 +15,6 @@ use super::model_allowlist::service_tier_for_model;
 use super::read_rewrite::{ReadOffsetRewrite, read_offset_rewrite};
 use super::reasoning_signature::decode_reasoning_signature;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Effort {
@@ -264,10 +260,6 @@ pub struct TranslateOptions {
     pub use_responses_lite: bool,
 }
 
-// ---------------------------------------------------------------------------
-// Translation entry point
-// ---------------------------------------------------------------------------
-
 pub(crate) fn to_codex_effort(effort: Option<&str>) -> Option<Effort> {
     match effort {
         Some("max") => Some(Effort::Max),
@@ -310,17 +302,9 @@ fn reasoning_summary_requested(summary: Option<&str>) -> bool {
     !matches!(summary, Some("off" | "none"))
 }
 
-/// Whether the resolved effort asks the upstream for reasoning output.
-/// `Effort::None` still names the effort so the wire request overrides the
-/// upstream default, but it must not request a summary or encrypted
-/// continuation content, which are reasoning artifacts.
 fn reasoning_requested(effort: Option<&Effort>) -> bool {
     effort.is_some_and(|effort| *effort != Effort::None)
 }
-
-// ---------------------------------------------------------------------------
-// Compaction fast path
-// ---------------------------------------------------------------------------
 
 const COMPACT_SYSTEM_MARKER: &str =
     "You are a helpful AI assistant tasked with summarizing conversations";
@@ -357,21 +341,10 @@ pub(crate) fn is_compact_messages_request(request: &MessagesRequest) -> bool {
         })
 }
 
-/// Reasoning-effort cap applied to compaction requests, or None when the
-/// fast path is disabled. Summarization is extraction, not problem solving:
-/// native Claude Code compacts without extended thinking, so burning
-/// medium/high reasoning on a 200k-token summary only adds latency. The cap
-/// never raises effort — a request already below it is left alone.
-///
-/// A request naming no effort at all also takes the cap. Left unset it would
-/// run at the upstream default, which is the effort level the cap exists to
-/// avoid.
 fn compact_effort_cap() -> Option<Effort> {
     compact_effort_cap_from(std::env::var("DUOLANE_COMPACT_EFFORT").ok().as_deref())
 }
 
-/// Applies the cap to a request's resolved effort. A missing effort takes
-/// the cap; an explicit effort at or below it is preserved.
 fn apply_compact_effort_cap(resolved: Option<Effort>, cap: Option<Effort>) -> Option<Effort> {
     match (resolved, cap) {
         (resolved, None) => resolved,
@@ -410,8 +383,6 @@ fn resolve_service_tier(
     pick_service_tier(config::codex_service_tier().as_deref(), model_tier, model)
 }
 
-/// The configured override wins over the tier implied by the model name. Either
-/// one is narrowed to a tier the upstream `model` offers.
 fn pick_service_tier(
     override_tier: Option<&str>,
     model_tier: Option<ServiceTier>,
@@ -445,9 +416,6 @@ pub fn normalize_strict_json_schema(schema: &Value) -> Value {
     }
 }
 
-/// Hosted tools (web_search) are rejected by the Responses Lite lane, which
-/// only supports function and custom tools. Requests carrying them must use
-/// the full Responses API.
 pub fn has_hosted_web_search(req: &MessagesRequest) -> bool {
     req.extra
         .get("tools")
@@ -526,7 +494,6 @@ fn translate_request_inner(
             "ws_request_header_x_openai_internal_codex_responses_lite".to_string(),
             "true".to_string(),
         )]));
-        // Responses Lite rejects parallel_tool_calls: true.
         out.parallel_tool_calls = false;
 
         let mut prefix = Vec::new();
@@ -569,8 +536,6 @@ fn translate_request_inner(
         }
     }
 
-    // Never force a web_search tool_choice the request didn't register —
-    // upstream 502s instead of ignoring it.
     if matches!(
         out.tool_choice,
         Some(ResponsesToolChoice::WebSearch { .. } | ResponsesToolChoice::AllowedTools { .. })
@@ -628,10 +593,6 @@ fn translate_request_inner(
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 fn read_output_format(req: &MessagesRequest) -> Option<ResponsesTextFormat> {
     let output_config = req.extra.get("output_config")?.as_object()?;
     let format = output_config.get("format")?.as_object()?;
@@ -656,7 +617,6 @@ fn read_output_format(req: &MessagesRequest) -> Option<ResponsesTextFormat> {
     }
 }
 
-/// Claude Code sends this deferred stub only to keep Anthropic's deferred loading on.
 const DEFERRED_TOOL_PLACEHOLDER: &str = "DeferredToolPlaceholder";
 
 fn responses_tool_name(tool: &ResponsesTool) -> Option<&str> {
@@ -682,7 +642,6 @@ fn is_deferred_placeholder(tool: &ResponsesTool, deferred: &HashSet<String>) -> 
         .is_some_and(|name| name == DEFERRED_TOOL_PLACEHOLDER && deferred.contains(name))
 }
 
-/// Tool names each `tool_result` loaded through `tool_reference` blocks, keyed by tool_use_id.
 fn tool_reference_loads(req: &MessagesRequest) -> HashMap<String, Vec<String>> {
     let mut loads: HashMap<String, Vec<String>> = HashMap::new();
     for msg in req.messages.iter().filter(|msg| msg.role == "user") {
@@ -713,11 +672,6 @@ fn tool_reference_loads(req: &MessagesRequest) -> HashMap<String, Vec<String>> {
     loads
 }
 
-/// Splits the catalog for the Responses Lite lane, the way Codex's incremental tools do:
-/// deferred tools that a `tool_reference` in the history loaded are taken out of the
-/// prefix so they can be appended at the point they were loaded, which keeps the cached
-/// prefix byte-identical across loads. Deferred tools with no visible load (e.g. loaded
-/// before a compaction) stay in the prefix so they remain callable.
 fn split_loaded_deferred_tools(
     req: &MessagesRequest,
     tools: &[ResponsesTool],
@@ -861,11 +815,6 @@ fn codex_tool_description(name: &str, description: Option<String>) -> Option<Str
     Some(format!("{base}\n\n{}", read_offset_guidance()))
 }
 
-// OpenAI's regex dialect differs from schemas emitted by clients. Drop pattern
-// constraints rather than guessing backend compatibility with a local regex engine.
-// This relaxes tool argument validation, including otherwise compatible patterns.
-// Only visit schema-bearing keywords: defaults, examples and other literal data
-// must remain intact, as must names in property and definition maps.
 fn strip_tool_schema_patterns(schema: &mut Value) {
     let Some(schema) = schema.as_object_mut() else {
         return;
@@ -1197,10 +1146,6 @@ fn read_offset_guidance() -> &'static str {
      - Displayed line numbers, grep line numbers, byte counts, token counts, file sizes, and guessed positions are invalid offsets.\n\
      - Omit offset and limit when opening a file or when unsure."
 }
-
-// ---------------------------------------------------------------------------
-// Tool result rendering
-// ---------------------------------------------------------------------------
 
 enum RenderedToolResultPart {
     Text(String),
@@ -1680,9 +1625,6 @@ mod tests {
 
     #[test]
     fn responses_lite_downgrades_unregistered_web_search_tool_choice() {
-        // On the lite lane tools travel in the AdditionalTools developer
-        // prefix, so a top-level web_search tool_choice would reference a
-        // tool upstream doesn't know about and 502.
         let req: MessagesRequest = serde_json::from_value(json!({
             "model": "gpt-5.6-sol",
             "messages": [{"role":"user", "content":"find it"}],
@@ -2128,7 +2070,6 @@ mod tests {
             compact_effort_cap_from(Some("medium")),
             Some(Effort::Medium)
         ));
-        // Unrecognized values fall back to the safe default.
         assert!(matches!(
             compact_effort_cap_from(Some("bogus")),
             Some(Effort::Low)
@@ -2137,7 +2078,6 @@ mod tests {
 
     #[test]
     fn compact_effort_cap_defaults_a_missing_effort() {
-        // No effort named: take the cap instead of the upstream default.
         assert!(matches!(
             apply_compact_effort_cap(None, Some(Effort::Low)),
             Some(Effort::Low)
@@ -2146,7 +2086,6 @@ mod tests {
             apply_compact_effort_cap(None, Some(Effort::None)),
             Some(Effort::None)
         ));
-        // An explicit effort at or below the cap survives.
         assert!(matches!(
             apply_compact_effort_cap(Some(Effort::None), Some(Effort::Low)),
             Some(Effort::None)
@@ -2155,12 +2094,10 @@ mod tests {
             apply_compact_effort_cap(Some(Effort::Low), Some(Effort::Low)),
             Some(Effort::Low)
         ));
-        // Above the cap is lowered.
         assert!(matches!(
             apply_compact_effort_cap(Some(Effort::High), Some(Effort::Low)),
             Some(Effort::Low)
         ));
-        // Cap disabled: the request is left exactly as it asked.
         assert!(apply_compact_effort_cap(None, None).is_none());
         assert!(matches!(
             apply_compact_effort_cap(Some(Effort::High), None),
@@ -2198,7 +2135,6 @@ mod tests {
 
     #[test]
     fn compact_cap_never_raises_effort() {
-        // A compact request already at or below the cap is left alone.
         let req: MessagesRequest = serde_json::from_value(json!({
             "model": "gpt-5.5",
             "messages": [{"role":"user", "content":"summarize"}],
@@ -2306,9 +2242,6 @@ mod tests {
 
     #[test]
     fn translate_assistant_thinking_becomes_tagged_reasoning() {
-        // Symmetric with the anthropic passthrough: on an opus->codex switch a replayed
-        // thinking block has no Responses container, so it is carried as tagged text
-        // rather than dropped.
         use crate::providers::translate_shared::{REASONING_CLOSE, REASONING_OPEN};
         let req: MessagesRequest = serde_json::from_value(json!({
             "model": "gpt-5.5",

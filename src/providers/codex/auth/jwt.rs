@@ -57,7 +57,6 @@ fn parse_jwt_claims(token: &str) -> Option<IdTokenClaims> {
     serde_json::from_slice(&decode_jwt_payload(token)?).ok()
 }
 
-/// Decode a JWT's `exp` claim (seconds since the Unix epoch) into epoch milliseconds.
 pub fn token_exp_ms(token: &str) -> Option<u64> {
     #[derive(Deserialize)]
     struct ExpClaim {

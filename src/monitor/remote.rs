@@ -9,7 +9,6 @@ use super::snapshot::{MonitorResponse, MonitorSnapshot, PROTOCOL_VERSION, Snapsh
 const MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Owns polling; dropping the dashboard cancels only its outstanding read.
 pub struct RemoteMonitor {
     updates: watch::Receiver<SnapshotUpdate>,
     poller: JoinHandle<()>,

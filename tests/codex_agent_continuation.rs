@@ -822,8 +822,6 @@ impl TestHarness {
         resolve_request(pending, request, response_id, reply, false).await
     }
 
-    /// Round trip for turns whose final input item carries no text marker,
-    /// such as a turn that ends in a tool result.
     async fn round_trip_any(
         &mut self,
         body: Value,
@@ -2038,8 +2036,6 @@ async fn tool_turn_with_noncanonical_arguments_continues_with_delta() {
     let first_prompt = tagged(&case, "prompt-1");
     let first_response = tagged(&case, "resp-1");
     let call_id = tagged(&case, "call-1");
-    // Streamed in the model's own key order, which differs from the canonical
-    // serialization of the tool input the client replays on the next turn.
     let arguments = r#"{"file_path":"/tmp/x","old_string":"a","new_string":"b"}"#;
 
     let tool_request = harness.start_request(

@@ -46,12 +46,6 @@ impl<S: AuthStorage<StoredAuth>> CodexTokenStore<S> {
     }
 }
 
-/// Credential source for codex requests: the Codex CLI's `auth.json` (ChatGPT login).
-///
-/// The proxy never runs its own login. It reads the tokens the Codex CLI already stored
-/// and, when it refreshes an expired access token, writes the rotated tokens back so the
-/// Codex CLI keeps working. Fields the proxy does not own (auth_mode, OPENAI_API_KEY,
-/// tokens.id_token, any future keys) are preserved untouched.
 pub struct CodexCliAuthStore {
     path: PathBuf,
 }
@@ -108,9 +102,6 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
                 };
                 extract_account_id(&probe)
             });
-        // The access-token JWT carries the real expiry. If it cannot be parsed, assume a
-        // short validity window so a genuinely stale token surfaces as a 401 (handled by
-        // force_refresh) rather than being trusted indefinitely.
         let expires = token_exp_ms(&access).unwrap_or_else(|| now_ms() + 3_600_000);
         Ok(Some(StoredAuth {
             access,
@@ -121,7 +112,6 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
     }
 
     fn save(&self, value: StoredAuth) -> Result<(), anyhow::Error> {
-        // Re-read so fields the proxy does not own survive the write.
         let mut doc: serde_json::Value = match std::fs::read(&self.path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::json!({})),
             Err(_) => serde_json::json!({}),
@@ -154,8 +144,6 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
     }
 
     fn clear(&self) -> Result<(), anyhow::Error> {
-        // No-op: auth.json is owned by the Codex CLI. The proxy must never delete it;
-        // a failed refresh should leave the file for the user to `codex login` again.
         Ok(())
     }
 
@@ -166,7 +154,6 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
 
 pub type DefaultCodexAuthStore = CodexCliAuthStore;
 
-/// Locate the Codex CLI credential file, honoring `$CODEX_HOME` (and a test override).
 pub fn codex_auth_file() -> PathBuf {
     if let Some(explicit) = std::env::var_os("DUOLANE_CODEX_AUTH_FILE") {
         return PathBuf::from(explicit);
@@ -271,7 +258,6 @@ mod tests {
         path
     }
 
-    // {"alg":"none"}.{"exp":4102444800}  (exp = year 2100)
     const ACCESS_JWT_2100: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxMDI0NDQ4MDB9.sig";
 
     #[test]
@@ -311,7 +297,6 @@ mod tests {
         assert_eq!(doc["tokens"]["access_token"], "new-access");
         assert_eq!(doc["tokens"]["refresh_token"], "new-refresh");
         assert_eq!(doc["tokens"]["account_id"], "acct_new");
-        // Fields the proxy does not own are preserved.
         assert_eq!(doc["auth_mode"], "chatgpt");
         assert!(doc.as_object().unwrap().contains_key("OPENAI_API_KEY"));
         assert_eq!(doc["tokens"]["id_token"], "id.tok.sig");

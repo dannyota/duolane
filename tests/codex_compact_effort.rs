@@ -1,12 +1,3 @@
-//! Full-translation regression coverage for the compaction effort cap.
-//!
-//! These tests exercise the serialized Codex request body, not just the
-//! helper value table, because the cap interacts with effort overrides and
-//! with which reasoning artifacts get requested. Every case mutates process
-//! environment variables, so it holds the shared `ENV_LOCK` and restores the
-//! previous environment through `EnvGuard`. The test binary runs in its own
-//! process, keeping this environment manipulation away from the unit tests.
-
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -58,9 +49,6 @@ impl Drop for EnvGuard {
     }
 }
 
-/// Clears the environment knobs that feed effort resolution and reasoning
-/// summary selection, then points the config dir at an empty directory so a
-/// real user config cannot leak into the test.
 fn isolated_environment(config_dir: &Path) -> Vec<EnvGuard> {
     let mut guards = vec![
         EnvGuard::unset("DUOLANE_CODEX_EFFORT"),
@@ -115,8 +103,6 @@ fn compact_cap_none_overrides_default_without_reasoning_artifacts() {
 
     let wire = translate_compact();
 
-    // `none` must reach the wire to displace the upstream default, but it
-    // must not ask for a summary or encrypted continuation content.
     assert_eq!(wire["reasoning"], json!({"effort": "none"}));
     assert!(wire.get("include").is_none(), "unexpected include: {wire}");
 }
@@ -162,7 +148,6 @@ fn global_none_survives_compact_cap_without_reasoning_artifacts() {
 
     let wire = translate_compact();
 
-    // `none` is at or below the cap, so it is preserved rather than raised.
     assert_eq!(wire["reasoning"], json!({"effort": "none"}));
     assert!(wire.get("include").is_none(), "unexpected include: {wire}");
 }

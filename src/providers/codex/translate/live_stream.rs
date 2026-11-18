@@ -68,13 +68,9 @@ pub struct LiveStreamTranslator {
     web_search_results: Vec<LiveWebSearchResult>,
     deferred_text: Vec<(usize, String)>,
     semantic_output_started: bool,
-    // Seeds Claude Code's live subagent counter until the provider returns
-    // authoritative usage in the terminal message_delta.
     estimated_input_tokens: u64,
     incomplete_response_policy: IncompleteResponsePolicy,
     finished: bool,
-    // Latest `codex.rate_limits` event seen on this stream; handed to the
-    // usage mapper at finish so the terminal usage block carries the meter.
     rate_limits: Option<CodexRateLimits>,
 }
 

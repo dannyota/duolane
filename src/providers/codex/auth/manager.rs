@@ -88,9 +88,6 @@ impl<S: AuthStorage<StoredAuth>> CodexAuthManager<S> {
     ) -> Result<StoredAuth, anyhow::Error> {
         let _refresh_guard = self.refresh_lock.lock().await;
 
-        // Reload from durable storage after acquiring the single-flight lock.
-        // Another request may have rotated and persisted the token while this
-        // caller was waiting.
         let current = self
             .load_auth()?
             .ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;

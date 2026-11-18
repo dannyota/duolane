@@ -41,8 +41,6 @@ pub fn compute_backoff_delay(attempt: u32, retry_after: Option<&str>) -> Backoff
 
 static ZERO_RETRY_DELAY_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
-/// Make retry sleeps return immediately so exhaustion paths can be exercised
-/// in tests without waiting out the real backoff schedule.
 pub fn set_zero_retry_delay_for_tests(enabled: bool) {
     ZERO_RETRY_DELAY_FOR_TESTS.store(enabled, Ordering::SeqCst);
 }

@@ -662,10 +662,6 @@ async fn messages_response(app: axum::Router, model: &str) -> axum::response::Re
     .unwrap()
 }
 
-// Claude Code populates the `requestId` field of every transcript record from
-// the `request-id` response header. Consumers that de-duplicate those records
-// by request id count each request twice without it, because a transcript
-// legitimately repeats a record and the id is what resolves the repeat.
 #[tokio::test]
 async fn successful_response_carries_a_request_id() {
     let registry = || {
@@ -684,8 +680,6 @@ async fn successful_response_carries_a_request_id() {
     assert_ne!(request_id(&first), request_id(&second));
 }
 
-// Errors are de-duplicated by the same key as successes, and a failed turn is
-// the record most worth correlating with a proxy log.
 #[tokio::test]
 async fn rejected_request_carries_a_request_id() {
     let response =
@@ -695,8 +689,6 @@ async fn rejected_request_carries_a_request_id() {
     assert!(!request_id(&response).is_empty());
 }
 
-// A provider that answers with a failure status leaves through a different
-// return path than a success.
 #[tokio::test]
 async fn provider_failure_response_carries_a_request_id() {
     let response = messages_response(app(routed_registry()), "claude-toy").await;
@@ -740,10 +732,6 @@ async fn error_body(response: axum::response::Response) -> Value {
         .unwrap()
 }
 
-// Builds a valid JSON /v1/messages body of exactly `total_len` bytes that has
-// no "model", so the handler parses it and then fails on the missing model.
-// That failure proves the body cleared the size gate without touching a
-// provider.
 fn padded_messages_body_without_model(total_len: usize) -> String {
     let prefix = r#"{"messages":[{"role":"user","content":"hello"}],"padding":""#;
     let suffix = r#""}"#;
@@ -853,7 +841,6 @@ async fn known_model_reaches_codex_provider() {
         .await
         .unwrap();
 
-    // A known model reaches the concrete provider's authentication boundary.
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let body = error_body(response).await;
     assert!(
@@ -881,7 +868,6 @@ async fn count_tokens_routes_to_provider() {
         .await
         .unwrap();
 
-    // Codex provider is now concrete, so count_tokens should succeed
     let status = response.status();
     assert!(
         status != StatusCode::NOT_IMPLEMENTED,
@@ -1621,9 +1607,6 @@ async fn models_endpoint_lists_only_claude_and_codex_models() {
 
 #[tokio::test]
 async fn models_endpoint_includes_claude_prefixed_aliases_for_discovery() {
-    // Claude Code's gateway model discovery ignores ids that don't start with
-    // "claude" or "anthropic", so the alias entries are what make
-    // CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 useful at all.
     let app = app(Arc::new(Registry::with_default_alias()));
     let (status, value) = get_models(app, "/v1/models?limit=1000").await;
 

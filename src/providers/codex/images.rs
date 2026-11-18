@@ -1,4 +1,4 @@
-use bytes::Bytes; // EFFICIENCY: avoid memcpy on multipart upload
+use bytes::Bytes;
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -207,7 +207,6 @@ impl CodexImagesBackend {
         };
         let status = upstream.status();
         let headers = upstream.headers().clone();
-        // EFFICIENCY: check status and content-length vs size budget before reading body
         if status.is_redirection() {
             return image_error_response(ImageRequestError::upstream_invalid(
                 "Codex image service returned an unexpected redirect",
@@ -222,7 +221,6 @@ impl CodexImagesBackend {
             ));
         }
         if !status.is_success() {
-            // EFFICIENCY: for error responses, consume a small diagnostic prefix rather than full body
             let mut response = image_error_response(ImageRequestError {
                 status,
                 message: format!("Codex image service returned HTTP {}", status.as_u16()),
@@ -270,7 +268,6 @@ async fn collect_image_response_body(
     body_idle_timeout_ms: u64,
     ctx: &crate::provider::RequestContext,
 ) -> Result<Vec<u8>, ImageRequestError> {
-    // EFFICIENCY: preallocate from Content-Length when available to avoid repeated reallocs
     let cap = response
         .content_length()
         .map(|l| l as usize)
@@ -471,7 +468,6 @@ pub fn prepare_multipart_edit(
             let mime = detect_image_mime(&image.bytes).ok_or_else(|| {
                 ImageRequestError::invalid("Unsupported or malformed image file", Some("image"))
             })?;
-            // EFFICIENCY: preallocate data-URL prefix, then encode image bytes into the same buffer
             let mut data_url = format!("data:{mime};base64,");
             base64::engine::general_purpose::STANDARD.encode_string(&image.bytes, &mut data_url);
             Ok(ImageUrl {

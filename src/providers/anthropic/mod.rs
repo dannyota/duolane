@@ -1,13 +1,3 @@
-//! Anthropic passthrough backend.
-//!
-//! Unlike the other providers, this one performs no translation. Claude Code already
-//! speaks the Anthropic Messages API and, when pointed at a custom base URL, forwards
-//! its own subscription credentials (`Authorization: Bearer sk-ant-oat...`) plus the
-//! `anthropic-beta` flags that drive prompt caching. So the correct behavior is a
-//! transparent reverse proxy: relay the original body bytes and headers to
-//! api.anthropic.com and stream the response straight back. The proxy holds zero
-//! Anthropic credentials and never touches the cache-keyed request prefix.
-
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::StatusCode;
@@ -21,20 +11,6 @@ use crate::provider::{CliHandlers, Provider, RequestContext};
 use crate::providers::translate_shared::wrap_reasoning;
 use crate::registry::ANTHROPIC_STYLE_ALIASES;
 
-/// Rewrite an outgoing Anthropic request body so it survives a mid-conversation switch
-/// away from the codex backend.
-///
-/// Claude Code stores the codex backend's reconstructed reasoning as `thinking` blocks
-/// carrying an empty signature. Anthropic rejects those on replay (400
-/// `Invalid signature in thinking block`), so every post-switch turn would otherwise pay
-/// a failed round-trip plus Claude Code's strip-and-retry. A native Anthropic turn does
-/// carry prior-turn reasoning forward, so instead of dropping it we convert each
-/// signature-less `thinking` block into a tagged `text` block: Anthropic accepts text
-/// without a signature and the reasoning stays in context. Genuine Anthropic reasoning
-/// (a non-empty signature) is left untouched.
-///
-/// Returns rewritten bytes only when something changed; `None` forwards the body
-/// verbatim, keeping the byte-identical cache prefix for pure-Anthropic conversations.
 fn sanitize_anthropic_request(raw: &[u8], req_id: &str) -> Option<Vec<u8>> {
     let mut doc: Value = serde_json::from_slice(raw).ok()?;
     let obj = doc.as_object_mut()?;
@@ -58,8 +34,6 @@ fn sanitize_anthropic_request(raw: &[u8], req_id: &str) -> Option<Vec<u8>> {
     changed.then(|| serde_json::to_vec(&doc).unwrap_or_else(|_| raw.to_vec()))
 }
 
-/// Convert one signature-less `thinking` block into a tagged `text` block in place.
-/// Returns whether the block was rewritten.
 fn rehydrate_unsigned_thinking(block: &mut Value) -> bool {
     let Some(map) = block.as_object() else {
         return false;
@@ -82,12 +56,6 @@ fn rehydrate_unsigned_thinking(block: &mut Value) -> bool {
     true
 }
 
-/// Regression tripwire. Claude Code drives its `WebSearch` tool through an isolated,
-/// history-free inner call, so the hosted `web_search_20250305` tool and its
-/// reconstructed `server_tool_use` / `web_search_tool_result` blocks never appear in the
-/// outer transcript. If that ever changes (hosted web search reaching a request that
-/// already carries assistant history), those blocks would ride the transcript across a
-/// model switch and this warning flags it so the assumption can be re-checked.
 fn detect_hosted_web_search_regression(obj: &serde_json::Map<String, Value>, req_id: &str) {
     let messages = obj.get("messages").and_then(Value::as_array);
     let has_assistant_history = messages.is_some_and(|ms| {
@@ -128,11 +96,6 @@ fn detect_hosted_web_search_regression(obj: &serde_json::Map<String, Value>, req
     }
 }
 
-/// Request headers that must not be forwarded to the upstream. Hop-by-hop headers are
-/// connection-scoped; `content-length` is recomputed by the client from the body; and
-/// `accept-encoding` is dropped so the upstream answers with an identity encoding
-/// (this build of reqwest does not decompress, so forwarding a compressed body under a
-/// stale `content-encoding` would corrupt it). The proxy's own token never leaves it.
 fn is_stripped_request_header(name: &str) -> bool {
     matches!(
         name,
@@ -151,9 +114,6 @@ fn is_stripped_request_header(name: &str) -> bool {
     )
 }
 
-/// Response headers that must not be relayed back to Claude Code. Hop-by-hop and
-/// framing headers are re-derived by axum for the streamed body; `content-encoding`
-/// is dropped for symmetry with the identity request above.
 fn is_stripped_response_header(name: &str) -> bool {
     matches!(
         name,
@@ -215,8 +175,6 @@ impl AnthropicProvider {
             monitor.upstream_started(&req_id);
         }
 
-        // Rehydrate signature-less codex `thinking` blocks so a mid-conversation switch
-        // to Anthropic does not 400. Unchanged bodies are forwarded verbatim.
         let outgoing = match sanitize_anthropic_request(&passthrough.raw_body, &req_id) {
             Some(bytes) => reqwest::Body::from(bytes),
             None => reqwest::Body::from(passthrough.raw_body),
@@ -326,7 +284,6 @@ mod tests {
         assert!(is_stripped_request_header(
             crate::inbound_auth::PROXY_KEY_HEADER
         ));
-        // credentials and cache-relevant headers must survive
         assert!(!is_stripped_request_header("authorization"));
         assert!(!is_stripped_request_header("anthropic-beta"));
         assert!(!is_stripped_request_header("anthropic-version"));
@@ -338,7 +295,6 @@ mod tests {
         assert!(is_stripped_response_header("content-length"));
         assert!(is_stripped_response_header("content-encoding"));
         assert!(is_stripped_response_header("transfer-encoding"));
-        // rate-limit and request-id headers must reach Claude Code
         assert!(!is_stripped_response_header("content-type"));
         assert!(!is_stripped_response_header("request-id"));
         assert!(!is_stripped_response_header(
@@ -372,7 +328,6 @@ mod tests {
         let out = sanitize_anthropic_request(&raw, "req1").expect("should rewrite");
         let doc = parse(&out);
         let blocks = doc["messages"][1]["content"].as_array().unwrap();
-        // the thinking block is gone, replaced by tagged text; the real answer survives
         assert!(blocks.iter().all(|b| b["type"] != "thinking"));
         let tagged = blocks[0]["text"].as_str().unwrap();
         assert!(tagged.starts_with(REASONING_OPEN), "{tagged}");
@@ -383,8 +338,6 @@ mod tests {
 
     #[test]
     fn signed_thinking_is_forwarded_verbatim() {
-        // A genuine Anthropic reasoning block (non-empty signature) must not be touched,
-        // so a pure-Anthropic conversation keeps its byte-identical cache prefix.
         let body = serde_json::json!({
             "messages": [
                 {"role": "assistant", "content": [

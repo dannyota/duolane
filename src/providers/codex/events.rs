@@ -227,8 +227,6 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
     } else if explicit_status.is_some() || matches!(event_type, "response.error" | "error") {
         CodexFailureKind::Permanent
     } else {
-        // Native Codex treats an unclassified response.failed event as
-        // retryable instead of silently converting it into a successful turn.
         CodexFailureKind::Transient
     };
     let status = if context_window {
@@ -267,7 +265,6 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
     })
 }
 
-/// Which known upstream quota window ran out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexLimitWindow {
     FiveHour,
@@ -283,9 +280,6 @@ impl CodexLimitWindow {
     }
 }
 
-/// Quota exhaustion reported by Codex, together with the reset clock upstream
-/// sends alongside it. Unlike a transient rate limit this does not clear on a
-/// backoff, so the reset time is the only useful thing to report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexUsageLimit {
     pub message: String,
@@ -293,10 +287,6 @@ pub struct CodexUsageLimit {
     pub window: Option<CodexLimitWindow>,
 }
 
-/// Recognise the `usage_limit_reached` error Codex emits when a subscription
-/// window is spent. Upstream puts the clock both in the error body
-/// (`resets_at`, `resets_in_seconds`) and in `X-Codex-*` headers mirrored into
-/// the event payload.
 pub(crate) fn usage_limit_from_event(payload: &Value) -> Option<CodexUsageLimit> {
     if !matches!(
         payload.get("type").and_then(Value::as_str),
@@ -307,8 +297,6 @@ pub(crate) fn usage_limit_from_event(payload: &Value) -> Option<CodexUsageLimit>
     usage_limit_from_payload(payload)
 }
 
-/// Read a quota exhaustion event while consulting the current HTTP response
-/// headers for metadata that is absent from the event payload.
 pub(crate) fn usage_limit_from_event_with_headers(
     payload: &Value,
     headers: &[(String, String)],
@@ -322,9 +310,6 @@ pub(crate) fn usage_limit_from_event_with_headers(
     usage_limit_from_payload_with_headers(payload, headers)
 }
 
-/// Read quota exhaustion from either a JSON error response or an SSE event
-/// body. HTTP response headers are included because Codex does not always
-/// mirror its quota clocks into the error payload.
 pub(crate) fn usage_limit_from_response(
     body: &[u8],
     headers: &[(String, String)],
@@ -334,9 +319,6 @@ pub(crate) fn usage_limit_from_response(
         .into_iter()
         .filter_map(|event| serde_json::from_str::<Value>(&event.data).ok());
     direct.chain(events).find_map(|payload| {
-        // Parse JSON before checking the event shape so escaped strings and all
-        // other valid JSON forms retain serde_json's normal semantics. Header
-        // lookup is only needed for an actual quota event.
         is_usage_limit_payload(&payload)
             .then(|| usage_limit_from_payload_with_headers(&payload, headers))
             .flatten()
@@ -398,9 +380,6 @@ fn usage_limit_from_payload_with_headers(
     })
 }
 
-/// Codex sends the clock for both windows on every limit error, so the one that
-/// actually ran out is the one whose countdown or reset epoch matches the
-/// error's own clock.
 fn limiting_window_prefix(
     payload: &Value,
     response_headers: &[(String, String)],
@@ -580,9 +559,6 @@ fn retryable_message(message: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// Shape recorded from a live turn that exhausted the five hour window: the
-    /// clock arrives both in the error body and in the mirrored `X-Codex-*`
-    /// headers, and the primary window is the one that ran out.
     fn spent_five_hour_window() -> Value {
         serde_json::json!({
             "type": "error",
@@ -619,7 +595,6 @@ mod tests {
     #[test]
     fn attributes_the_window_whose_clock_matches() {
         let mut payload = spent_five_hour_window();
-        // Same error, but it is the weekly window that ran out.
         payload["error"]["resets_in_seconds"] = serde_json::json!(596_368u64);
         let limit = usage_limit_from_event(&payload).expect("usage limit");
         assert_eq!(limit.window, Some(CodexLimitWindow::SevenDay));

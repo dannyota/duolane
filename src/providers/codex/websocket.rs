@@ -33,10 +33,6 @@ use super::client::{
 };
 use super::continuation::ContinuationReservation;
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 pub const WEBSOCKET_PROTOCOL_HEADER: &str = "responses_websockets=2026-02-06";
 pub const WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
 pub const WEBSOCKET_IDLE_TIMEOUT_MS: u64 = 300_000;
@@ -259,10 +255,6 @@ pub(super) fn websocket_tls_config() -> Arc<rustls::ClientConfig> {
     WEBSOCKET_TLS_CONFIG.clone()
 }
 
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone)]
 pub struct CodexWebSocketError {
     pub message: String,
@@ -299,10 +291,6 @@ impl std::fmt::Display for CodexWebSocketError {
         write!(f, "Codex WebSocket error: {}", self.message)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Pool
-// ---------------------------------------------------------------------------
 
 struct PoolEntry {
     ws: Arc<AsyncMutex<CodexWebSocketStream>>,
@@ -528,13 +516,11 @@ fn pool_insert_if_vacant_or_same(owner: ConversationIdentity, entry: Arc<PoolEnt
 fn pool_insert(owner: ConversationIdentity, entry: Arc<PoolEntry>) {
     entry.touch();
     let mut guard = WS_POOL.lock().unwrap();
-    // Evict oldest if at capacity
     if guard.len() >= MAX_POOL_ENTRIES
         && let Some(oldest_owner) = guard.keys().next().cloned()
     {
         guard.remove(&oldest_owner);
     }
-    // Evict expired entries
     let now = now_ms();
     guard.retain(|_, entry| now.saturating_sub(entry.created_at) < POOL_IDLE_TTL_MS);
     guard.insert(owner, entry);
@@ -586,10 +572,6 @@ impl WebSocketConnectGate {
     }
 }
 
-// ---------------------------------------------------------------------------
-// URL conversion
-// ---------------------------------------------------------------------------
-
 pub fn to_websocket_url(url: &str) -> Result<String, CodexWebSocketError> {
     let mut parsed = url::Url::parse(url)
         .map_err(|e| CodexWebSocketError::new(format!("Failed to parse URL: {e}")))?;
@@ -600,7 +582,7 @@ pub fn to_websocket_url(url: &str) -> Result<String, CodexWebSocketError> {
         "https" => parsed.set_scheme("wss").map_err(|_| {
             CodexWebSocketError::new("Unsupported Codex WebSocket URL scheme".to_string())
         })?,
-        "ws" | "wss" => { /* already a ws scheme */ }
+        "ws" | "wss" => {}
         other => {
             return Err(CodexWebSocketError::new(format!(
                 "Unsupported Codex WebSocket URL scheme: {other}"
@@ -629,15 +611,10 @@ fn to_http_upgrade_url(url: &str) -> Result<String, CodexWebSocketError> {
     Ok(parsed.to_string())
 }
 
-// ---------------------------------------------------------------------------
-// Header rewriting
-// ---------------------------------------------------------------------------
-
 pub fn codex_websocket_headers(http_headers: &HeaderMap) -> HeaderMap {
     let mut ws = HeaderMap::new();
     for (key, value) in http_headers.iter() {
         let key_str = key.as_str().to_lowercase();
-        // Skip hop-by-hop headers
         if matches!(
             key_str.as_str(),
             "content-length"
@@ -651,18 +628,12 @@ pub fn codex_websocket_headers(http_headers: &HeaderMap) -> HeaderMap {
         }
         ws.insert(key.clone(), value.clone());
     }
-    // Rewrite openai-beta for WebSocket protocol
     ws.insert("openai-beta", WEBSOCKET_PROTOCOL_HEADER.parse().unwrap());
-    // Ensure WebSocket key is present
     if !ws.contains_key("sec-websocket-key") {
         ws.insert("sec-websocket-key", generate_key().parse().unwrap());
     }
     ws
 }
-
-// ---------------------------------------------------------------------------
-// SSE framing
-// ---------------------------------------------------------------------------
 
 fn encode_sse(text: &str) -> Vec<u8> {
     let mut out = String::new();
@@ -674,10 +645,6 @@ fn encode_sse(text: &str) -> Vec<u8> {
     out.push('\n');
     out.into_bytes()
 }
-
-// ---------------------------------------------------------------------------
-// Terminal event detection
-// ---------------------------------------------------------------------------
 
 pub(super) fn is_terminal_event(payload: &serde_json::Value) -> bool {
     super::events::event_is_terminal(payload)
@@ -700,7 +667,6 @@ fn is_previous_response_missing(payload: &serde_json::Value) -> bool {
     {
         return true;
     }
-    // Case-insensitive message check
     if let Some(msg) = error
         .and_then(|error| error.get("message"))
         .and_then(|value| value.as_str())
@@ -725,10 +691,6 @@ fn extract_retry_after(payload: &serde_json::Value) -> Option<String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
-
-// ---------------------------------------------------------------------------
-// Main request function
-// ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn codex_websocket_request(
@@ -1240,10 +1202,6 @@ fn write_websocket_response_capture(
         traffic.write_bytes("032-upstream-response-body.sse", sse_body);
     }
 }
-
-// ---------------------------------------------------------------------------
-// Connection helper
-// ---------------------------------------------------------------------------
 
 const MAX_HANDSHAKE_ERROR_DETAIL_BYTES: usize = 1024;
 const GENERIC_HANDSHAKE_ERROR_DETAIL: &str = "WebSocket upgrade was rejected";
@@ -1955,10 +1913,6 @@ async fn connect_with_timeout(
     .await
 }
 
-// ---------------------------------------------------------------------------
-// Event collection
-// ---------------------------------------------------------------------------
-
 enum WebSocketRead {
     Frame(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
     Timeout,
@@ -2115,7 +2069,6 @@ where
 
         match frame {
             Some(Ok(Message::Text(text))) => {
-                // Parse JSON
                 let parsed: serde_json::Value = match serde_json::from_str(&text) {
                     Ok(v) => v,
                     Err(_) => {
@@ -2128,13 +2081,11 @@ where
                                 }),
                             );
                         }
-                        // Write invalid JSON as-is
                         sse_body.extend_from_slice(&encode_sse(&text));
                         continue;
                     }
                 };
 
-                // Convert to SSE bytes
                 sse_body.extend_from_slice(&encode_sse(&text));
                 if let Some(tc) = traffic {
                     tc.write_json_event("040-upstream-event", &parsed);
@@ -2145,7 +2096,6 @@ where
                     last_response_event_at = Instant::now();
                 }
 
-                // Check for terminal events
                 if is_terminal_event(&parsed) {
                     terminal_event = Some(WsEvent {
                         event_type: parsed
@@ -2159,7 +2109,6 @@ where
                 }
             }
             Some(Ok(Message::Binary(_))) => {
-                // Reject binary frames
                 invalidate_pool_owner(pool_owner, pool_entry);
                 return Err(CodexError {
                     status: 0,
@@ -2171,7 +2120,6 @@ where
                 });
             }
             Some(Ok(Message::Ping(data))) => {
-                // Respond to ping automatically, continue
                 let _ = ws.send(Message::Pong(data)).await;
                 continue;
             }
@@ -2179,16 +2127,13 @@ where
                 continue;
             }
             Some(Ok(Message::Frame(_))) => {
-                // Raw frame passthrough - continue
                 continue;
             }
             Some(Ok(Message::Close(_))) => {
-                // Connection closed - invalidate pool
                 invalidate_pool_owner(pool_owner, pool_entry);
                 break;
             }
             Some(Err(e)) => {
-                // Stream error - invalidate pool
                 invalidate_pool_owner(pool_owner, pool_entry);
                 return Err(CodexError {
                     status: 0,
@@ -2200,7 +2145,6 @@ where
                 });
             }
             None => {
-                // Stream ended - invalidate pool
                 invalidate_pool_owner(pool_owner, pool_entry);
                 break;
             }
@@ -2410,10 +2354,6 @@ fn summarize_json_request_size(body: &serde_json::Value, body_json: &str) -> ser
             .map(|items| items.len()),
     })
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

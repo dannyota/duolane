@@ -314,7 +314,6 @@ pub fn is_verbose() -> bool {
     log_verbose()
 }
 
-/// Token required on the proxy's own routes. Unset or blank leaves them open.
 pub fn auth_token() -> Option<String> {
     std::env::var("DUOLANE_AUTH_TOKEN")
         .ok()
@@ -330,10 +329,6 @@ pub fn anthropic_base_url() -> String {
     }
     "https://api.anthropic.com".to_string()
 }
-
-// ---------------------------------------------------------------------------
-// Codex config
-// ---------------------------------------------------------------------------
 
 pub fn codex_base_url(default: &str) -> String {
     let env: HashMap<_, _> = std::env::vars().collect();
@@ -565,10 +560,6 @@ pub fn auto_review_model() -> Option<String> {
         .filter(|model| !model.is_empty())
 }
 
-// ---------------------------------------------------------------------------
-// Codex transport config
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexTransport {
     Http,
@@ -612,16 +603,6 @@ pub fn codex_transport() -> CodexTransport {
     CodexTransport::Auto
 }
 
-/// How long an HTTP-transport request waits for the Codex response headers.
-///
-/// Codex withholds the response head until the model produces its first
-/// output, so the wait tracks how much reasoning the request asks for rather
-/// than the health of the connection. A large request to a high-effort model
-/// can hold the head for minutes, and the timeout firing fails the request
-/// outright, so the default is generous. Lower it only where a request that
-/// slow is better failed than waited out. Values below
-/// `CODEX_MIN_HEADER_TIMEOUT_MS` are ignored rather than clamped, so a typo
-/// does not hide behind a working default.
 pub const CODEX_DEFAULT_HEADER_TIMEOUT_MS: u64 = 300_000;
 pub const CODEX_MIN_HEADER_TIMEOUT_MS: u64 = 1_000;
 
@@ -654,13 +635,6 @@ mod tests {
 
     static ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-    /// Clears the environment knobs the config accessors read and points the
-    /// config dir at `config`, so neither the developer's shell nor their real
-    /// config.json can leak into the test. Every change is restored when the
-    /// guards drop, including `DUOLANE_CONFIG_DIR`: a plain `remove_var` here would
-    /// strip a `DUOLANE_CONFIG_DIR` the developer exported to isolate the whole
-    /// run, and every later test in the process that reads config through
-    /// `paths::config_dir()` would fall back to the real config file.
     fn isolated_env(config: &tempfile::TempDir) -> Vec<EnvGuard> {
         let mut guards = vec![
             EnvGuard::unset("DUOLANE_BIND_ADDRESS"),
@@ -865,8 +839,6 @@ mod tests {
             let _timeout_env = EnvGuard::set("DUOLANE_CODEX_HEADER_TIMEOUT_MS", "120000");
             assert_eq!(codex_header_timeout_ms(), 120_000);
         }
-        // Below the floor is ignored, not clamped: a value that small is a typo,
-        // and clamping it would hide the typo behind a working default.
         std::fs::write(
             config.path().join("config.json"),
             r#"{"codex":{"headerTimeoutMs":5}}"#,

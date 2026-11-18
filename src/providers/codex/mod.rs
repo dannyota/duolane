@@ -60,10 +60,6 @@ const EMPTY_CODEX_COMPLETION_DETAIL: &str = "empty_codex_completion";
 const LIVE_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 use self::translate::stream::translate_stream_bytes_with_traffic;
 
-// ---------------------------------------------------------------------------
-// Provider
-// ---------------------------------------------------------------------------
-
 pub(crate) fn clear_session_compaction(session_id: &str) {
     compaction::clear_compaction(session_id);
 }
@@ -282,7 +278,6 @@ impl CodexProvider {
             compaction_attempt = Some(replay.attempt);
         }
 
-        // Check continuation
         let previous_response_id_enabled = config::codex_previous_response_id();
         let continuation = continuation_candidate_for_owner(
             conversation_identity.as_ref(),
@@ -322,7 +317,6 @@ impl CodexProvider {
             ])),
         );
 
-        // Post to upstream with continuation
         let client = self.client.clone();
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.upstream_started(&ctx.req_id);
@@ -401,11 +395,8 @@ impl CodexProvider {
             if accept_empty_completion(successful_tool_tail, attempt)
                 && buffered_terminal_is_completed(&response.body)
             {
-                // A repeated empty success can end a fully resolved tool exchange.
                 break response;
             }
-            // A successful terminal event with no output would translate into
-            // an empty end_turn; retry with full context instead.
             let error = empty_buffered_completion_error();
             drop_live_continuation_for_retry(&mut continuation);
             if attempt >= MAX_EMPTY_COMPLETION_RETRIES {
@@ -658,10 +649,6 @@ impl Provider for CodexProvider {
     }
 }
 
-/// Picks the upstream model and lane for a request. Hosted web_search must
-/// run on the full Responses API (the lite lane rejects hosted tools), and
-/// lite-only models like gpt-5.6-luna don't exist there, so such requests
-/// are upgraded to a full-lane model. Returns whether to use the lite lane.
 fn apply_model_lane_for_request(
     model: &mut String,
     body: &MessagesRequest,
@@ -782,7 +769,6 @@ async fn live_stream_response(
     let model = model.to_string();
     let started_at = Instant::now();
     let request_continuation = continuation.clone();
-    // Transport failures interrupt the consecutive empty-success sequence.
     let mut empty_completion_attempts = 0_u32;
     let mut cleanup = LiveRequestStateCleanup::new(
         request_continuation.clone(),
@@ -867,10 +853,6 @@ async fn live_stream_response(
                 error,
                 full_context_retry_attempted,
             } => {
-                // The incremental HTTP reader performs its own bounded
-                // pre-semantic retries so it can stop immediately when the
-                // consumer disappears. Do not multiply that exhausted retry
-                // loop by the provider-level WebSocket retry policy.
                 if error.origin == client::CodexErrorOrigin::Http {
                     cleanup.abort();
                     return map_codex_error_to_response(&error);
@@ -962,8 +944,6 @@ async fn live_stream_response_once(
         estimated_input_tokens,
     );
     let mut upstream_sse_body = Vec::new();
-    // Keep protocol framing private until real output makes a transparent retry unsafe.
-    // Every branch that consumes pending_chunk returns, so it is never flushed twice.
     let mut pending_chunk = Vec::new();
     let mut generation_started = false;
 
@@ -993,9 +973,6 @@ async fn live_stream_response_once(
         {
             Ok(result) => result,
             Err(message) => {
-                // A spent subscription window reopens hours from now, so the
-                // retry budget can only burn the request down to the same 429.
-                // Report it once, with the reset clock upstream supplied.
                 if let Some(limit) = events::usage_limit_from_event(&payload) {
                     abort_request_state(
                         ctx.session_id.as_deref(),
@@ -1109,8 +1086,6 @@ async fn live_stream_response_once(
     )
 }
 
-/// Empty success is eligible only when the last exchange resolves every tool call.
-/// Text and system messages may contain new instructions, even when added by hooks.
 fn tail_is_successful_tool_result(body: &MessagesRequest) -> bool {
     use std::collections::HashSet;
 
@@ -1169,7 +1144,6 @@ fn tail_is_successful_tool_result(body: &MessagesRequest) -> bool {
     pending.is_empty()
 }
 
-/// An empty end_turn must not hide a missing or contradictory upstream status.
 fn terminal_status_is_completed(payload: &serde_json::Value) -> bool {
     payload.pointer("/response/status").and_then(|v| v.as_str()) == Some("completed")
 }
@@ -1184,8 +1158,6 @@ fn buffered_terminal_is_completed(upstream_sse: &[u8]) -> bool {
         })
 }
 
-/// Retry once with full context before permitting an empty successful tool follow-up.
-/// Repetition is a heuristic, not proof that the tool delivered a user-visible answer.
 fn accept_empty_completion(successful_tool_tail: bool, empty_attempts: u32) -> bool {
     successful_tool_tail && empty_attempts >= 1
 }
@@ -1452,18 +1424,10 @@ where
     (headers, Body::from_stream(stream)).into_response()
 }
 
-/// True when *error* is the empty-completion 503 rather than some other
-/// retryable failure sharing the live-stream retry loop.
 fn is_empty_completion_error(error: &client::CodexError) -> bool {
     error.detail.as_deref() == Some(EMPTY_CODEX_COMPLETION_DETAIL)
 }
 
-/// Log fields for giving up on an empty completion, on either exit.
-///
-/// `reason` separates the two: `"max_attempts"` when the retry budget ran
-/// out, `"backoff_budget"` when the next delay would have exceeded the
-/// backoff budget. They produce the same 503, so the log is the only place
-/// the difference is visible.
 fn empty_completion_exhausted_fields(
     req_id: &str,
     configured_transport: &str,
@@ -1499,8 +1463,6 @@ fn empty_buffered_completion_error() -> client::CodexError {
     }
 }
 
-/// True when the buffered upstream body ended in a successful terminal event
-/// without ever producing semantic output (text, thinking, tool, web search).
 fn is_empty_codex_success_completion(upstream_sse: &[u8]) -> bool {
     use self::translate::reducer::{ReducerEvent, TERM_COMPLETED, TERM_DONE};
 
@@ -1646,16 +1608,6 @@ fn update_continuation_from_upstream(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Error mapping
-// ---------------------------------------------------------------------------
-
-/// Answer a spent subscription window with the rate limit headers the client
-/// reads, so it can name the exhausted window and show when it reopens.
-///
-/// `Retry-After` is deliberately absent: clients sleep for its full value, and
-/// here that is hours. `x-should-retry: false` stops the retry loop instead,
-/// which is the honest signal — a spent window does not reopen on a backoff.
 fn usage_limit_response(limit: &events::CodexUsageLimit) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -1701,9 +1653,6 @@ fn map_codex_error_to_response(err: &client::CodexError) -> Response {
         return map_codex_failure_to_response(message);
     }
     if err.detail.as_deref() == Some(EMPTY_CODEX_COMPLETION_DETAIL) {
-        // The proxy has already spent its own retry budget on this request, so
-        // a client retry only multiplies it: Claude Code resends a 503 up to
-        // ten times, each one repeating the proxy's full retry loop.
         return (
             [(
                 HeaderName::from_static("x-should-retry"),
@@ -1791,10 +1740,6 @@ fn codex_error_message(err: &client::CodexError) -> &str {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
-
 pub(crate) struct CodexCli;
 
 impl CliHandlers for CodexCli {
@@ -1840,10 +1785,6 @@ impl CliHandlers for CodexCli {
 
 pub(crate) static CODEX_CLI: CodexCli = CodexCli;
 
-// ---------------------------------------------------------------------------
-// CLI helpers
-// ---------------------------------------------------------------------------
-
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1865,10 +1806,6 @@ fn format_expiry(expires: u64, now: u64) -> String {
         .unwrap_or_else(|| "invalid".to_string());
     format!("Expires: {iso} (in {remaining}s)")
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -2097,16 +2034,13 @@ mod tests {
 
     #[test]
     fn non_tool_tails_are_excluded() {
-        // plain-text user tail
         let text = request_with_tail(serde_json::json!([{"role":"user","content":"ping"}]));
         assert!(!tail_is_successful_tool_result(&text));
-        // assistant tail
         let assistant = request_with_tail(serde_json::json!([
             {"role":"user","content":"ping"},
             {"role":"assistant","content":[{"type":"text","text":"pong"}]}
         ]));
         assert!(!tail_is_successful_tool_result(&assistant));
-        // tool_result present but NOT the last block
         let not_last = request_with_tail(serde_json::json!([
             {"role":"user","content":[
                 {"type":"tool_result","tool_use_id":"t1","content":"sent"},
@@ -2114,7 +2048,6 @@ mod tests {
             ]}
         ]));
         assert!(!tail_is_successful_tool_result(&not_last));
-        // empty conversation
         let empty = request_with_tail(serde_json::json!([]));
         assert!(!tail_is_successful_tool_result(&empty));
     }
@@ -2260,7 +2193,6 @@ mod tests {
 
     #[test]
     fn empty_completion_is_accepted_only_after_one_retry_and_only_with_the_tail() {
-        // Require a full-context retry before permitting empty success.
         assert!(
             !accept_empty_completion(true, 0),
             "first empty must retry once"
@@ -2706,9 +2638,8 @@ mod tests {
 
     #[test]
     fn format_expiry_with_future_expiry() {
-        // 2100-01-01T00:00:00Z in ms
         let expires = 4102444800000;
-        let now = 4102444790000; // 10s before
+        let now = 4102444790000;
         let output = format_expiry(expires, now);
         assert!(output.starts_with("Expires: 2100-01-01T00:00:00.000Z (in "));
         assert!(output.ends_with("s)"));
@@ -2716,9 +2647,8 @@ mod tests {
 
     #[test]
     fn format_expiry_with_past_expiry() {
-        // 2000-01-01T00:00:00Z in ms
         let expires = 946684800000;
-        let now = 946684810000; // 10s after
+        let now = 946684810000;
         let output = format_expiry(expires, now);
         assert!(output.starts_with("Expires: 2000-01-01T00:00:00.000Z (in -"));
     }

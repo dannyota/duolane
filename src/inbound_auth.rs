@@ -1,10 +1,3 @@
-//! Optional token on the proxy's own routes, for a bind address other machines can reach.
-//!
-//! Claude Code sends its subscription login in `Authorization` and the Anthropic
-//! passthrough forwards it, so the proxy token travels in its own header, set through
-//! `ANTHROPIC_CUSTOM_HEADERS`. A bearer token is accepted too, for OpenAI-compatible
-//! clients that have nowhere else to put a key.
-
 use std::sync::Arc;
 
 use axum::{
@@ -23,7 +16,6 @@ pub async fn require_token(
     mut request: Request,
     next: Next,
 ) -> Response {
-    // Liveness probes, and the monitor, which already answers only loopback peers.
     if matches!(request.uri().path(), "/healthz" | "/monitor") {
         return next.run(request).await;
     }
@@ -42,7 +34,6 @@ pub async fn require_token(
             ),
         );
     }
-    // The proxy token is for this hop only. A different value is the Claude login and stays.
     if bearer_ok {
         request.headers_mut().remove(AUTHORIZATION);
     }
@@ -65,7 +56,6 @@ mod tests {
     use axum::{Router, body::Body, routing::get};
     use tower::util::ServiceExt;
 
-    /// Answers with the `Authorization` header the routed handler received.
     async fn call(path: &str, headers: &[(&str, &str)]) -> (StatusCode, String) {
         let app = Router::new()
             .route(
