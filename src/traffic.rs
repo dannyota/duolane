@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn redact_traffic_strips_proxy_signature_delta_in_downstream_event() {
-        let signature = "ccp:codex:v1:cnNfMQ:gAAAAABopaque-reasoning-replay";
+        let signature = "duolane:codex:v1:def0b17f603285ef:cnNfMQ:gAAAAABopaque-reasoning-replay";
         let value = serde_json::json!({
             "event": "content_block_delta",
             "data": {
@@ -413,7 +413,7 @@ mod tests {
         let redacted = redact_traffic(&value);
         let rendered = redacted.to_string();
         assert!(
-            !rendered.contains("ccp:codex:v1:"),
+            !rendered.contains("duolane:codex:v1:"),
             "proxy signature leaked: {rendered}"
         );
         assert!(
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn redact_traffic_strips_proxy_signature_in_thinking_blocks() {
-        let signature = "ccp:codex:v1:cnNfMQ:gAAAAABopaque-reasoning-replay";
+        let signature = "duolane:codex:v1:def0b17f603285ef:cnNfMQ:gAAAAABopaque-reasoning-replay";
         let value = serde_json::json!({
             "content": [
                 {"type": "thinking", "thinking": "reasoned", "signature": signature},
@@ -440,7 +440,7 @@ mod tests {
         let redacted = redact_traffic(&value);
         let rendered = redacted.to_string();
         assert!(
-            !rendered.contains("ccp:codex:v1:"),
+            !rendered.contains("duolane:codex:v1:"),
             "proxy signature leaked: {rendered}"
         );
         assert_eq!(
@@ -469,7 +469,7 @@ mod tests {
     fn traffic_capture_redacts_proxy_signatures_at_json_boundary() {
         let temp = tempfile::TempDir::new().unwrap();
         let capture = test_capture(temp.path().join("traffic"));
-        let signature = "ccp:codex:v1:cnNfMQ:gAAAAABopaque-reasoning-replay";
+        let signature = "duolane:codex:v1:def0b17f603285ef:cnNfMQ:gAAAAABopaque-reasoning-replay";
         let foreign = "ErUBCkYIBRgCIkA-real-anthropic-signature";
 
         capture.write_json_event(
@@ -507,7 +507,7 @@ mod tests {
         }
 
         assert!(
-            !captured.contains("ccp:codex:v1:"),
+            !captured.contains("duolane:codex:v1:"),
             "proxy signature leaked to capture: {captured}"
         );
         assert!(

@@ -3196,6 +3196,7 @@ mod tests {
                 format: None,
             },
             reasoning: None,
+            reasoning_account: Default::default(),
         }
     }
 
@@ -5354,6 +5355,7 @@ mod tests {
                 format: None,
             },
             reasoning: None,
+            reasoning_account: Default::default(),
         };
         let payload = build_websocket_request(&req, None);
         assert_eq!(

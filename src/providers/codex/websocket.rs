@@ -2421,6 +2421,7 @@ mod tests {
                 format: None,
             },
             reasoning: None,
+            reasoning_account: Default::default(),
         }
     }
 

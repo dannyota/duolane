@@ -526,6 +526,7 @@ dependencies = [
  "ratatui",
  "regex-lite",
  "reqwest",
+ "ring",
  "rustls",
  "rustls-native-certs",
  "serde",

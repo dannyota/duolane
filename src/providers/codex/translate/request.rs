@@ -13,7 +13,7 @@ use crate::providers::translate_shared::{
 
 use super::model_allowlist::service_tier_for_model;
 use super::read_rewrite::{ReadOffsetRewrite, read_offset_rewrite};
-use super::reasoning_signature::decode_reasoning_signature;
+use super::reasoning_signature::ReasoningAccount;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -97,6 +97,8 @@ pub struct ResponsesRequest {
     pub text: ResponsesText,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ResponsesReasoning>,
+    #[serde(skip)]
+    pub reasoning_account: ReasoningAccount,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,6 +260,7 @@ pub struct TranslateOptions {
     pub service_tier: Option<ServiceTier>,
     pub model: String,
     pub use_responses_lite: bool,
+    pub reasoning_account: ReasoningAccount,
 }
 
 pub(crate) fn to_codex_effort(effort: Option<&str>) -> Option<Effort> {
@@ -446,6 +449,7 @@ pub fn translate_openai_compatible_request(
             service_tier: None,
             model,
             use_responses_lite: false,
+            reasoning_account: ReasoningAccount::default(),
         },
         false,
     )
@@ -458,7 +462,7 @@ fn translate_request_inner(
 ) -> Result<ResponsesRequest, anyhow::Error> {
     let instructions = flatten_system_text(req.extra.get("system"));
     let is_compact = is_compact_messages_request(req);
-    let input = build_input(req);
+    let input = build_input(req, &opts.reasoning_account);
     let tools = read_tools(req)?;
     let tool_choice = map_tool_choice(req)?;
     let parallel_tool_calls = parallel_tool_calls(req).unwrap_or(true);
@@ -487,6 +491,7 @@ fn translate_request_inner(
         service_tier: None,
         prompt_cache_key: None,
         reasoning: None,
+        reasoning_account: opts.reasoning_account,
     };
 
     if opts.use_responses_lite {
@@ -945,7 +950,7 @@ fn map_tool_choice(req: &MessagesRequest) -> Result<Option<ResponsesToolChoice>,
     }
 }
 
-fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
+fn build_input(req: &MessagesRequest, account: &ReasoningAccount) -> Vec<ResponsesInputItem> {
     let mut out: Vec<ResponsesInputItem> = Vec::new();
     let mut read_tool_uses_with_offset = HashSet::new();
 
@@ -1059,15 +1064,9 @@ fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
                             thinking,
                             signature,
                         } => {
-                            if let Some(replay) =
-                                signature.as_deref().and_then(decode_reasoning_signature)
-                            {
+                            if let Some(replay) = account.replay(signature.as_deref()) {
                                 flush_text(&mut out, &mut text_parts);
-                                out.push(ResponsesInputItem::Reasoning {
-                                    id: replay.id,
-                                    summary: Vec::new(),
-                                    encrypted_content: replay.encrypted_content,
-                                });
+                                out.push(replay.into_input_item());
                             } else if !thinking.is_empty() {
                                 text_parts.push(ResponsesContentPart::OutputText {
                                     text: wrap_reasoning(thinking),
@@ -1306,6 +1305,7 @@ mod tests {
             service_tier: None,
             model: "gpt-5.5".to_string(),
             use_responses_lite: false,
+            reasoning_account: ReasoningAccount::default(),
         }
     }
 
@@ -1490,6 +1490,7 @@ mod tests {
                 service_tier: None,
                 model: "gpt-5.5".to_string(),
                 use_responses_lite: false,
+                reasoning_account: ReasoningAccount::default(),
             },
         )
         .unwrap();
@@ -1642,6 +1643,7 @@ mod tests {
                 service_tier: None,
                 model: "gpt-5.6-sol".to_string(),
                 use_responses_lite: true,
+                reasoning_account: ReasoningAccount::default(),
             },
         )
         .unwrap();
@@ -1675,6 +1677,7 @@ mod tests {
                 service_tier: None,
                 model: "gpt-5.6-sol".to_string(),
                 use_responses_lite: false,
+                reasoning_account: ReasoningAccount::default(),
             },
         )
         .unwrap();
@@ -2238,36 +2241,6 @@ mod tests {
         .unwrap();
         let out = translate_request(&req, opts()).unwrap();
         assert_eq!(out.input.len(), 2);
-    }
-
-    #[test]
-    fn translate_assistant_thinking_becomes_tagged_reasoning() {
-        use crate::providers::translate_shared::{REASONING_CLOSE, REASONING_OPEN};
-        let req: MessagesRequest = serde_json::from_value(json!({
-            "model": "gpt-5.5",
-            "messages": [{"role":"assistant", "content": [
-                {"type":"thinking", "thinking":"opus reasoning", "signature":"sig"},
-                {"type":"text", "text":"the answer"}
-            ]}]
-        }))
-        .unwrap();
-        let out = translate_request(&req, opts()).unwrap();
-        assert_eq!(out.input.len(), 1);
-        let ResponsesInputItem::Message { role, content } = &out.input[0] else {
-            panic!("expected Message");
-        };
-        assert_eq!(role, "assistant");
-        assert_eq!(content.len(), 2);
-        let ResponsesContentPart::OutputText { text: reasoning } = &content[0] else {
-            panic!("expected reasoning OutputText");
-        };
-        assert!(reasoning.starts_with(REASONING_OPEN), "{reasoning}");
-        assert!(reasoning.contains("opus reasoning"), "{reasoning}");
-        assert!(reasoning.ends_with(REASONING_CLOSE), "{reasoning}");
-        let ResponsesContentPart::OutputText { text: answer } = &content[1] else {
-            panic!("expected answer OutputText");
-        };
-        assert_eq!(answer, "the answer");
     }
 
     #[test]
@@ -2885,45 +2858,109 @@ mod tests {
     }
 
     #[test]
-    fn assistant_thinking_signature_replays_codex_reasoning_item() {
+    fn thinking_reaches_codex_as_the_reasoning_table_says() {
         let replay = super::super::reasoning_signature::ReasoningReplay {
             id: "rs_1".to_string(),
             encrypted_content: "opaque".to_string(),
         };
-        let signature =
-            super::super::reasoning_signature::encode_reasoning_signature(&replay).unwrap();
-        let req: MessagesRequest = serde_json::from_value(json!({
-            "model": "gpt-5.5",
-            "messages": [
-                {"role":"user","content":"start"},
-                {"role":"assistant","content":[
-                    {"type":"thinking","thinking":"visible summary","signature":signature},
-                    {"type":"text","text":"done"}
-                ]},
-                {"role":"user","content":"continue"}
-            ]
-        }))
-        .unwrap();
-        let out = translate_request(&req, opts()).unwrap();
-        let reasoning_index = out
-            .input
-            .iter()
-            .position(|item| matches!(item, ResponsesInputItem::Reasoning { .. }))
-            .unwrap();
-        let ResponsesInputItem::Reasoning {
-            id,
-            summary,
-            encrypted_content,
-        } = &out.input[reasoning_index]
-        else {
-            unreachable!();
+        let account = ReasoningAccount::new(Some("acct"));
+        let same = account.sign(&replay).unwrap();
+        let other = ReasoningAccount::new(Some("acct_b")).sign(&replay).unwrap();
+        let reasoning =
+            json!({"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque"});
+        let message = |texts: &[&str]| {
+            let content: Vec<Value> = texts
+                .iter()
+                .map(|text| json!({"type":"output_text","text":text}))
+                .collect();
+            json!({"type":"message","role":"assistant","content":content})
         };
-        assert_eq!(id, "rs_1");
-        assert!(summary.is_empty());
-        assert_eq!(encrypted_content, "opaque");
-        assert!(matches!(
-            out.input.get(reasoning_index + 1),
-            Some(ResponsesInputItem::Message { role, .. }) if role == "assistant"
-        ));
+        let plan = wrap_reasoning("plan");
+        let cases = [
+            (
+                "anthropic signature",
+                "plan",
+                Some("EqQBsig"),
+                &account,
+                vec![message(&[&plan, "391"])],
+            ),
+            (
+                "anthropic signature, empty",
+                "",
+                Some("EqQBsig"),
+                &account,
+                vec![message(&["391"])],
+            ),
+            (
+                "codex signature, same account",
+                "plan",
+                Some(same.as_str()),
+                &account,
+                vec![reasoning.clone(), message(&["391"])],
+            ),
+            (
+                "codex signature only, same account",
+                "",
+                Some(same.as_str()),
+                &account,
+                vec![reasoning.clone(), message(&["391"])],
+            ),
+            (
+                "codex signature, other account",
+                "plan",
+                Some(other.as_str()),
+                &account,
+                vec![message(&[&plan, "391"])],
+            ),
+            (
+                "codex signature, other account, empty",
+                "",
+                Some(other.as_str()),
+                &account,
+                vec![message(&["391"])],
+            ),
+            (
+                "codex signature, unknown account",
+                "plan",
+                Some(same.as_str()),
+                &ReasoningAccount::default(),
+                vec![message(&[&plan, "391"])],
+            ),
+            (
+                "no signature",
+                "plan",
+                None,
+                &account,
+                vec![message(&[&plan, "391"])],
+            ),
+            (
+                "no signature, empty",
+                "",
+                Some(""),
+                &account,
+                vec![message(&["391"])],
+            ),
+        ];
+        for (name, thinking, signature, current, expected) in cases {
+            let mut block = json!({"type":"thinking","thinking":thinking});
+            if let Some(signature) = signature {
+                block["signature"] = json!(signature);
+            }
+            let req: MessagesRequest = serde_json::from_value(json!({
+                "model": "gpt-5.5",
+                "messages": [{"role":"assistant","content":[block, {"type":"text","text":"391"}]}]
+            }))
+            .unwrap();
+            let opts = TranslateOptions {
+                reasoning_account: current.clone(),
+                ..opts()
+            };
+            let out = translate_request(&req, opts).unwrap();
+            assert_eq!(
+                serde_json::to_value(&out.input).unwrap(),
+                json!(expected),
+                "{name}"
+            );
+        }
     }
 }

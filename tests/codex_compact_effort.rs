@@ -77,6 +77,7 @@ fn translate_compact() -> Value {
         service_tier: None,
         model: "gpt-5.5".to_string(),
         use_responses_lite: false,
+        reasoning_account: Default::default(),
     };
     let out = translate_request(&compact_request(), opts).unwrap();
     serde_json::to_value(out).unwrap()

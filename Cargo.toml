@@ -13,7 +13,7 @@ categories = ["command-line-utilities", "development-tools"]
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["raw_value"] }
 anyhow = "1.0"
 thiserror = "2.0"
 axum = { version = "0.8", features = ["macros", "multipart"] }
@@ -36,6 +36,7 @@ regex-lite = "0.1"
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+ring = "0.17.14"
 rustls-native-certs = "0.8"
 webpki-roots = "1"
 hyper-util = { version = "0.1", features = ["client-proxy"] }

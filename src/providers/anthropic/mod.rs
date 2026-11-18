@@ -2,87 +2,232 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::Response;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json::value::RawValue;
 
 use crate::anthropic::error::json_error;
 use crate::anthropic::schema::MessagesRequest;
 use crate::logging::create_logger;
 use crate::provider::{CliHandlers, Provider, RequestContext};
+use crate::providers::codex::translate::reasoning_signature::{
+    contains_codex_signature, is_proxy_reasoning_signature,
+};
 use crate::providers::translate_shared::wrap_reasoning;
 use crate::registry::ANTHROPIC_STYLE_ALIASES;
 
+#[derive(Deserialize)]
+struct RequestFields<'a> {
+    #[serde(borrow)]
+    messages: Option<&'a RawValue>,
+    #[serde(borrow)]
+    tools: Option<&'a RawValue>,
+}
+
+#[derive(Deserialize)]
+struct MessageFields<'a> {
+    #[serde(borrow)]
+    role: Option<&'a RawValue>,
+    #[serde(borrow)]
+    content: Option<&'a RawValue>,
+}
+
+#[derive(Default, Deserialize)]
+struct BlockFields<'a> {
+    #[serde(borrow, rename = "type")]
+    kind: Option<&'a RawValue>,
+    #[serde(borrow)]
+    thinking: Option<&'a RawValue>,
+    #[serde(borrow)]
+    signature: Option<&'a RawValue>,
+}
+
+#[derive(Serialize)]
+struct TextBlock<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: &'a str,
+}
+
+struct ScannedBlock<'a> {
+    raw: &'a RawValue,
+    kind: Option<String>,
+    fields: BlockFields<'a>,
+}
+
+struct ScannedMessage<'a> {
+    assistant: bool,
+    blocks: Vec<ScannedBlock<'a>>,
+}
+
+enum Conversion {
+    Keep,
+    Text(String),
+    Remove,
+}
+
+struct Edit {
+    start: usize,
+    end: usize,
+    replacement: Vec<u8>,
+}
+
 fn sanitize_anthropic_request(raw: &[u8], req_id: &str) -> Option<Vec<u8>> {
-    let mut doc: Value = serde_json::from_slice(raw).ok()?;
-    let obj = doc.as_object_mut()?;
+    let body = std::str::from_utf8(raw).ok()?;
+    let request: RequestFields = serde_json::from_str(body).ok()?;
+    let messages: Vec<ScannedMessage> = elements(request.messages)
+        .into_iter()
+        .map(scan_message)
+        .collect();
 
-    detect_hosted_web_search_regression(obj, req_id);
+    detect_hosted_web_search_regression(request.tools, &messages, req_id);
 
-    let messages = obj.get_mut("messages")?.as_array_mut()?;
-    let mut changed = false;
-    for message in messages.iter_mut() {
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        for block in content.iter_mut() {
-            changed |= rehydrate_unsigned_thinking(block);
-        }
+    let mut edits = Vec::new();
+    for message in messages.iter().filter(|message| message.assistant) {
+        plan_message_edits(body, &message.blocks, &mut edits)?;
     }
-
-    changed.then(|| serde_json::to_vec(&doc).unwrap_or_else(|_| raw.to_vec()))
+    if edits.is_empty() {
+        return None;
+    }
+    splice(raw, &edits)
 }
 
-fn rehydrate_unsigned_thinking(block: &mut Value) -> bool {
-    let Some(map) = block.as_object() else {
-        return false;
-    };
-    if map.get("type").and_then(Value::as_str) != Some("thinking") {
-        return false;
-    }
-    let signed = map
-        .get("signature")
-        .and_then(Value::as_str)
-        .is_some_and(|sig| !sig.is_empty());
-    if signed {
-        return false;
-    }
-    let reasoning = map.get("thinking").and_then(Value::as_str).unwrap_or("");
-    *block = serde_json::json!({
-        "type": "text",
-        "text": wrap_reasoning(reasoning),
-    });
-    true
+fn elements(raw: Option<&RawValue>) -> Vec<&RawValue> {
+    raw.and_then(|raw| serde_json::from_str(raw.get()).ok())
+        .unwrap_or_default()
 }
 
-fn detect_hosted_web_search_regression(obj: &serde_json::Map<String, Value>, req_id: &str) {
-    let messages = obj.get("messages").and_then(Value::as_array);
-    let has_assistant_history = messages.is_some_and(|ms| {
-        ms.iter()
-            .any(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
-    });
-    let hosted_tool = obj
-        .get("tools")
-        .and_then(Value::as_array)
-        .is_some_and(|ts| {
-            ts.iter()
-                .any(|t| t.get("type").and_then(Value::as_str) == Some("web_search_20250305"))
-        });
-    let reconstructed_block = messages.is_some_and(|ms| {
-        ms.iter().any(|m| {
-            m.get("content")
-                .and_then(Value::as_array)
-                .is_some_and(|blocks| {
-                    blocks.iter().any(|b| {
-                        matches!(
-                            b.get("type").and_then(Value::as_str),
-                            Some("server_tool_use") | Some("web_search_tool_result")
-                        )
-                    })
-                })
+fn json_string(raw: Option<&RawValue>) -> Option<String> {
+    serde_json::from_str(raw?.get()).ok()
+}
+
+fn scan_message(raw: &RawValue) -> ScannedMessage<'_> {
+    let fields: Option<MessageFields> = serde_json::from_str(raw.get()).ok();
+    let role = fields.as_ref().and_then(|fields| json_string(fields.role));
+    let blocks = elements(fields.and_then(|fields| fields.content))
+        .into_iter()
+        .map(|raw| {
+            let fields: BlockFields = serde_json::from_str(raw.get()).unwrap_or_default();
+            ScannedBlock {
+                raw,
+                kind: json_string(fields.kind),
+                fields,
+            }
         })
+        .collect();
+    ScannedMessage {
+        assistant: role.as_deref() == Some("assistant"),
+        blocks,
+    }
+}
+
+fn anthropic_conversion(block: &ScannedBlock) -> Conversion {
+    if block.kind.as_deref() != Some("thinking") {
+        return Conversion::Keep;
+    }
+    let signature = json_string(block.fields.signature).unwrap_or_default();
+    if !signature.is_empty() && !is_proxy_reasoning_signature(&signature) {
+        return Conversion::Keep;
+    }
+    let thinking = json_string(block.fields.thinking).unwrap_or_default();
+    if thinking.is_empty() {
+        Conversion::Remove
+    } else {
+        Conversion::Text(wrap_reasoning(&thinking))
+    }
+}
+
+fn plan_message_edits(body: &str, blocks: &[ScannedBlock], edits: &mut Vec<Edit>) -> Option<()> {
+    let mut conversions: Vec<Conversion> = blocks.iter().map(anthropic_conversion).collect();
+    if conversions
+        .iter()
+        .all(|conversion| matches!(conversion, Conversion::Keep))
+    {
+        return Some(());
+    }
+    if conversions
+        .iter()
+        .all(|conversion| matches!(conversion, Conversion::Remove))
+    {
+        conversions[0] = Conversion::Text(wrap_reasoning(""));
+    }
+    let spans = blocks
+        .iter()
+        .map(|block| span(body, block.raw))
+        .collect::<Option<Vec<_>>>()?;
+    let mut index = 0;
+    while index < spans.len() {
+        let (start, end) = spans[index];
+        match &conversions[index] {
+            Conversion::Keep => {}
+            Conversion::Text(text) => edits.push(Edit {
+                start,
+                end,
+                replacement: serde_json::to_vec(&TextBlock { kind: "text", text }).ok()?,
+            }),
+            Conversion::Remove => {
+                let last = (index..spans.len())
+                    .take_while(|&next| matches!(conversions[next], Conversion::Remove))
+                    .last()?;
+                let (start, end) = match (spans.get(last + 1), index.checked_sub(1)) {
+                    (Some(&(next_start, _)), _) => (start, next_start),
+                    (None, Some(previous)) => (spans[previous].1, spans[last].1),
+                    (None, None) => return None,
+                };
+                edits.push(Edit {
+                    start,
+                    end,
+                    replacement: Vec::new(),
+                });
+                index = last;
+            }
+        }
+        index += 1;
+    }
+    Some(())
+}
+
+fn span(body: &str, raw: &RawValue) -> Option<(usize, usize)> {
+    let start = raw
+        .get()
+        .as_ptr()
+        .addr()
+        .checked_sub(body.as_ptr().addr())?;
+    let end = start.checked_add(raw.get().len())?;
+    body.get(start..end).map(|_| (start, end))
+}
+
+fn splice(raw: &[u8], edits: &[Edit]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut cursor = 0;
+    for edit in edits {
+        out.extend_from_slice(raw.get(cursor..edit.start)?);
+        out.extend_from_slice(&edit.replacement);
+        cursor = edit.end;
+    }
+    out.extend_from_slice(raw.get(cursor..)?);
+    Some(out)
+}
+
+fn detect_hosted_web_search_regression(
+    tools: Option<&RawValue>,
+    messages: &[ScannedMessage],
+    req_id: &str,
+) {
+    let has_assistant_history = messages.iter().any(|message| message.assistant);
+    let hosted_tool = elements(tools).into_iter().any(|tool| {
+        let fields: BlockFields = serde_json::from_str(tool.get()).unwrap_or_default();
+        json_string(fields.kind).as_deref() == Some("web_search_20250305")
     });
+    let reconstructed_block = messages
+        .iter()
+        .flat_map(|message| &message.blocks)
+        .any(|block| {
+            matches!(
+                block.kind.as_deref(),
+                Some("server_tool_use") | Some("web_search_tool_result")
+            )
+        });
 
     if (hosted_tool && has_assistant_history) || reconstructed_block {
         let mut fields = serde_json::Map::new();
@@ -171,14 +316,21 @@ impl AnthropicProvider {
             headers.append(name.clone(), value.clone());
         }
 
+        let outgoing = match sanitize_anthropic_request(&passthrough.raw_body, &req_id) {
+            Some(bytes) => axum::body::Bytes::from(bytes),
+            None => passthrough.raw_body,
+        };
+        if contains_codex_signature(&outgoing) {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                "request still carries encrypted Codex reasoning; refusing to forward it to Anthropic",
+            );
+        }
+
         if let Some(monitor) = monitor.as_ref() {
             monitor.upstream_started(&req_id);
         }
-
-        let outgoing = match sanitize_anthropic_request(&passthrough.raw_body, &req_id) {
-            Some(bytes) => reqwest::Body::from(bytes),
-            None => reqwest::Body::from(passthrough.raw_body),
-        };
 
         let upstream = self
             .client
@@ -273,7 +425,6 @@ impl CliHandlers for AnthropicCli {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::translate_shared::{REASONING_CLOSE, REASONING_OPEN};
 
     #[test]
     fn strips_hop_by_hop_and_encoding_from_request() {
@@ -309,70 +460,116 @@ mod tests {
         assert!(provider.supported_models().iter().any(|m| m == "opus"));
     }
 
-    fn parse(bytes: &[u8]) -> Value {
-        serde_json::from_slice(bytes).unwrap()
+    const SAME_ACCOUNT: &str = "duolane:codex:v1:def0b17f603285ef:cnNfMQ:gAAAAsecret";
+    const OTHER_ACCOUNT: &str = "duolane:codex:v1:aa6eb7ee5d514507:cnNfMQ:gAAAAsecret";
+
+    fn reasoning_text(text: &str) -> Value {
+        serde_json::json!({"type": "text", "text": wrap_reasoning(text)})
+    }
+
+    fn thinking(text: &str, signature: Option<&str>) -> Value {
+        match signature {
+            Some(signature) => {
+                serde_json::json!({"type": "thinking", "thinking": text, "signature": signature})
+            }
+            None => serde_json::json!({"type": "thinking", "thinking": text}),
+        }
     }
 
     #[test]
-    fn unsigned_thinking_becomes_tagged_text() {
-        let body = serde_json::json!({
-            "messages": [
+    fn thinking_reaches_anthropic_as_the_reasoning_table_says() {
+        let answer = serde_json::json!({"type": "text", "text": "391"});
+        let cases = [
+            (
+                "anthropic signature",
+                vec![thinking("opus", Some("EqQBsig"))],
+                None,
+            ),
+            (
+                "anthropic signature, empty",
+                vec![thinking("", Some("EqQBsig"))],
+                None,
+            ),
+            (
+                "codex signature, same account",
+                vec![thinking("plan", Some(SAME_ACCOUNT)), answer.clone()],
+                Some(vec![reasoning_text("plan"), answer.clone()]),
+            ),
+            (
+                "codex signature, other account",
+                vec![thinking("plan", Some(OTHER_ACCOUNT))],
+                Some(vec![reasoning_text("plan")]),
+            ),
+            (
+                "empty signature",
+                vec![thinking("plan", Some(""))],
+                Some(vec![reasoning_text("plan")]),
+            ),
+            (
+                "missing signature",
+                vec![thinking("plan", None)],
+                Some(vec![reasoning_text("plan")]),
+            ),
+            (
+                "empty thinking with codex signature is removed",
+                vec![thinking("", Some(SAME_ACCOUNT)), answer.clone()],
+                Some(vec![answer.clone()]),
+            ),
+            (
+                "empty thinking without signature is removed",
+                vec![answer.clone(), thinking("", None)],
+                Some(vec![answer.clone()]),
+            ),
+            (
+                "emptied message keeps one empty reasoning text",
+                vec![thinking("", Some(OTHER_ACCOUNT)), thinking("", Some(""))],
+                Some(vec![reasoning_text("")]),
+            ),
+        ];
+        for (name, blocks, expected) in cases {
+            let body = serde_json::json!({"messages": [
                 {"role": "user", "content": "hi"},
-                {"role": "assistant", "content": [
-                    {"type": "thinking", "thinking": "codex reasoning", "signature": ""},
-                    {"type": "text", "text": "391"}
-                ]}
-            ]
-        });
-        let raw = serde_json::to_vec(&body).unwrap();
-        let out = sanitize_anthropic_request(&raw, "req1").expect("should rewrite");
-        let doc = parse(&out);
-        let blocks = doc["messages"][1]["content"].as_array().unwrap();
-        assert!(blocks.iter().all(|b| b["type"] != "thinking"));
-        let tagged = blocks[0]["text"].as_str().unwrap();
-        assert!(tagged.starts_with(REASONING_OPEN), "{tagged}");
-        assert!(tagged.contains("codex reasoning"), "{tagged}");
-        assert!(tagged.ends_with(REASONING_CLOSE), "{tagged}");
-        assert_eq!(blocks[1]["text"], "391");
+                {"role": "assistant", "content": blocks},
+            ]});
+            let raw = serde_json::to_vec(&body).unwrap();
+            let out = sanitize_anthropic_request(&raw, "req");
+            let Some(expected) = expected else {
+                assert!(out.is_none(), "{name}");
+                continue;
+            };
+            let out = String::from_utf8(out.expect(name)).unwrap();
+            assert!(!out.contains("duolane:"), "{name}: {out}");
+            let doc: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(
+                doc["messages"][1]["content"],
+                Value::from(expected),
+                "{name}"
+            );
+        }
     }
 
     #[test]
-    fn signed_thinking_is_forwarded_verbatim() {
-        let body = serde_json::json!({
-            "messages": [
-                {"role": "assistant", "content": [
-                    {"type": "thinking", "thinking": "opus reasoning", "signature": "abc123"}
-                ]}
-            ]
-        });
-        let raw = serde_json::to_vec(&body).unwrap();
-        assert!(sanitize_anthropic_request(&raw, "req2").is_none());
-    }
+    fn claude_route_rewrites_only_the_converted_block_bytes() {
+        let head = "{ \"model\":\"claude-opus-4-1\",  \"max_tokens\" :64,\n \"messages\":[{\"content\":\"hi\",\"role\":\"user\"},{\"content\" : [ ";
+        let converted =
+            format!(r#"{{"signature":"{SAME_ACCOUNT}", "thinking":"plané","type":"thinking"}}"#);
+        let between = r#" ,  {"type":"text", "text":"a"}"#;
+        let removed = r#",{"thinking":"","type":"thinking"}"#;
+        let tail = r#" ], "role":"assistant"}],"system":[{"text":"s","type":"text","cache_control":{"type":"ephemeral"}}] }"#;
+        let raw = format!("{head}{converted}{between}{removed}{tail}");
+        let replacement = "{\"type\":\"text\",\"text\":\"<previous_reasoning>\\nplan\u{e9}\\n</previous_reasoning>\"}";
 
-    #[test]
-    fn missing_signature_is_treated_as_unsigned() {
-        let body = serde_json::json!({
-            "messages": [
-                {"role": "assistant", "content": [
-                    {"type": "thinking", "thinking": "r"}
-                ]}
-            ]
-        });
-        let raw = serde_json::to_vec(&body).unwrap();
-        let out = sanitize_anthropic_request(&raw, "req3").expect("should rewrite");
-        assert_eq!(parse(&out)["messages"][0]["content"][0]["type"], "text");
-    }
+        let out = sanitize_anthropic_request(raw.as_bytes(), "req").unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("{head}{replacement}{between}{tail}")
+        );
 
-    #[test]
-    fn plain_request_is_forwarded_verbatim() {
-        let body = serde_json::json!({
-            "messages": [
-                {"role": "user", "content": "hi"},
-                {"role": "assistant", "content": [{"type": "text", "text": "hello"}]}
-            ]
-        });
-        let raw = serde_json::to_vec(&body).unwrap();
-        assert!(sanitize_anthropic_request(&raw, "req4").is_none());
+        let untouched = format!(
+            "{head}{}{between}{tail}",
+            converted.replace(SAME_ACCOUNT, "EqQBsig")
+        );
+        assert!(sanitize_anthropic_request(untouched.as_bytes(), "req").is_none());
     }
 
     #[test]
