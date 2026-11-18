@@ -89,7 +89,8 @@ your Claude login, and the Claude route then fails.
 | -------------------------------- | ----------------------------------------- |
 | `PORT`                           | Listening port, `18765` by default        |
 | `DUOLANE_BIND_ADDRESS`           | Listening address, `127.0.0.1` by default |
-| `DUOLANE_AUTH_TOKEN`             | Token required on the proxy's routes      |
+| `DUOLANE_AUTH_TOKEN`             | Proxy token, at least 32 characters       |
+| `DUOLANE_ALLOWED_HOSTS`          | Extra `Host` names, comma-separated       |
 | `DUOLANE_ALIAS_PROVIDER`         | Backend for the Claude aliases            |
 | `DUOLANE_AUTO_REVIEW_MODEL`      | Model for Claude Code's auto-review       |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL`   | Claude Code's model for the Opus alias    |
@@ -105,8 +106,10 @@ them.
 ### Reaching the proxy from another machine
 
 The proxy speaks plain HTTP, including your token and Claude login. Bind beyond
-loopback only over an encrypted path, such as an SSH tunnel or WireGuard, and
-always set `DUOLANE_AUTH_TOKEN`. Claude Code sends the token in its own header:
+loopback only over an encrypted path, such as an SSH tunnel or WireGuard.
+duolane refuses to start beyond loopback, or with `DUOLANE_ALLOWED_HOSTS`,
+without `DUOLANE_AUTH_TOKEN`. Claude Code sends the token in its own header, and
+`duolane monitor` sends the configured token itself:
 
 ```json
 {
@@ -119,8 +122,14 @@ always set `DUOLANE_AUTH_TOKEN`. Claude Code sends the token in its own header:
 
 ## Limitations
 
-Switching backends while a tool call is pending can fail. Start the next step
-fresh if it does.
+- Switching backends while a tool call is pending can fail. Start the next step
+  fresh if it does.
+- Claude Code turns off
+  [Remote Control](https://code.claude.com/docs/en/remote-control) whenever
+  `ANTHROPIC_BASE_URL` points anywhere other than `api.anthropic.com`. Set the
+  variable for a single launch, such as
+  `ANTHROPIC_BASE_URL=http://localhost:18765 claude`, so other sessions keep
+  Remote Control.
 
 ## Credits
 

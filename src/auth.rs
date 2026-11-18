@@ -11,14 +11,17 @@ where
     fn path(&self) -> String;
 }
 
-pub fn constant_time_eq(left: &str, right: &str) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.bytes()
-        .zip(right.bytes())
-        .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
-        == 0
+pub fn constant_time_eq(candidate: &str, secret: &str) -> bool {
+    let secret = secret.as_bytes();
+    let modulus = secret.len().max(1);
+    let diff = candidate.bytes().enumerate().fold(
+        candidate.len() ^ secret.len(),
+        |diff, (index, byte)| {
+            let expected = secret.get(index % modulus).copied().unwrap_or_default();
+            diff | usize::from(byte ^ expected)
+        },
+    );
+    std::hint::black_box(diff) == 0
 }
 
 pub struct InMemoryAuthStore<T>

@@ -1,0 +1,102 @@
+{
+  "claude_code_version": "2.1.327",
+  "captured": "2026-11-18",
+  "requests": [
+    {
+      "method": "HEAD",
+      "path": "/api/hello",
+      "query_keys": [],
+      "host": "127.0.0.1:PORT",
+      "content_type": null,
+      "origin": null,
+      "header_names": [
+        "accept",
+        "accept-encoding",
+        "connection",
+        "host",
+        "user-agent"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "query_keys": [
+        "beta"
+      ],
+      "host": "127.0.0.1:PORT",
+      "content_type": "application/json",
+      "origin": null,
+      "header_names": [
+        "accept",
+        "accept-encoding",
+        "anthropic-beta",
+        "anthropic-dangerous-direct-browser-access",
+        "anthropic-version",
+        "authorization",
+        "connection",
+        "content-length",
+        "content-type",
+        "host",
+        "user-agent",
+        "x-app",
+        "x-claude-code-session-id",
+        "x-stainless-arch",
+        "x-stainless-lang",
+        "x-stainless-os",
+        "x-stainless-package-version",
+        "x-stainless-retry-count",
+        "x-stainless-runtime",
+        "x-stainless-runtime-version",
+        "x-stainless-timeout"
+      ]
+    },
+    {
+      "method": "HEAD",
+      "path": "/api/hello",
+      "query_keys": [],
+      "host": "localhost:PORT",
+      "content_type": null,
+      "origin": null,
+      "header_names": [
+        "accept",
+        "accept-encoding",
+        "connection",
+        "host",
+        "user-agent"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "query_keys": [
+        "beta"
+      ],
+      "host": "localhost:PORT",
+      "content_type": "application/json",
+      "origin": null,
+      "header_names": [
+        "accept",
+        "accept-encoding",
+        "anthropic-beta",
+        "anthropic-dangerous-direct-browser-access",
+        "anthropic-version",
+        "authorization",
+        "connection",
+        "content-length",
+        "content-type",
+        "host",
+        "user-agent",
+        "x-app",
+        "x-claude-code-session-id",
+        "x-stainless-arch",
+        "x-stainless-lang",
+        "x-stainless-os",
+        "x-stainless-package-version",
+        "x-stainless-retry-count",
+        "x-stainless-runtime",
+        "x-stainless-runtime-version",
+        "x-stainless-timeout"
+      ]
+    }
+  ]
+}

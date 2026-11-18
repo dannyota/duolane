@@ -5,7 +5,9 @@ mod hermetic;
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
 use duolane::{
-    config, logging,
+    config,
+    inbound_auth::{InboundPolicy, PLAIN_HTTP_WARNING, PROXY_KEY_HEADER},
+    logging,
     monitor::MonitorHandle,
     paths,
     registry::{ANTHROPIC_STYLE_ALIASES, Registry},
@@ -88,6 +90,11 @@ fn main() -> Result<()> {
         Commands::Serve { port, no_monitor } => {
             let bind_address = config::bind_address();
             let effective_port = port.unwrap_or_else(config::port);
+            if let Ok(ip) = bind_address.parse::<std::net::IpAddr>()
+                && !InboundPolicy::from_config(ip)?.is_loopback()
+            {
+                eprintln!("{PLAIN_HTTP_WARNING}");
+            }
             let registry = Registry::with_default_alias();
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -157,7 +164,14 @@ fn main() -> Result<()> {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
+            let mut headers = reqwest::header::HeaderMap::new();
+            if let Some(token) = config::auth_token() {
+                let mut value = reqwest::header::HeaderValue::from_str(&token)?;
+                value.set_sensitive(true);
+                headers.insert(PROXY_KEY_HEADER, value);
+            }
             let client = reqwest::Client::builder()
+                .default_headers(headers)
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(std::time::Duration::from_secs(2))
@@ -344,7 +358,6 @@ fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
     println!(
         "  export ANTHROPIC_DEFAULT_HAIKU_MODEL=\"claude-haiku-5-5\"  # small model -> Claude"
     );
-    println!("  export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1");
 }
 
 #[allow(dead_code)]

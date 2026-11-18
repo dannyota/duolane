@@ -30,8 +30,9 @@ includes `127.0.0.0/8`, `::1`, and `::ffff:127.0.0.1`.
 3. On a loopback bind, the `Host` header must be present once and its host must
    exactly match `localhost`, `127.0.0.1`, `[::1]`, or the literal bind address,
    ignoring case. Any port is allowed. Prefix and suffix matches are forbidden.
-4. Additional exact hosts can be configured for a local tunnel or reverse proxy.
-   Configuring one requires an inbound token.
+4. Additional exact hosts can be configured for a local tunnel or reverse proxy,
+   through `DUOLANE_ALLOWED_HOSTS` or `allowedHosts`. Configuring one requires
+   an inbound token.
 5. Any request with an `Origin` header is rejected. duolane sends no CORS
    headers and answers no preflight.
 6. `POST` routes that take JSON require the media type `application/json`, and
@@ -50,6 +51,15 @@ includes `127.0.0.0/8`, `::1`, and `::ffff:127.0.0.1`.
    mismatch. The inbound token is removed before a request goes upstream.
 10. These checks run before the body is read, on every route except `/healthz`.
     `/healthz` returns no account or request data.
+
+Rejections use the Anthropic error shape and never echo request values:
+
+| Condition                                      | Status |
+| ---------------------------------------------- | ------ |
+| Bad, missing, or repeated `Host`; any `Origin` | 403    |
+| Repeated `Authorization` or `x-duolane-key`    | 400    |
+| Missing or wrong token                         | 401    |
+| Wrong content type                             | 415    |
 
 ## Credentials
 
