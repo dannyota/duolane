@@ -8,5 +8,5 @@
 1130 src/providers/codex/translate/reducer.rs
 1295 src/providers/codex/translate/request.rs
 2357 src/providers/codex/websocket.rs
-2139 src/server.rs
+2136 src/server.rs
 1786 src/tui.rs

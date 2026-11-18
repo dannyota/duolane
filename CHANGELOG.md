@@ -6,12 +6,17 @@
 
 - Design documents, decision records, and security policy.
 - `DUOLANE_STATE_DIR` moves logs and captures.
+- `DUOLANE_ALLOWED_HOSTS` and `allowedHosts` accept extra `Host` names when an
+  inbound token is set.
 
 ### Changed
 
 - The product is now `duolane`, with new command, crate, environment variable,
   directory, and header names.
 - The OpenAI-compatible endpoints return HTTP 400 for non-Codex models.
+- Inbound requests must name a local `Host`, carry no `Origin`, and use the
+  route's content type. The inbound token needs 32 characters, is required
+  beyond loopback, and now also guards `/monitor`.
 - On Windows, config and logs move to `%APPDATA%` and `%LOCALAPPDATA%`.
 - Dependencies are refreshed to close known vulnerabilities.
 
