@@ -18,8 +18,7 @@
   route's content type. The inbound token needs 32 characters, is required
   beyond loopback, and now also guards `/monitor`.
 - On Windows, config and logs move to `%APPDATA%` and `%LOCALAPPDATA%`.
-- Dependencies are refreshed to close known vulnerabilities. Three advisories
-  for crates used through `ratatui` remain until its upgrade.
+- Dependencies are refreshed to close known vulnerabilities.
 
 ### Removed
 

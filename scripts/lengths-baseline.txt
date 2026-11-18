@@ -9,4 +9,4 @@
 1294 src/providers/codex/translate/request.rs
 2357 src/providers/codex/websocket.rs
 2136 src/server.rs
-1786 src/tui.rs
+1784 src/tui.rs
