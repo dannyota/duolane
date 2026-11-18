@@ -40,16 +40,22 @@ other model.
   because only Anthropic supports threads.
 - Session history never moves a Claude model to Codex. A Codex request earlier
   in a session cannot pull the Claude aliases off the Anthropic backend.
-- A backend without a login appears in model listings and in the unknown-model
-  error with a hint on how to sign in. Routing ignores login state, so signing
-  in later needs no restart.
+- Routing ignores login state, so signing in later needs no restart. A backend
+  without a login is shown differently on each surface:
+  - `duolane models` and the unknown-model error show a hint on how to sign in
+    instead of its models.
+  - `GET /v1/models` lists its models without a hint.
 - `GET /v1/models` answers in Anthropic's format for Claude Code's gateway model
-  discovery. Claude Code adds only ids that start with `claude` or `anthropic`,
-  so the Claude aliases are what reach its `/model` picker. Codex ids are still
-  listed for other clients.
-- Every response carries a `request-id` header, which Claude Code records as the
-  transcript `requestId`. duolane keeps an upstream value and otherwise sets its
-  own, before the body streams.
+  discovery, which `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` turns on
+  ([gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol)).
+  Claude Code adds only ids that start with `claude` or `anthropic`, so the
+  Claude aliases are what reach its `/model` picker. Codex ids are still listed
+  for other clients.
+- Every response to a `POST` route carries a `request-id` header, which Claude
+  Code records as the transcript `requestId`. duolane keeps an upstream value
+  and otherwise sets its own, before the body streams.
+- `/monitor` returns elapsed durations and computed rates, never process-local
+  clock readings.
 
 ## Claude route
 
@@ -63,7 +69,7 @@ subscription login when only `ANTHROPIC_BASE_URL` is set. An
 The relay keeps the original path, query, and body bytes. It removes these
 request headers:
 
-- hop-by-hop headers and `content-length`, which the client recomputes;
+- `host`, hop-by-hop headers, and `content-length`, which the client recomputes;
 - `accept-encoding`, so Anthropic answers without compression, because duolane
   never decompresses and must not relay a body under a stale encoding; and
 - the inbound token header.
@@ -124,15 +130,18 @@ so the conversation stays valid.
    is never reported as a successful turn, and a tool call with incomplete
    arguments is never reported as complete. A stop at `max_tokens` is reported
    as that stop.
-6. **Unsupported content is never dropped silently.** A block the backend cannot
-   carry produces an explicit marker or an error. Removing empty thinking is the
-   only exception.
+6. **Unsupported content is never dropped silently.** A message content block
+   the backend cannot carry produces an explicit marker or an error. Removing
+   empty thinking is the only exception. Tool definitions follow the
+   [Codex route rules](codex.md#request-translation) instead.
 
 ## Unverified behavior
 
 These inherited assumptions need a live check:
 
 - Switching backends while a tool call is pending.
+- Claude Code adding only discovered ids that start with `claude` or
+  `anthropic`, and recording `request-id` as `requestId`.
 - Claude Code running web search through a client-side `WebSearch` tool and an
   isolated inner request, which would keep hosted search blocks out of the outer
   transcript. The Claude route logs `hosted_web_search_in_history` if such

@@ -42,8 +42,8 @@ includes `127.0.0.0/8`, `::1`, and `::ffff:127.0.0.1`.
 7. When a token is set, every route except `/healthz` requires it. The token
    travels in the `x-duolane-key` header, because `Authorization` carries the
    Claude login. A bearer token is also accepted for OpenAI-compatible clients;
-   a bearer value that is not the token is the Claude login and is forwarded.
-   `duolane monitor` sends the configured token.
+   when the token arrives in `x-duolane-key`, a bearer value is the Claude login
+   and is forwarded. `duolane monitor` sends the configured token.
 8. `/monitor` also accepts only loopback peers. Remote monitoring is
    unsupported.
 9. Token comparison reveals neither the token length nor the position of a
@@ -116,9 +116,14 @@ truncated on a character boundary.
 - Traffic capture is off by default and warns when enabled, because it stores
   conversation content.
 - Logs and captures are readable only by the user.
-- Credentials are redacted by key name whatever the value's type. Header names,
-  body keys, and query parameters share one matcher, which also covers names
-  ending in `token`, `secret`, or `password`.
+- Traffic captures replace image payloads, `encrypted_content`, and duolane
+  signatures with a length marker, and keep Anthropic signatures. An image
+  source without a `media_type` is still redacted, because capture runs before
+  validation. An image field keeps its object shape, with each string inside it
+  replaced.
+- Under a credential key name, the whole value is replaced whatever its type.
+  Header names, body keys, and query parameters share one matcher, which also
+  covers names ending in `token`, `secret`, or `password`.
 
 ## Terminal output
 
