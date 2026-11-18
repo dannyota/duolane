@@ -1,10 +1,17 @@
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use super::jwt::{TokenResponse, extract_account_id, token_exp_ms};
 use crate::auth::AuthStorage;
+
+const REFRESH_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const REFRESH_LOCK_POLL: Duration = Duration::from_millis(50);
+static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredAuth {
@@ -44,15 +51,33 @@ impl<S: AuthStorage<StoredAuth>> CodexTokenStore<S> {
     pub fn auth_path(&self) -> String {
         self.store.path()
     }
+
+    pub fn lock_for_refresh(&self) -> Result<Option<File>, anyhow::Error> {
+        self.store.lock_for_refresh()
+    }
 }
 
 pub struct CodexCliAuthStore {
     path: PathBuf,
+    lock_timeout: Duration,
 }
 
 impl CodexCliAuthStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            lock_timeout: REFRESH_LOCK_TIMEOUT,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_lock_timeout(mut self, lock_timeout: Duration) -> Self {
+        self.lock_timeout = lock_timeout;
+        self
+    }
+
+    fn target_path(&self) -> PathBuf {
+        std::fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone())
     }
 }
 
@@ -112,9 +137,14 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
     }
 
     fn save(&self, value: StoredAuth) -> Result<(), anyhow::Error> {
-        let mut doc: serde_json::Value = match std::fs::read(&self.path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::json!({})),
-            Err(_) => serde_json::json!({}),
+        let path = self.target_path();
+        let mut doc: serde_json::Value = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| anyhow::anyhow!("{} is not valid JSON: {e}", path.display()))?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+            Err(err) => {
+                return Err(anyhow::anyhow!("failed to read {}: {err}", path.display()));
+            }
         };
         if !doc.is_object() {
             doc = serde_json::json!({});
@@ -140,7 +170,7 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
             "last_refresh".into(),
             serde_json::Value::String(now_rfc3339()),
         );
-        write_atomic(&self.path, &serde_json::to_vec_pretty(&doc)?)
+        write_atomic(&path, &serde_json::to_vec_pretty(&doc)?)
     }
 
     fn clear(&self) -> Result<(), anyhow::Error> {
@@ -149,6 +179,52 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
 
     fn path(&self) -> String {
         self.path.to_string_lossy().into_owned()
+    }
+
+    fn lock_for_refresh(&self) -> Result<Option<File>, anyhow::Error> {
+        let path = self.target_path();
+        let name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("auth path has no file name"))?;
+        let mut lock_name = name.to_os_string();
+        lock_name.push(".duolane.lock");
+        let lock_path = path.with_file_name(lock_name);
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = match options.open(&lock_path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(anyhow::anyhow!(
+                    "failed to open {}: {err}",
+                    lock_path.display()
+                ));
+            }
+        };
+        let deadline = Instant::now() + self.lock_timeout;
+        loop {
+            match file.try_lock() {
+                Ok(()) => {
+                    remove_stale_temp_files(&path);
+                    return Ok(Some(file));
+                }
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(REFRESH_LOCK_POLL);
+                }
+                Err(TryLockError::WouldBlock) => {
+                    anyhow::bail!(
+                        "timed out after {:?} waiting for {}, held by another duolane process refreshing the Codex login",
+                        self.lock_timeout,
+                        lock_path.display()
+                    );
+                }
+                Err(TryLockError::Error(err)) => {
+                    anyhow::bail!("failed to lock {}: {err}", lock_path.display());
+                }
+            }
+        }
     }
 }
 
@@ -184,28 +260,77 @@ fn now_rfc3339() -> String {
         .unwrap_or_default()
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), anyhow::Error> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("auth path has no parent directory"))?;
-    std::fs::create_dir_all(dir).ok();
-    let tmp = dir.join(format!(".auth.json.tmp.{}", std::process::id()));
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perm = file.metadata()?.permissions();
-            perm.set_mode(0o600);
-            file.set_permissions(perm)?;
+fn remove_stale_temp_files(path: &Path) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let prefix = format!(".{}.duolane-tmp.", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
         }
-        file.write_all(bytes)?;
-        file.flush()?;
     }
-    std::fs::rename(&tmp, path).map_err(|e| {
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), anyhow::Error> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("auth path has no file name"))?
+        .to_string_lossy();
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(dir).ok();
+    let tmp = dir.join(format!(
+        ".{name}.duolane-tmp.{}.{}",
+        std::process::id(),
+        TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let persisted = write_private_file(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(err) = persisted {
         let _ = std::fs::remove_file(&tmp);
-        anyhow::anyhow!("failed to persist {}: {e}", path.display())
-    })
+        anyhow::bail!("failed to persist {}: {err}", path.display());
+    }
+    if let Err(err) = sync_directory(dir) {
+        crate::logging::create_logger("codex").warn(
+            "codex_auth_directory_sync_failed",
+            Some(serde_json::Map::from_iter([
+                (
+                    "dir".to_string(),
+                    serde_json::json!(dir.display().to_string()),
+                ),
+                ("error".to_string(), serde_json::json!(err.to_string())),
+            ])),
+        );
+    }
+    Ok(())
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    file.sync_all()
+}
+
+#[cfg(unix)]
+fn sync_directory(dir: &Path) -> std::io::Result<()> {
+    File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

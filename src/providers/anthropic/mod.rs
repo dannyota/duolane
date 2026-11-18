@@ -380,9 +380,13 @@ impl AnthropicProvider {
     }
 
     fn with_timeouts(base_url: String, header_timeout: Duration, idle_timeout: Duration) -> Self {
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(reqwest::redirect::Policy::none());
+        if url::Url::parse(&base_url).is_ok_and(|url| crate::upstream_url::is_loopback_host(&url)) {
+            builder = builder.no_proxy();
+        }
+        let client = builder
             .build()
             .expect("failed to build anthropic passthrough client");
         Self {

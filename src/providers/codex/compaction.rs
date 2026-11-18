@@ -7,6 +7,7 @@ use crate::anthropic::sse::parse_sse_events;
 use crate::provider::RequestContext;
 use crate::providers::codex::client::{CodexError, CodexHttpClient};
 
+use super::translate::reasoning_signature::ReasoningAccount;
 use super::translate::request::{
     ResponsesContentPart, ResponsesInputItem, ResponsesRequest, is_compact_message_text,
 };
@@ -42,6 +43,7 @@ enum CompactionPhase {
 struct CompactionState {
     attempt: CompactionAttempt,
     model: String,
+    account: ReasoningAccount,
     native_history: Vec<ResponsesInputItem>,
     phase: CompactionPhase,
     updated_at: u64,
@@ -90,11 +92,12 @@ pub async fn request_compaction(
     Ok(build_compacted_history(&conversation, compaction))
 }
 
-pub fn begin_compaction(session_id: &str, model: &str) -> CompactionAttempt {
+pub fn begin_compaction(session_id: &str, request: &ResponsesRequest) -> CompactionAttempt {
     let attempt = CompactionAttempt(NEXT_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed));
     let state = CompactionState {
         attempt,
-        model: model.to_string(),
+        model: request.model.clone(),
+        account: request.reasoning_account.clone(),
         native_history: Vec::new(),
         phase: CompactionPhase::Preparing,
         updated_at: now_ms(),
@@ -195,7 +198,7 @@ pub fn apply_compaction_replay(
     if !matches!(state.phase, CompactionPhase::Anchored { .. }) {
         return None;
     }
-    if state.model != request.model {
+    if state.model != request.model || state.account != request.reasoning_account {
         registry.states.remove(session_id);
         update_total_bytes(registry);
         return None;
@@ -588,7 +591,7 @@ mod tests {
         session_id: &str,
         native_history: Vec<ResponsesInputItem>,
     ) -> CompactionAttempt {
-        let attempt = begin_compaction(session_id, "gpt-5.6-sol");
+        let attempt = begin_compaction(session_id, &request(json!([])));
         assert!(store_compaction(session_id, attempt, native_history));
         attempt
     }
@@ -698,7 +701,7 @@ mod tests {
     fn stale_store_cannot_replace_newer_compaction() {
         let _guard = TEST_REGISTRY_LOCK.lock().unwrap();
         clear_all_compactions_for_tests();
-        let older = begin_compaction("session", "gpt-5.6-sol");
+        let older = begin_compaction("session", &request(json!([])));
         let newer = stored_compaction(
             "session",
             vec![ResponsesInputItem::Compaction {
@@ -737,7 +740,7 @@ mod tests {
     fn preparing_compaction_survives_model_mismatched_replay_check() {
         let _guard = TEST_REGISTRY_LOCK.lock().unwrap();
         clear_all_compactions_for_tests();
-        let attempt = begin_compaction("session", "gpt-5.6-sol");
+        let attempt = begin_compaction("session", &request(json!([])));
         let mut mismatched = request(json!([
             {"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
         ]));
@@ -757,7 +760,7 @@ mod tests {
     fn stale_abort_cannot_clear_newer_compaction() {
         let _guard = TEST_REGISTRY_LOCK.lock().unwrap();
         clear_all_compactions_for_tests();
-        let older = begin_compaction("session", "gpt-5.6-sol");
+        let older = begin_compaction("session", &request(json!([])));
         let newer = stored_compaction(
             "session",
             vec![ResponsesInputItem::Compaction {
@@ -830,7 +833,7 @@ mod tests {
     fn invalid_stale_summary_cannot_clear_newer_compaction() {
         let _guard = TEST_REGISTRY_LOCK.lock().unwrap();
         clear_all_compactions_for_tests();
-        let older = begin_compaction("session", "gpt-5.6-sol");
+        let older = begin_compaction("session", &request(json!([])));
         let newer = stored_compaction(
             "session",
             vec![ResponsesInputItem::Compaction {

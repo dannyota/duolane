@@ -79,21 +79,31 @@ Rejections use the Anthropic error shape and never echo request values:
 - duolane takes the access token's expiry from its JWT `exp` claim. When the
   claim cannot be read, it assumes one hour, so a stale token surfaces as a 401
   and a forced refresh rather than being trusted indefinitely.
-- duolane processes serialize a refresh with a file lock that has a 10 second
-  timeout. Under the lock, duolane re-reads the file before spending a refresh
-  token.
-- The Codex CLI does not take this lock, so both can still try the same refresh
-  token. After a rejected refresh, duolane re-reads the file and uses a token
-  that changed. Otherwise it reports that a new `codex login` is needed.
-- Connection reuse and continuation state are bound to the account that created
-  them. An account change is a cache miss.
+- duolane processes serialize a refresh with an exclusive lock on
+  `auth.json.duolane.lock` beside the auth file, with a 10 second timeout. Under
+  the lock, duolane re-reads the file before spending a refresh token.
+- duolane writes rotated tokens only if the file still holds the refresh token
+  it spent, so a login the Codex CLI changed during the exchange wins. The
+  exchange and the write finish even if the request that started them is
+  cancelled. A failed write is tried up to three times.
+- If the lock cannot be taken, duolane keeps using an unexpired token. After a
+  rejected refresh, duolane re-reads the file and uses a token that changed.
+  Otherwise it reports that a new `codex login` is needed.
+- Connection reuse, continuation, and compaction state are bound to the account
+  that created them, and an account change is a cache miss. A request is sent
+  only with a login for the account it was translated for. If the login changed,
+  duolane translates the request again once for the new account, and answers
+  HTTP 409 if the login changes again during that retry.
 
 ## Upstream connections
 
 - Every client that sends a credential disables redirects and sets a connect
   timeout.
-- Upstream URLs use HTTPS. Plain HTTP is allowed only for a loopback host, for
-  tests and local development.
+- Requests to a loopback host never go through a proxy.
+- Upstream URLs use HTTPS, and WebSocket URLs use WSS. Plain HTTP and WS are
+  allowed only for a loopback host, for tests and local development. The Codex,
+  Codex images, and Anthropic base URL settings are checked at startup and may
+  not carry user info, a query, or a fragment.
 - duolane never decompresses upstream data.
 
 ## Limits

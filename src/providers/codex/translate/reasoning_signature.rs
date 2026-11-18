@@ -21,7 +21,7 @@ pub(crate) fn is_codex_signature(signature: &str) -> bool {
     signature.starts_with(CODEX_FAMILY_PREFIX)
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct ReasoningAccount {
     tag: Option<String>,
 }
@@ -31,6 +31,10 @@ impl ReasoningAccount {
         Self {
             tag: account_id.filter(|id| !id.is_empty()).map(account_tag),
         }
+    }
+
+    pub(crate) fn tag(&self) -> Option<&str> {
+        self.tag.as_deref()
     }
 
     pub fn sign(&self, replay: &ReasoningReplay) -> Option<String> {

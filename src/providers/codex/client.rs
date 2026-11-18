@@ -14,6 +14,7 @@ use super::auth::manager::CodexAuthManager;
 use super::auth::token_store::{DefaultCodexAuthStore, StoredAuth, file_store};
 pub use super::events::{CodexLimitWindow, CodexUsageLimit};
 use super::search::{SearchRequest, SearchResponse};
+use super::translate::reasoning_signature::ReasoningAccount;
 use super::translate::request::ResponsesRequest;
 
 #[derive(Debug)]
@@ -25,6 +26,8 @@ pub struct CodexError {
     pub usage_limit: Option<Box<CodexUsageLimit>>,
     pub origin: CodexErrorOrigin,
 }
+
+pub(crate) const CODEX_ACCOUNT_CHANGED_DETAIL: &str = "codex_account_changed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexErrorOrigin {
@@ -499,6 +502,7 @@ const MAX_BUFFERED_TRANSPORT_ATTEMPTS: u32 = MAX_BUFFERED_TRANSPORT_RETRIES + 1;
 const HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS: u64 = 300_000;
 const IMAGE_HEADER_TIMEOUT_MS: u64 = 300_000;
 const HTTP_RESPONSE_HEADERS_DETAIL: &str = "http_response_headers";
+const LOOPBACK_NO_PROXY: &str = "localhost,127.0.0.0/8,::1,::ffff:127.0.0.0/104";
 
 #[derive(Clone)]
 struct ProxyEnvironment {
@@ -521,9 +525,11 @@ impl ProxyEnvironment {
             };
         }
 
-        let no_proxy_value = std::env::var("NO_PROXY")
-            .or_else(|_| std::env::var("no_proxy"))
-            .ok();
+        let no_proxy_value = match std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy"))
+        {
+            Ok(value) if !value.trim().is_empty() => format!("{value},{LOOPBACK_NO_PROXY}"),
+            _ => LOOPBACK_NO_PROXY.to_string(),
+        };
         Self {
             http_proxy: proxy_env_value("HTTP_PROXY", "http_proxy")
                 .unwrap_or_else(|name| panic!("invalid {name} proxy URL")),
@@ -531,10 +537,8 @@ impl ProxyEnvironment {
                 .unwrap_or_else(|name| panic!("invalid {name} proxy URL")),
             all_proxy: proxy_env_value("ALL_PROXY", "all_proxy")
                 .unwrap_or_else(|name| panic!("invalid {name} proxy URL")),
-            no_proxy: no_proxy_value
-                .as_deref()
-                .and_then(reqwest::NoProxy::from_string),
-            no_proxy_value,
+            no_proxy: reqwest::NoProxy::from_string(&no_proxy_value),
+            no_proxy_value: Some(no_proxy_value),
         }
     }
 
@@ -574,7 +578,7 @@ impl ProxyEnvironment {
     }
 }
 
-fn native_http_client(proxy_environment: &ProxyEnvironment) -> reqwest::Client {
+fn codex_http_client(proxy_environment: &ProxyEnvironment) -> reqwest::Client {
     proxy_environment
         .apply(
             reqwest::Client::builder()
@@ -582,7 +586,7 @@ fn native_http_client(proxy_environment: &ProxyEnvironment) -> reqwest::Client {
                 .redirect(reqwest::redirect::Policy::none()),
         )
         .build()
-        .expect("failed to create native Responses HTTP client")
+        .expect("failed to create Codex HTTP client")
 }
 
 fn proxy_env_value(
@@ -625,6 +629,7 @@ fn websocket_http_client(proxy_environment: &ProxyEnvironment) -> reqwest::Clien
         .apply(
             reqwest::Client::builder()
                 .http1_only()
+                .connect_timeout(Duration::from_secs(15))
                 .redirect(reqwest::redirect::Policy::none())
                 .use_preconfigured_tls((*tls_config).clone()),
         )
@@ -685,11 +690,8 @@ impl CodexHttpClient {
         let timeout_ms = config::codex_header_timeout_ms();
         let proxy_environment = ProxyEnvironment::from_env();
         Self {
-            client: proxy_environment
-                .apply(reqwest::Client::builder().connect_timeout(Duration::from_secs(15)))
-                .build()
-                .expect("failed to create HTTP client"),
-            native_client: native_http_client(&proxy_environment),
+            client: codex_http_client(&proxy_environment),
+            native_client: codex_http_client(&proxy_environment),
             websocket_client: websocket_http_client(&proxy_environment),
             websocket_proxy_config: proxy_environment.websocket_proxy_config(),
             auto_http_fallback_enabled: true,
@@ -710,7 +712,7 @@ impl CodexHttpClient {
         let auto_http_fallback_enabled =
             custom_client_auto_http_fallback_enabled(&base_url, &websocket_proxy_config);
         Self {
-            native_client: native_http_client(&proxy_environment),
+            native_client: codex_http_client(&proxy_environment),
             websocket_client: websocket_http_client(&proxy_environment),
             websocket_proxy_config,
             auto_http_fallback_enabled,
@@ -744,6 +746,28 @@ impl CodexHttpClient {
 
     pub fn auth_manager(&self) -> &CodexAuthManager<DefaultCodexAuthStore> {
         &self.auth_manager
+    }
+
+    async fn auth_for(&self, account: &ReasoningAccount) -> Result<StoredAuth, CodexError> {
+        let auth = self.auth_manager.get_auth().await.map_err(|e| CodexError {
+            status: 401,
+            message: "Auth error".to_string(),
+            detail: Some(e.to_string()),
+            retry_after: None,
+            usage_limit: None,
+            origin: CodexErrorOrigin::Auth,
+        })?;
+        bind_account(account, auth)
+    }
+
+    async fn refreshed_auth(&self, current: &StoredAuth) -> Result<StoredAuth, CodexError> {
+        let account = ReasoningAccount::new(current.account_id.as_deref());
+        let auth = self
+            .auth_manager
+            .force_refresh(&current.access)
+            .await
+            .map_err(auth_refresh_error)?;
+        bind_account(&account, auth)
     }
 
     pub fn body_idle_timeout_ms(&self) -> u64 {
@@ -928,7 +952,7 @@ impl CodexHttpClient {
         })
     }
 
-    pub async fn post_native_responses(
+    pub(crate) async fn post_native_responses(
         &self,
         body: &serde_json::Value,
         ctx: &RequestContext,
@@ -1050,7 +1074,7 @@ impl CodexHttpClient {
             .await
     }
 
-    pub async fn post_search(
+    pub(crate) async fn post_search(
         &self,
         body: &SearchRequest,
         ctx: &RequestContext,
@@ -1115,19 +1139,12 @@ impl CodexHttpClient {
         }
     }
 
-    pub async fn stream_codex_http_events(
+    pub(crate) async fn stream_codex_http_events(
         self: &Arc<Self>,
         body: &ResponsesRequest,
         ctx: &RequestContext,
     ) -> Result<CodexHttpEventReceiver, CodexError> {
-        let mut auth = self.auth_manager.get_auth().await.map_err(|e| CodexError {
-            status: 401,
-            message: "Auth error".to_string(),
-            detail: Some(e.to_string()),
-            retry_after: None,
-            usage_limit: None,
-            origin: CodexErrorOrigin::Auth,
-        })?;
+        let mut auth = self.auth_for(&body.reasoning_account).await?;
         let body_json = serde_json::to_string(body).map_err(|e| CodexError {
             status: 500,
             message: "Failed to serialize request".to_string(),
@@ -1206,11 +1223,7 @@ impl CodexHttpClient {
 
             if resp.status().as_u16() == 401 && !*auth_refresh_attempted {
                 *auth_refresh_attempted = true;
-                *auth = self
-                    .auth_manager
-                    .force_refresh(&auth.access)
-                    .await
-                    .map_err(auth_refresh_error)?;
+                *auth = self.refreshed_auth(auth).await?;
                 continue;
             }
 
@@ -1233,19 +1246,6 @@ impl CodexHttpClient {
             }
             return Ok((resp, headers, started_at));
         }
-    }
-
-    pub async fn stream_codex_auto_events(
-        self: &Arc<Self>,
-        body: &ResponsesRequest,
-        ctx: &RequestContext,
-        continuation: Option<&super::continuation::ContinuationCandidate>,
-    ) -> Result<super::websocket::CodexWebSocketEventReceiver, CodexError> {
-        let reservation =
-            continuation.map(super::continuation::ContinuationReservation::from_public_candidate);
-        self.stream_codex_auto_events_for_owner(body, ctx, reservation.as_ref())
-            .await
-            .map(super::websocket::CodexWebSocketEventStream::into_receiver)
     }
 
     pub(crate) async fn stream_codex_auto_events_for_owner(
@@ -1609,14 +1609,7 @@ impl CodexHttpClient {
     ) -> Result<OwnerAwareCodexResponse, CodexError> {
         use crate::config::CodexTransport;
 
-        let mut auth = self.auth_manager.get_auth().await.map_err(|e| CodexError {
-            status: 401,
-            message: "Auth error".to_string(),
-            detail: Some(e.to_string()),
-            retry_after: None,
-            usage_limit: None,
-            origin: CodexErrorOrigin::Auth,
-        })?;
+        let mut auth = self.auth_for(&body.reasoning_account).await?;
 
         let initial_pool_owner = websocket_pool_owner(continuation).cloned();
         if should_reset_websocket_pool(continuation)
@@ -1734,25 +1727,10 @@ impl CodexHttpClient {
 
             if should_refresh_after_unauthorized(&result, auth_refresh_attempted, transport) {
                 auth_refresh_attempted = true;
-                match self.auth_manager.force_refresh(&auth.access).await {
-                    Ok(new_auth) => {
-                        auth = new_auth;
-                        invalidate_live_continuation_pool(active_continuation.as_ref());
-                        active_continuation =
-                            full_context_continuation(active_continuation.as_ref());
-                        continue;
-                    }
-                    Err(e) => {
-                        return Err(CodexError {
-                            status: 401,
-                            message: "Unauthorized".to_string(),
-                            detail: Some(e.to_string()),
-                            retry_after: None,
-                            usage_limit: None,
-                            origin: CodexErrorOrigin::Http,
-                        });
-                    }
-                }
+                auth = self.refreshed_auth(&auth).await?;
+                invalidate_live_continuation_pool(active_continuation.as_ref());
+                active_continuation = full_context_continuation(active_continuation.as_ref());
+                continue;
             }
 
             if let Ok(response) = &result
@@ -1989,14 +1967,7 @@ impl CodexHttpClient {
         ctx: &RequestContext,
         continuation: Option<&super::continuation::ContinuationReservation>,
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
-        let auth = self.auth_manager.get_auth().await.map_err(|e| CodexError {
-            status: 401,
-            message: "Auth error".to_string(),
-            detail: Some(e.to_string()),
-            retry_after: None,
-            usage_limit: None,
-            origin: CodexErrorOrigin::Auth,
-        })?;
+        let auth = self.auth_for(&body.reasoning_account).await?;
 
         let turn_id = continuation.and_then(super::continuation::ContinuationReservation::turn_id);
         if should_reset_websocket_pool(continuation)
@@ -2091,7 +2062,7 @@ impl CodexHttpClient {
                     Err(err) if err.status == 401 && !auth_refresh_attempted && !forwarded_any => {
                         auth_refresh_attempted = true;
                         invalidate_live_continuation_pool(continuation.as_ref());
-                        let refresh = self.auth_manager.force_refresh(&auth.access);
+                        let refresh = self.refreshed_auth(&auth);
                         auth = match refresh.await {
                             Ok(auth) => {
                                 if tx.is_closed() {
@@ -2104,7 +2075,7 @@ impl CodexHttpClient {
                                 auth
                             },
                             Err(refresh_err) => {
-                                if tx.send(Err(auth_refresh_error(refresh_err))).await.is_err() {
+                                if tx.send(Err(refresh_err)).await.is_err() {
                                     abort_abandoned_live_continuation(
                                         continuation.as_ref(),
                                         &socket_id_publisher,
@@ -2179,7 +2150,7 @@ impl CodexHttpClient {
                 if unauthorized && !auth_refresh_attempted && !forwarded_any {
                     auth_refresh_attempted = true;
                     invalidate_live_continuation_pool(continuation.as_ref());
-                    let refresh = self.auth_manager.force_refresh(&auth.access);
+                    let refresh = self.refreshed_auth(&auth);
                     auth = match refresh.await {
                         Ok(auth) => {
                             if tx.is_closed() {
@@ -2198,7 +2169,7 @@ impl CodexHttpClient {
                             auth
                         }
                         Err(refresh_err) => {
-                            if tx.send(Err(auth_refresh_error(refresh_err))).await.is_err() {
+                            if tx.send(Err(refresh_err)).await.is_err() {
                                 if let Some(reservation) = continuation.as_ref() {
                                     super::websocket::invalidate_codex_websocket_pool_socket(
                                         reservation,
@@ -2774,6 +2745,20 @@ fn summarize_json_request_size(body: &serde_json::Value, body_json: &str) -> ser
     })
 }
 
+fn bind_account(account: &ReasoningAccount, auth: StoredAuth) -> Result<StoredAuth, CodexError> {
+    if *account == ReasoningAccount::new(auth.account_id.as_deref()) {
+        return Ok(auth);
+    }
+    Err(CodexError {
+        status: 409,
+        message: "The Codex login changed during this request; retry it".to_string(),
+        detail: Some(CODEX_ACCOUNT_CHANGED_DETAIL.to_string()),
+        retry_after: None,
+        usage_limit: None,
+        origin: CodexErrorOrigin::Auth,
+    })
+}
+
 fn auth_refresh_error(err: anyhow::Error) -> CodexError {
     CodexError {
         status: 401,
@@ -3167,7 +3152,7 @@ mod tests {
                 format: None,
             },
             reasoning: None,
-            reasoning_account: Default::default(),
+            reasoning_account: ReasoningAccount::new(Some("acct")),
         }
     }
 
@@ -4905,6 +4890,56 @@ mod tests {
         assert_eq!(error.status, 404);
         assert_eq!(error.detail.as_deref(), Some("Model not found gpt-test"));
         assert_eq!(error.origin, CodexErrorOrigin::BufferedHttp);
+    }
+
+    #[tokio::test]
+    async fn codex_http_client_refuses_to_follow_redirects() {
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request(&mut stream).await;
+            let response = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nlocation: http://{target_addr}/collect\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let direct = ProxyEnvironment {
+            http_proxy: None,
+            https_proxy: None,
+            all_proxy: None,
+            no_proxy: None,
+            no_proxy_value: None,
+        };
+        let client = CodexHttpClient::new_for_test(
+            codex_http_client(&direct),
+            format!("http://{addr}/responses"),
+            1_000,
+            1_000,
+        );
+        client.auth_manager().set_test_auth(http_test_auth());
+
+        let result = client
+            .post_codex_with_transport(
+                &buffered_test_request(),
+                &http_test_context(),
+                None,
+                crate::config::CodexTransport::Http,
+            )
+            .await;
+        server.await.unwrap();
+        let Err(error) = result else {
+            panic!("a redirect must not be followed");
+        };
+        assert_eq!(error.status, 307);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), target.accept())
+                .await
+                .is_err(),
+            "the redirect target must not be contacted"
+        );
     }
 
     #[test]
