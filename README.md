@@ -97,7 +97,10 @@ your Claude login, and the Claude route then fails.
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL`  | Claude Code's small background model      |
 | `ENABLE_TOOL_SEARCH`             | Set to `true` to defer MCP tool schemas   |
 
-File settings live in `~/.config/duolane/config.json`.
+File settings live in `~/.config/duolane/config.json`, and logs in
+`~/.local/state/duolane/`. On Windows they live in `%APPDATA%\duolane` and
+`%LOCALAPPDATA%\duolane`. `DUOLANE_CONFIG_DIR` and `DUOLANE_STATE_DIR` move
+them.
 
 ### Reaching the proxy from another machine
 

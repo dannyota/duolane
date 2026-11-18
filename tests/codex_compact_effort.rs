@@ -1,3 +1,6 @@
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};

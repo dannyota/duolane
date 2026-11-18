@@ -1,3 +1,6 @@
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
 use axum::{Json, Router, http::HeaderMap, routing::post};
 use serde_json::{Value, json};
 use std::{

@@ -1,3 +1,6 @@
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
 use duolane::anthropic::{
     encode_sse_event, parse_sse_events, parse_sse_events_with_stats, schema::MessagesRequest,
 };
@@ -58,7 +61,7 @@ fn path_resolvers_cover_platform_rules() {
         "/tmp/ccp-config".to_string(),
     );
     let deps = DirResolverEnv {
-        platform: "darwin".to_string(),
+        platform: "macos".to_string(),
         home: "/home/u".into(),
         env: env.clone(),
     };
@@ -68,13 +71,13 @@ fn path_resolvers_cover_platform_rules() {
     );
 
     let deps = DirResolverEnv {
-        platform: "darwin".to_string(),
+        platform: "macos".to_string(),
         home: "/home/u".into(),
         env: HashMap::from([("XDG_CONFIG_HOME".into(), "/x".into())]),
     };
     assert_eq!(
         paths::resolve_config_dir(&deps).to_string_lossy(),
-        "/home/u/.config/duolane"
+        "/x/duolane"
     );
 
     let deps = DirResolverEnv {
@@ -88,7 +91,7 @@ fn path_resolvers_cover_platform_rules() {
     );
 
     let deps = DirResolverEnv {
-        platform: "win32".to_string(),
+        platform: "windows".to_string(),
         home: "C:/Users/u".into(),
         env: HashMap::from([("APPDATA".into(), "C:/Users/u/AppData/Roaming".into())]),
     };
@@ -96,6 +99,26 @@ fn path_resolvers_cover_platform_rules() {
         paths::resolve_config_dir(&deps).to_string_lossy(),
         "C:/Users/u/AppData/Roaming/duolane"
     );
+}
+
+#[test]
+fn state_dir_override_wins_over_every_platform_default() {
+    for platform in ["linux", "macos", "windows"] {
+        let deps = DirResolverEnv {
+            platform: platform.to_string(),
+            home: "/home/u".into(),
+            env: HashMap::from([
+                ("DUOLANE_STATE_DIR".into(), "/tmp/state".into()),
+                ("XDG_STATE_HOME".into(), "/x".into()),
+                ("LOCALAPPDATA".into(), "/l".into()),
+            ]),
+        };
+        assert_eq!(
+            paths::resolve_state_dir(&deps).to_string_lossy(),
+            "/tmp/state",
+            "{platform}"
+        );
+    }
 }
 
 #[test]
@@ -118,7 +141,7 @@ fn config_dir_override_honors_only_the_duolane_variable() {
 
 #[test]
 fn default_config_and_state_dirs_end_in_duolane() {
-    for platform in ["linux", "darwin", "win32"] {
+    for platform in ["linux", "macos", "windows"] {
         let deps = DirResolverEnv {
             platform: platform.to_string(),
             home: "/home/u".into(),
@@ -128,6 +151,114 @@ fn default_config_and_state_dirs_end_in_duolane() {
         let state = paths::resolve_state_dir(&deps);
         assert!(config.ends_with("duolane"), "{platform}: {config:?}");
         assert!(state.ends_with("duolane"), "{platform}: {state:?}");
+    }
+}
+
+fn deps(platform: &str, home: &str, env: &[(&str, &str)]) -> DirResolverEnv {
+    DirResolverEnv {
+        platform: platform.to_string(),
+        home: home.into(),
+        env: env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    }
+}
+
+#[test]
+fn state_dir_resolves_from_xdg_fallback_and_windows_local_app_data() {
+    assert_eq!(
+        paths::resolve_state_dir(&deps("linux", "/home/u", &[("XDG_STATE_HOME", "/s")])),
+        std::path::Path::new("/s/duolane")
+    );
+    assert_eq!(
+        paths::resolve_state_dir(&deps("macos", "/home/u", &[("XDG_STATE_HOME", "/s")])),
+        std::path::Path::new("/s/duolane")
+    );
+    assert_eq!(
+        paths::resolve_state_dir(&deps("linux", "/home/u", &[])),
+        std::path::Path::new("/home/u/.local/state/duolane")
+    );
+    assert_eq!(
+        paths::resolve_state_dir(&deps("windows", "C:/Users/u", &[("LOCALAPPDATA", "C:/L")])),
+        std::path::Path::new("C:/L/duolane")
+    );
+}
+
+#[test]
+fn config_dir_resolves_from_windows_app_data() {
+    assert_eq!(
+        paths::resolve_config_dir(&deps("windows", "C:/Users/u", &[("APPDATA", "C:/A")])),
+        std::path::Path::new("C:/A/duolane")
+    );
+}
+
+#[test]
+fn empty_override_variables_are_treated_as_unset() {
+    assert_eq!(
+        paths::resolve_config_dir(&deps(
+            "linux",
+            "/home/u",
+            &[("DUOLANE_CONFIG_DIR", ""), ("XDG_CONFIG_HOME", "/x")]
+        )),
+        std::path::Path::new("/x/duolane")
+    );
+    assert_eq!(
+        paths::resolve_state_dir(&deps(
+            "linux",
+            "/home/u",
+            &[("DUOLANE_STATE_DIR", ""), ("XDG_STATE_HOME", "/s")]
+        )),
+        std::path::Path::new("/s/duolane")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hermetic_root_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let root = home.parent().unwrap();
+    assert!(
+        root.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("duolane-hermetic-")
+    );
+    let mode = std::fs::metadata(root).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+}
+
+#[test]
+fn every_test_binary_includes_the_hermetic_environment() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let include = "#[path = \"support/hermetic.rs\"]";
+    let mut checked = 0;
+    for entry in std::fs::read_dir(root.join("tests")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\r\n", "\n");
+        assert!(
+            source.contains(include),
+            "{} lacks {include}",
+            path.display()
+        );
+        checked += 1;
+    }
+    assert!(checked > 0);
+    let unit_include = "#[cfg(test)]\n#[path = \"../tests/support/hermetic.rs\"]";
+    for file in ["src/lib.rs", "src/main.rs"] {
+        let source = std::fs::read_to_string(root.join(file))
+            .unwrap()
+            .replace("\r\n", "\n");
+        assert!(
+            source.contains(unit_include),
+            "{file} lacks the unit-test include"
+        );
     }
 }
 

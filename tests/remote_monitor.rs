@@ -1,3 +1,6 @@
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
 use std::{
     net::SocketAddr,
     process::{Command, Stdio},
