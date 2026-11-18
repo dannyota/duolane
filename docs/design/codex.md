@@ -45,6 +45,8 @@ Codex serves two lanes: the full Responses API and Responses Lite.
 
 ## Request translation
 
+- A content block the translation cannot carry becomes the text
+  `[unsupported content block omitted: <type>]`, so the loss stays visible.
 - Reasoning output and encrypted reasoning are requested only when the resolved
   effort is not `none`. An explicit `none` still names the effort so it
   overrides the backend default.
@@ -136,6 +138,13 @@ account may still have credits, and the model then completes the response.
 
 ## Responses
 
+- A `response.incomplete` with reason `max_output_tokens` ends the turn with
+  `stop_reason: max_tokens`, or `finish_reason: length` on the chat route. Any
+  other incomplete reason is a failure.
+- A stream that ends while a tool call is still open, or that ends without a
+  terminal event, is reported as an error, never as a finished turn. The one
+  exception is a `Read` call whose complete arguments are followed by runaway
+  whitespace: duolane ends the turn with that call once its arguments parse.
 - The latest usable `codex.rate_limits` event is attached to the final usage
   block, as a duolane extension outside Anthropic's schema.
 - Reasoning tokens are reported as `thinking_tokens`, the name Claude Code
@@ -166,3 +175,7 @@ first-party source confirms them, so recheck them during live verification.
   `thinking_tokens`, the subagent counter, the `anthropic-ratelimit-unified-*`
   headers it reads, and sleeping for the full `Retry-After` value.
 - The tolerated `ping` event was observed from another Responses provider.
+- How often the WebSocket closes after a completed tool call but before the
+  terminal event. duolane reports that as an error; if Claude Code runs a tool
+  before the turn ends, its retry could run the tool twice. Count these cases
+  before deciding on an exception.

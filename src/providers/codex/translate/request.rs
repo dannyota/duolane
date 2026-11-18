@@ -8,7 +8,7 @@ use crate::anthropic::schema::MessagesRequest;
 use crate::config;
 use crate::providers::translate_shared::{
     ContentBlock, flatten_system_text, image_source_to_url, normalize_content, parallel_tool_calls,
-    read_effort, wrap_reasoning,
+    read_effort, unsupported_block_marker, wrap_reasoning,
 };
 
 use super::model_allowlist::service_tier_for_model;
@@ -984,7 +984,9 @@ fn build_input(req: &MessagesRequest, account: &ReasoningAccount) -> Vec<Respons
                                 output: function_call_output(rendered),
                             });
                         }
-                        _ => {}
+                        other => parts.push(ResponsesContentPart::InputText {
+                            text: other.unsupported_marker(),
+                        }),
                     }
                 }
                 if !parts.is_empty() {
@@ -997,11 +999,11 @@ fn build_input(req: &MessagesRequest, account: &ReasoningAccount) -> Vec<Respons
             "system" => {
                 let parts: Vec<ResponsesContentPart> = blocks
                     .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } => {
-                            Some(ResponsesContentPart::InputText { text: text.clone() })
-                        }
-                        _ => None,
+                    .map(|b| ResponsesContentPart::InputText {
+                        text: match b {
+                            ContentBlock::Text { text } => text.clone(),
+                            other => other.unsupported_marker(),
+                        },
                     })
                     .collect();
                 if !parts.is_empty() {
@@ -1055,7 +1057,9 @@ fn build_input(req: &MessagesRequest, account: &ReasoningAccount) -> Vec<Respons
                                 });
                             }
                         }
-                        _ => {}
+                        other => text_parts.push(ResponsesContentPart::OutputText {
+                            text: other.unsupported_marker(),
+                        }),
                     }
                 }
                 flush_text(&mut out, &mut text_parts);
@@ -1187,9 +1191,7 @@ fn render_tool_result_block(block: &Value) -> RenderedToolResultPart {
             Some(name) => RenderedToolResultPart::Text(format!("Tool loaded: {name}")),
             None => RenderedToolResultPart::Text(unsupported_tool_result_block_to_string(block)),
         },
-        Some(other) => {
-            RenderedToolResultPart::Text(format!("[unsupported content block omitted: {other}]"))
-        }
+        Some(other) => RenderedToolResultPart::Text(unsupported_block_marker(other)),
         None => RenderedToolResultPart::Text(unsupported_tool_result_block_to_string(block)),
     }
 }
@@ -1267,11 +1269,8 @@ fn function_call_output(rendered: RenderedToolResult) -> ResponsesFunctionCallOu
 }
 
 fn unsupported_tool_result_block_to_string(block: &Value) -> String {
-    let kind = block
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    format!("[unsupported content block omitted: {kind}]")
+    let kind = block.get("type").and_then(Value::as_str);
+    unsupported_block_marker(kind.unwrap_or("unknown"))
 }
 
 #[cfg(test)]
@@ -2684,6 +2683,46 @@ mod tests {
             "[unsupported content block omitted: text]\n[unsupported content block omitted: image]\n[unsupported content block omitted: unknown]"
         );
         assert!(!rendered.has_images());
+    }
+
+    #[test]
+    fn unsupported_message_blocks_become_markers() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [
+                {"role":"user", "content": [
+                    {"type": "text", "text": "summarize"},
+                    {"type": "document", "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": "JVBERi0="
+                    }},
+                    {"type": "image", "source": {"type": "file", "file_id": "file_1"}}
+                ]},
+                {"role":"assistant", "content": [
+                    {"type": "redacted_thinking", "data": "opaque"},
+                    {"type": "thinking", "thinking": "", "signature": ""},
+                    {"type": "text", "text": "done"}
+                ]}
+            ]
+        }))
+        .unwrap();
+
+        let out = translate_request(&req, opts()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&out.input).unwrap(),
+            json!([
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "summarize"},
+                    {"type": "input_text", "text": "[unsupported content block omitted: document]"},
+                    {"type": "input_text", "text": "[unsupported content block omitted: image]"}
+                ]},
+                {"type": "message", "role": "assistant", "content": [
+                    {"type": "output_text", "text": "[unsupported content block omitted: redacted_thinking]"},
+                    {"type": "output_text", "text": "done"}
+                ]}
+            ])
+        );
     }
 
     #[test]

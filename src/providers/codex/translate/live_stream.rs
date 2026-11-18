@@ -7,7 +7,6 @@ use crate::providers::codex::events::{
 };
 use crate::traffic::TrafficCapture;
 
-use super::IncompleteResponsePolicy;
 use super::read_rewrite::sanitize_read_args;
 use super::reasoning_signature::ReasoningSigner;
 use super::reducer::{
@@ -71,7 +70,6 @@ pub struct LiveStreamTranslator {
     deferred_text: Vec<(usize, String)>,
     semantic_output_started: bool,
     estimated_input_tokens: u64,
-    incomplete_response_policy: IncompleteResponsePolicy,
     finished: bool,
     rate_limits: Option<CodexRateLimits>,
 }
@@ -102,7 +100,6 @@ impl LiveStreamTranslator {
             deferred_text: Vec::new(),
             semantic_output_started: false,
             estimated_input_tokens,
-            incomplete_response_policy: IncompleteResponsePolicy::Error,
             finished: false,
             rate_limits: None,
         }
@@ -119,15 +116,6 @@ impl LiveStreamTranslator {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_incomplete_response_policy(
-        mut self,
-        policy: IncompleteResponsePolicy,
-    ) -> Self {
-        self.incomplete_response_policy = policy;
-        self
-    }
-
     pub fn accept(
         &mut self,
         payload: &serde_json::Value,
@@ -140,10 +128,7 @@ impl LiveStreamTranslator {
         let kind = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let mut out = Vec::new();
 
-        let allowed_incomplete = self.incomplete_response_policy
-            == IncompleteResponsePolicy::AllowMaxOutputTokens
-            && is_standard_max_output_tokens_incomplete(payload);
-        if !allowed_incomplete && let Some(failure) = classify_event_failure(payload) {
+        if let Some(failure) = classify_event_failure(payload) {
             return Err(failure.message);
         }
 
@@ -198,7 +183,7 @@ impl LiveStreamTranslator {
                 self.output_item_done(payload, traffic, &mut out);
             }
             "response.completed" | "response.incomplete" | "response.done" => {
-                self.finish(payload, traffic, &mut out);
+                self.finish(payload, traffic, &mut out)?;
             }
             _ => {}
         }
@@ -219,20 +204,6 @@ impl LiveStreamTranslator {
         if !self.finished {
             self.emit_ping(traffic, &mut out);
         }
-        out
-    }
-
-    pub fn finish_after_closed_completed_tool_call(
-        &mut self,
-        traffic: Option<&TrafficCapture>,
-    ) -> Vec<u8> {
-        let mut out = Vec::new();
-        if self.finished || !self.saw_tool_use || !self.blocks_by_output_index.is_empty() {
-            return out;
-        }
-        self.close_thinking(traffic, &mut out);
-        self.ensure_message_start(traffic, &mut out);
-        self.emit_finish(STOP_TOOL_USE, None, traffic, &mut out);
         out
     }
 
@@ -917,7 +888,14 @@ impl LiveStreamTranslator {
         payload: &serde_json::Value,
         traffic: Option<&TrafficCapture>,
         out: &mut Vec<u8>,
-    ) {
+    ) -> Result<(), String> {
+        if self
+            .blocks_by_output_index
+            .values()
+            .any(|block| matches!(block, LiveBlock::Tool { .. }))
+        {
+            return Err("upstream stream ended with an open Codex tool call".to_string());
+        }
         self.close_thinking(traffic, out);
         self.close_open_blocks(traffic, out);
         self.emit_web_searches(traffic, out);
@@ -926,10 +904,7 @@ impl LiveStreamTranslator {
         if let Some(usage) = usage.as_mut() {
             usage.rate_limits = self.rate_limits.clone().map(Box::new);
         }
-        let stop_reason = if self.incomplete_response_policy
-            == IncompleteResponsePolicy::AllowMaxOutputTokens
-            && is_standard_max_output_tokens_incomplete(payload)
-        {
+        let stop_reason = if is_standard_max_output_tokens_incomplete(payload) {
             STOP_MAX_TOKENS
         } else if self.saw_tool_use {
             STOP_TOOL_USE
@@ -937,6 +912,7 @@ impl LiveStreamTranslator {
             STOP_END_TURN
         };
         self.emit_finish(stop_reason, usage, traffic, out);
+        Ok(())
     }
 
     fn emit_finish(
@@ -986,7 +962,7 @@ impl LiveStreamTranslator {
                     continue;
                 }
                 LiveBlock::Text { index, .. } => index,
-                LiveBlock::Tool { index, .. } => index,
+                LiveBlock::Tool { .. } => continue,
             };
             self.emit(
                 traffic,
@@ -1323,27 +1299,8 @@ mod tests {
     }
 
     #[test]
-    fn strict_live_translator_rejects_incomplete_response() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
-        let error = translator
-            .accept(
-                &json!({
-                    "type":"response.incomplete",
-                    "response": {
-                        "status":"incomplete",
-                        "incomplete_details":{"reason":"max_output_tokens"}
-                    }
-                }),
-                None,
-            )
-            .unwrap_err();
-        assert!(error.contains("max_output_tokens"));
-    }
-
-    #[test]
-    fn standard_responses_policy_maps_max_output_tokens_to_message_stop() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.6-luna")
-            .with_incomplete_response_policy(IncompleteResponsePolicy::AllowMaxOutputTokens);
+    fn max_output_tokens_incomplete_is_a_max_tokens_stop() {
+        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.6-luna");
         let out = translator
             .accept(
                 &json!({
@@ -1366,10 +1323,9 @@ mod tests {
     }
 
     #[test]
-    fn standard_responses_policy_rejects_other_incomplete_reasons() {
+    fn other_incomplete_reasons_fail_the_stream() {
         for reason in ["content_filter", "unknown"] {
-            let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.6-luna")
-                .with_incomplete_response_policy(IncompleteResponsePolicy::AllowMaxOutputTokens);
+            let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.6-luna");
             assert!(
                 translator
                     .accept(
@@ -1524,40 +1480,42 @@ mod tests {
     }
 
     #[test]
-    fn websocket_compat_can_finish_after_closed_completed_tool_call() {
+    fn terminal_event_with_open_tool_call_fails_the_stream() {
         let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
         let mut out = Vec::new();
         for event in [
             json!({
                 "type": "response.output_item.added",
                 "output_index": 0,
-                "item": {"type":"function_call","call_id":"call_1","name":"WebSearch"}
+                "item": {"type":"function_call","call_id":"call_1","name":"Bash"}
             }),
             json!({
-                "type": "response.function_call_arguments.done",
+                "type": "response.function_call_arguments.delta",
                 "output_index": 0,
-                "arguments": "{\"query\":\"duolane github\"}"
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": {
-                    "type":"function_call",
-                    "call_id":"call_1",
-                    "name":"WebSearch",
-                    "arguments":"{\"query\":\"duolane github\"}"
-                }
+                "delta": "{\"command\":\"ls"
             }),
         ] {
             out.extend(translator.accept(&event, None).unwrap());
         }
-        out.extend(translator.finish_after_closed_completed_tool_call(None));
+        let error = translator
+            .accept(
+                &json!({
+                    "type": "response.completed",
+                    "response": {"id": "resp_1", "status": "completed", "usage": {}}
+                }),
+                None,
+            )
+            .unwrap_err();
+        out.extend(translator.error_chunk(&error, "api_error", None));
         let rendered = String::from_utf8(out).unwrap();
-        assert!(rendered.contains("content_block_start"));
-        assert!(rendered.contains("input_json_delta"));
-        assert!(rendered.contains(r#""stop_reason":"tool_use""#));
-        assert!(rendered.contains("message_stop"));
-        assert!(!rendered.contains("event: error"));
+        let tool_start = rendered.find(r#""type":"tool_use""#).unwrap();
+        assert!(rendered.contains("event: error"), "{rendered}");
+        assert!(!rendered.contains("event: message_delta"), "{rendered}");
+        assert!(!rendered.contains("message_stop"), "{rendered}");
+        assert!(
+            !rendered[tool_start..].contains("event: content_block_stop"),
+            "{rendered}"
+        );
     }
 
     #[test]
