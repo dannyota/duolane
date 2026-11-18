@@ -5,7 +5,7 @@
 - `cargo fmt --all -- --check`
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo test -- --test-threads=1`. Config tests mutate process-wide environment variables and race under the parallel runner.
-- `cargo deny check advisories`, which blocks merge once the plan's lockfile slice lands
+- `cargo deny check advisories`, which blocks merge
 
 ## Code rules
 
