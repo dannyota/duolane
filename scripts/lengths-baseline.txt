@@ -1,7 +1,1 @@
 # Ratchet caps at exact line counts. Never add entries or raise caps; lower a cap when its file shrinks.
-3030 src/providers/codex/client.rs
-1751 src/providers/codex/mod.rs
-1162 src/providers/codex/translate/live_stream.rs
-1097 src/providers/codex/translate/reducer.rs
-1275 src/providers/codex/translate/request.rs
-2331 src/providers/codex/websocket.rs

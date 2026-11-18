@@ -2,23 +2,17 @@ use std::collections::HashMap;
 
 use crate::anthropic::sse::encode_sse_event;
 use crate::providers::codex::count_tokens::count_translated_tokens;
-use crate::providers::codex::events::{
-    classify_event_failure, is_standard_max_output_tokens_incomplete,
-};
+use crate::providers::codex::events::classify_event_failure;
 use crate::traffic::TrafficCapture;
 
-use super::read_rewrite::sanitize_read_args;
 use super::reasoning_signature::ReasoningSigner;
-use super::reducer::{
-    CodexRateLimits, CodexUsage, STOP_END_TURN, STOP_MAX_TOKENS, STOP_TOOL_USE,
-    map_codex_usage_to_anthropic, parse_codex_rate_limits,
-};
+use super::reducer::{CodexRateLimits, CodexUsage, parse_codex_rate_limits};
 use super::request::ResponsesRequest;
 
-const BUFFERED_READ_REPAIR_TRAILING_WHITESPACE_BYTES: usize = 1_024;
-const BUFFERED_TOOL_MAX_ARGS_BYTES: usize = 5_000_000;
+pub(super) const BUFFERED_READ_REPAIR_TRAILING_WHITESPACE_BYTES: usize = 1_024;
+pub(super) const BUFFERED_TOOL_MAX_ARGS_BYTES: usize = 5_000_000;
 
-enum LiveBlock {
+pub(super) enum LiveBlock {
     Text {
         index: usize,
         text: String,
@@ -35,43 +29,43 @@ enum LiveBlock {
     },
 }
 
-struct LiveWebSearch {
-    index: usize,
-    result_index: usize,
-    id: String,
-    query: String,
+pub(super) struct LiveWebSearch {
+    pub(super) index: usize,
+    pub(super) result_index: usize,
+    pub(super) id: String,
+    pub(super) query: String,
 }
 
 #[derive(Clone)]
-struct LiveWebSearchResult {
-    title: String,
-    url: String,
+pub(super) struct LiveWebSearchResult {
+    pub(super) title: String,
+    pub(super) url: String,
 }
 
 #[derive(Clone, Copy)]
-struct LiveThinking {
-    output_index: usize,
-    anthropic_index: usize,
+pub(super) struct LiveThinking {
+    pub(super) output_index: usize,
+    pub(super) anthropic_index: usize,
 }
 
 pub struct LiveStreamTranslator {
     message_id: String,
     model: String,
     message_started: bool,
-    blocks_by_output_index: HashMap<usize, LiveBlock>,
-    item_id_to_output_index: HashMap<String, usize>,
-    anthropic_index: usize,
-    thinking: Option<LiveThinking>,
-    reasoning_by_output_index: ReasoningSigner,
-    saw_tool_use: bool,
-    web_search_requests: usize,
-    web_searches: Vec<LiveWebSearch>,
-    web_search_results: Vec<LiveWebSearchResult>,
-    deferred_text: Vec<(usize, String)>,
-    semantic_output_started: bool,
+    pub(super) blocks_by_output_index: HashMap<usize, LiveBlock>,
+    pub(super) item_id_to_output_index: HashMap<String, usize>,
+    pub(super) anthropic_index: usize,
+    pub(super) thinking: Option<LiveThinking>,
+    pub(super) reasoning_by_output_index: ReasoningSigner,
+    pub(super) saw_tool_use: bool,
+    pub(super) web_search_requests: usize,
+    pub(super) web_searches: Vec<LiveWebSearch>,
+    pub(super) web_search_results: Vec<LiveWebSearchResult>,
+    pub(super) deferred_text: Vec<(usize, String)>,
+    pub(super) semantic_output_started: bool,
     estimated_input_tokens: u64,
-    finished: bool,
-    rate_limits: Option<CodexRateLimits>,
+    pub(super) finished: bool,
+    pub(super) rate_limits: Option<CodexRateLimits>,
 }
 
 impl LiveStreamTranslator {
@@ -235,7 +229,11 @@ impl LiveStreamTranslator {
         out
     }
 
-    fn ensure_message_start(&mut self, traffic: Option<&TrafficCapture>, out: &mut Vec<u8>) {
+    pub(super) fn ensure_message_start(
+        &mut self,
+        traffic: Option<&TrafficCapture>,
+        out: &mut Vec<u8>,
+    ) {
         if self.message_started {
             return;
         }
@@ -268,7 +266,7 @@ impl LiveStreamTranslator {
         self.emit(traffic, out, "ping", &serde_json::json!({"type": "ping"}));
     }
 
-    fn emit(
+    pub(super) fn emit(
         &self,
         traffic: Option<&TrafficCapture>,
         out: &mut Vec<u8>,
@@ -286,769 +284,9 @@ impl LiveStreamTranslator {
         }
         out.extend_from_slice(&encode_sse_event(Some(event), &data.to_string()));
     }
-
-    fn output_item_added(
-        &mut self,
-        payload: &serde_json::Value,
-        traffic: Option<&TrafficCapture>,
-        out: &mut Vec<u8>,
-    ) {
-        let Some(item) = payload.get("item") else {
-            return;
-        };
-        let output_index = output_index(payload);
-        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-        match item_type {
-            "reasoning" => {
-                self.reasoning_by_output_index.capture(output_index, item);
-            }
-            "message" => {
-                self.close_thinking(traffic, out);
-                let index = self.anthropic_index;
-                self.anthropic_index += 1;
-                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                    self.item_id_to_output_index
-                        .insert(id.to_string(), output_index);
-                }
-                let deferred = !self.web_searches.is_empty();
-                self.blocks_by_output_index.insert(
-                    output_index,
-                    LiveBlock::Text {
-                        index,
-                        text: String::new(),
-                        deferred,
-                    },
-                );
-                if !deferred {
-                    self.ensure_message_start(traffic, out);
-                    self.emit(
-                        traffic,
-                        out,
-                        "content_block_start",
-                        &serde_json::json!({
-                            "type": "content_block_start",
-                            "index": index,
-                            "content_block": {"type": "text", "text": ""}
-                        }),
-                    );
-                }
-            }
-            "function_call" => {
-                self.close_thinking(traffic, out);
-                self.saw_tool_use = true;
-                let index = self.anthropic_index;
-                self.anthropic_index += 1;
-                let call_id = item
-                    .get("call_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let name = item
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                self.blocks_by_output_index.insert(
-                    output_index,
-                    LiveBlock::Tool {
-                        index,
-                        call_id: call_id.clone(),
-                        name: name.clone(),
-                        args_accum: String::new(),
-                        had_delta: false,
-                        buffer_until_done: name == "Read",
-                        emitted_args: false,
-                    },
-                );
-                self.ensure_message_start(traffic, out);
-                self.emit(
-                    traffic,
-                    out,
-                    "content_block_start",
-                    &serde_json::json!({
-                        "type": "content_block_start",
-                        "index": index,
-                        "content_block": {
-                            "type": "tool_use",
-                            "id": call_id,
-                            "name": name,
-                            "input": {}
-                        }
-                    }),
-                );
-            }
-            "web_search_call" => {
-                self.web_search_requests += 1;
-            }
-            _ => {}
-        }
-    }
-
-    fn reasoning_delta(
-        &mut self,
-        payload: &serde_json::Value,
-        traffic: Option<&TrafficCapture>,
-        out: &mut Vec<u8>,
-    ) {
-        let output_index = output_index(payload);
-        let delta = payload.get("delta").and_then(|v| v.as_str()).unwrap_or("");
-        if delta.is_empty() {
-            return;
-        }
-        self.semantic_output_started = true;
-        if self.thinking.map(|thinking| thinking.output_index) != Some(output_index) {
-            self.close_thinking(traffic, out);
-            let index = self.anthropic_index;
-            self.anthropic_index += 1;
-            self.thinking = Some(LiveThinking {
-                output_index,
-                anthropic_index: index,
-            });
-            self.ensure_message_start(traffic, out);
-            self.emit(
-                traffic,
-                out,
-                "content_block_start",
-                &serde_json::json!({
-                    "type": "content_block_start",
-                    "index": index,
-                    "content_block": {"type": "thinking", "thinking": "", "signature": ""}
-                }),
-            );
-        }
-        let index = self
-            .thinking
-            .expect("thinking block was started")
-            .anthropic_index;
-        self.emit(
-            traffic,
-            out,
-            "content_block_delta",
-            &serde_json::json!({
-                "type": "content_block_delta",
-                "index": index,
-                "delta": {"type": "thinking_delta", "thinking": delta}
-            }),
-        );
-    }
-
-    fn text_delta(
-        &mut self,
-        payload: &serde_json::Value,
-        traffic: Option<&TrafficCapture>,
-        out: &mut Vec<u8>,
-    ) {
-        self.close_thinking(traffic, out);
-        let delta = payload.get("delta").and_then(|v| v.as_str()).unwrap_or("");
-        if delta.is_empty() {
-            return;
-        }
-        self.semantic_output_started = true;
-
-        let output_index = payload
-            .get("output_index")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .or_else(|| {
-                payload
-                    .get("item_id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|id| self.item_id_to_output_index.get(id).copied())
-            })
-            .unwrap_or(0);
-
-        if !self.blocks_by_output_index.contains_key(&output_index) {
-            let index = self.anthropic_index;
-            self.anthropic_index += 1;
-            let deferred = !self.web_searches.is_empty();
-            self.blocks_by_output_index.insert(
-                output_index,
-                LiveBlock::Text {
-                    index,
-                    text: String::new(),
-                    deferred,
-                },
-            );
-            if !deferred {
-                self.ensure_message_start(traffic, out);
-                self.emit(
-                    traffic,
-                    out,
-                    "content_block_start",
-                    &serde_json::json!({
-                        "type": "content_block_start",
-                        "index": index,
-                        "content_block": {"type": "text", "text": ""}
-                    }),
-                );
-            }
-        }
-
-        let Some(LiveBlock::Text {
-            index,
-            text,
-            deferred,
-        }) = self.blocks_by_output_index.get_mut(&output_index)
-        else {
-            return;
-        };
-        text.push_str(delta);
-        if *deferred {
-            return;
-        }
-        let index = *index;
-        self.emit(
-            traffic,
-            out,
-            "content_block_delta",
-            &serde_json::json!({
-                "type": "content_block_delta",
-                "index": index,
-                "delta": {"type": "text_delta", "text": delta}
-            }),
-        );
-    }
-
-    fn tool_delta(
-        &mut self,
-        payload: &serde_json::Value,
-        traffic: Option<&TrafficCapture>,
-        out: &mut Vec<u8>,
-    ) -> Result<(), String> {
-        let Some(output_index) = payload
-            .get("output_index")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-        else {
-            return Ok(());
-        };
-        let delta = payload.get("delta").and_then(|v| v.as_str()).unwrap_or("");
-        if delta.is_empty() {
-            return Ok(());
-        }
-        self.semantic_output_started = true;
-        let mut repaired_read: Option<(usize, String)> = None;
-        let Some(LiveBlock::Tool {
-            index,
-            call_id,
-            name,
-            args_accum,
-            had_delta,
-            buffer_until_done,
-            emitted_args,
-            ..
-        }) = self.blocks_by_output_index.get_mut(&output_index)
-        else {
-            return Ok(());
-        };
-        args_accum.push_str(delta);
-        *had_delta = true;
-        if *buffer_until_done {
-            if args_accum.len() > BUFFERED_TOOL_MAX_ARGS_BYTES {
-                return Err(format!(
-                    "Buffered {name} tool arguments exceeded safe limits"
-                ));
-            }
-            if let Some(repaired) =
-                repair_whitespace_stalled_read_args(name, args_accum, Some(call_id.as_str()))
-            {
-                *args_accum = repaired.clone();
-                *emitted_args = true;
-                repaired_read = Some((*index, repaired));
-            }
-        } else {
-            *emitted_args = true;
-            let index = *index;
-            self.semantic_output_started = true;
-            self.emit(
-                traffic,
-                out,
-                "content_block_delta",
-                &serde_json::json!({
-                    "type": "content_block_delta",
-                    "index": index,
-                    "delta": {
-                        "type": "input_json_delta",
-                        "partial_json": delta
-                    }
-                }),
-            );
-            return Ok(());
-        }
-        if let Some((index, repaired)) = repaired_read {
-            self.blocks_by_output_index.remove(&output_index);
-            self.semantic_output_started = true;
-            self.emit(
-                traffic,
-                out,
-                "content_block_delta",
-                &serde_json::json!({
-                    "type": "content_block_delta",
-                    "index": index,
-                    "delta": {
-                        "type": "input_json_delta",
-                        "partial_json": repaired
-                    }
-                }),
-            );
-            self.emit(
-                traffic,
-                out,
-                "content_block_stop",
-                &serde_json::json!({
-                    "type": "content_block_stop",
-                    "index": index,
-                }),
-            );
-            self.ensure_message_start(traffic, out);
-            self.emit_finish(STOP_TOOL_USE, None, traffic, out);
-        }
-        Ok(())
-    }
-
-    fn tool_arguments_done(&mut self, payload: &serde_json::Value) {
-        let Some(output_index) = payload
-            .get("output_index")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-        else {
-            return;
-        };
-        let Some(args) = payload.get("arguments").and_then(|v| v.as_str()) else {
-            return;
-        };
-        let Some(LiveBlock::Tool { args_accum, .. }) =
-            self.blocks_by_output_index.get_mut(&output_index)
-        else {
-            return;
-        };
-        if args_accum.is_empty() {
-            *args_accum = args.to_string();
-        }
-    }
-
-    fn output_item_done(
-        &mut self,
-        payload: &serde_json::Value,
-        traffic: Option<&TrafficCapture>,
-        out: &mut Vec<u8>,
-    ) {
-        let output_index = output_index(payload);
-        if let Some(item) = payload
-            .get("item")
-            .and_then(|item| item.get("type"))
-            .and_then(|v| v.as_str())
-            .filter(|item_type| *item_type == "reasoning")
-            .and_then(|_| payload.get("item"))
-        {
-            self.reasoning_by_output_index.capture(output_index, item);
-            let had_active_summary = self
-                .thinking
-                .is_some_and(|thinking| thinking.output_index == output_index);
-            self.close_thinking(traffic, out);
-            if !had_active_summary {
-                self.emit_signature_only_reasoning(output_index, traffic, out);
-            }
-            return;
-        }
-
-        if payload
-            .get("item")
-            .and_then(|item| item.get("type"))
-            .and_then(|v| v.as_str())
-            == Some("web_search_call")
-        {
-            self.close_thinking(traffic, out);
-            self.semantic_output_started = true;
-            let item = &payload["item"];
-            let index = self.anthropic_index;
-            self.anthropic_index += 1;
-            let result_index = self.anthropic_index;
-            self.anthropic_index += 1;
-            let raw_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            self.web_searches.push(LiveWebSearch {
-                index,
-                result_index,
-                id: super::web_search_compat::server_tool_use_id_from_codex_web_search_id(raw_id),
-                query: web_search_query(item),
-            });
-            return;
-        }
-
-        let Some(mut state) = self.blocks_by_output_index.remove(&output_index) else {
-            return;
-        };
-
-        match &mut state {
-            LiveBlock::Text {
-                index,
-                text,
-                deferred,
-            } => {
-                if *deferred {
-                    self.deferred_text.push((*index, std::mem::take(text)));
-                } else {
-                    self.emit(
-                        traffic,
-                        out,
-                        "content_block_stop",
-                        &serde_json::json!({
-                            "type": "content_block_stop",
-                            "index": index,
-                        }),
-                    );
-                }
-            }
-            LiveBlock::Tool {
-                index,
-                name,
-                call_id,
-                args_accum,
-                had_delta,
-                buffer_until_done,
-                emitted_args,
-                ..
-            } => {
-                self.semantic_output_started = true;
-                if let Some(final_args) = payload
-                    .get("item")
-                    .and_then(|item| item.get("arguments"))
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    && (args_accum.is_empty() || (!*had_delta && !*emitted_args))
-                {
-                    *args_accum = final_args.to_string();
-                }
-                if !args_accum.is_empty() {
-                    *args_accum = sanitize_read_args(name, args_accum, Some(call_id.as_str()));
-                    if *buffer_until_done || !*emitted_args {
-                        *emitted_args = true;
-                        self.emit(
-                            traffic,
-                            out,
-                            "content_block_delta",
-                            &serde_json::json!({
-                                "type": "content_block_delta",
-                                "index": index,
-                                "delta": {
-                                    "type": "input_json_delta",
-                                    "partial_json": args_accum
-                                }
-                            }),
-                        );
-                    }
-                }
-                self.emit(
-                    traffic,
-                    out,
-                    "content_block_stop",
-                    &serde_json::json!({
-                        "type": "content_block_stop",
-                        "index": index,
-                    }),
-                );
-            }
-        }
-    }
-
-    fn web_search_annotation(&mut self, payload: &serde_json::Value) {
-        let Some(annotation) = payload.get("annotation") else {
-            return;
-        };
-        if annotation.get("type").and_then(|v| v.as_str()) != Some("url_citation") {
-            return;
-        }
-        let Some(url) = annotation.get("url").and_then(|v| v.as_str()) else {
-            return;
-        };
-        if self
-            .web_search_results
-            .iter()
-            .any(|result| result.url == url)
-        {
-            return;
-        }
-        let title = annotation
-            .get("title")
-            .and_then(|v| v.as_str())
-            .filter(|title| !title.is_empty())
-            .unwrap_or(url);
-        self.web_search_results.push(LiveWebSearchResult {
-            title: title.to_string(),
-            url: url.to_string(),
-        });
-    }
-
-    fn emit_web_searches(&mut self, traffic: Option<&TrafficCapture>, out: &mut Vec<u8>) {
-        let searches = std::mem::take(&mut self.web_searches);
-        for search in searches {
-            self.ensure_message_start(traffic, out);
-            self.emit(
-                traffic,
-                out,
-                "content_block_start",
-                &serde_json::json!({
-                    "type": "content_block_start",
-                    "index": search.index,
-                    "content_block": {
-                        "type": "server_tool_use",
-                        "id": search.id,
-                        "name": "web_search",
-                        "input": {}
-                    }
-                }),
-            );
-            self.emit(
-                traffic,
-                out,
-                "content_block_delta",
-                &serde_json::json!({
-                    "type": "content_block_delta",
-                    "index": search.index,
-                    "delta": {
-                        "type": "input_json_delta",
-                        "partial_json": serde_json::to_string(&serde_json::json!({"query": search.query})).unwrap_or_default()
-                    }
-                }),
-            );
-            self.emit(
-                traffic,
-                out,
-                "content_block_stop",
-                &serde_json::json!({"type": "content_block_stop", "index": search.index}),
-            );
-            let results: Vec<_> = self
-                .web_search_results
-                .iter()
-                .map(|result| {
-                    serde_json::json!({
-                        "type": "web_search_result",
-                        "title": result.title,
-                        "url": result.url,
-                    })
-                })
-                .collect();
-            self.emit(
-                traffic,
-                out,
-                "content_block_start",
-                &serde_json::json!({
-                    "type": "content_block_start",
-                    "index": search.result_index,
-                    "content_block": {
-                        "type": "web_search_tool_result",
-                        "tool_use_id": search.id,
-                        "content": results
-                    }
-                }),
-            );
-            self.emit(
-                traffic,
-                out,
-                "content_block_stop",
-                &serde_json::json!({"type": "content_block_stop", "index": search.result_index}),
-            );
-        }
-
-        for (index, text) in std::mem::take(&mut self.deferred_text) {
-            self.emit(
-                traffic,
-                out,
-                "content_block_start",
-                &serde_json::json!({
-                    "type": "content_block_start",
-                    "index": index,
-                    "content_block": {"type": "text", "text": ""}
-                }),
-            );
-            if !text.is_empty() {
-                self.emit(
-                    traffic,
-                    out,
-                    "content_block_delta",
-                    &serde_json::json!({
-                        "type": "content_block_delta",
-                        "index": index,
-                        "delta": {"type": "text_delta", "text": text}
-                    }),
-                );
-            }
-            self.emit(
-                traffic,
-                out,
-                "content_block_stop",
-                &serde_json::json!({"type": "content_block_stop", "index": index}),
-            );
-        }
-    }
-
-    fn finish(
-        &mut self,
-        payload: &serde_json::Value,
-        traffic: Option<&TrafficCapture>,
-        out: &mut Vec<u8>,
-    ) -> Result<(), String> {
-        if self
-            .blocks_by_output_index
-            .values()
-            .any(|block| matches!(block, LiveBlock::Tool { .. }))
-        {
-            return Err("upstream stream ended with an open Codex tool call".to_string());
-        }
-        self.close_thinking(traffic, out);
-        self.close_open_blocks(traffic, out);
-        self.emit_web_searches(traffic, out);
-        self.ensure_message_start(traffic, out);
-        let mut usage = payload.get("response").map(parse_codex_usage);
-        if let Some(usage) = usage.as_mut() {
-            usage.rate_limits = self.rate_limits.clone().map(Box::new);
-        }
-        let stop_reason = if is_standard_max_output_tokens_incomplete(payload) {
-            STOP_MAX_TOKENS
-        } else if self.saw_tool_use {
-            STOP_TOOL_USE
-        } else {
-            STOP_END_TURN
-        };
-        self.emit_finish(stop_reason, usage, traffic, out);
-        Ok(())
-    }
-
-    fn emit_finish(
-        &mut self,
-        stop_reason: &str,
-        usage: Option<CodexUsage>,
-        traffic: Option<&TrafficCapture>,
-        out: &mut Vec<u8>,
-    ) {
-        let mapped = map_codex_usage_to_anthropic(&usage, Some(self.web_search_requests));
-        self.emit(
-            traffic,
-            out,
-            "message_delta",
-            &serde_json::json!({
-                "type": "message_delta",
-                "delta": {
-                    "stop_reason": stop_reason,
-                    "stop_sequence": null
-                },
-                "usage": mapped,
-            }),
-        );
-        self.emit(
-            traffic,
-            out,
-            "message_stop",
-            &serde_json::json!({"type": "message_stop"}),
-        );
-        self.finished = true;
-    }
-
-    fn close_open_blocks(&mut self, traffic: Option<&TrafficCapture>, out: &mut Vec<u8>) {
-        self.close_thinking(traffic, out);
-        let open: Vec<usize> = self.blocks_by_output_index.keys().copied().collect();
-        for output_index in open {
-            let Some(state) = self.blocks_by_output_index.remove(&output_index) else {
-                continue;
-            };
-            let index = match state {
-                LiveBlock::Text {
-                    index,
-                    text,
-                    deferred: true,
-                } => {
-                    self.deferred_text.push((index, text));
-                    continue;
-                }
-                LiveBlock::Text { index, .. } => index,
-                LiveBlock::Tool { .. } => continue,
-            };
-            self.emit(
-                traffic,
-                out,
-                "content_block_stop",
-                &serde_json::json!({
-                    "type": "content_block_stop",
-                    "index": index,
-                }),
-            );
-        }
-    }
-
-    fn emit_signature_only_reasoning(
-        &mut self,
-        output_index: usize,
-        traffic: Option<&TrafficCapture>,
-        out: &mut Vec<u8>,
-    ) {
-        let Some((_, signature)) = self.reasoning_by_output_index.take(output_index) else {
-            return;
-        };
-        self.semantic_output_started = true;
-        let index = self.anthropic_index;
-        self.anthropic_index += 1;
-        self.ensure_message_start(traffic, out);
-        self.emit(
-            traffic,
-            out,
-            "content_block_start",
-            &serde_json::json!({
-                "type": "content_block_start",
-                "index": index,
-                "content_block": {"type": "thinking", "thinking": "", "signature": ""}
-            }),
-        );
-        self.emit(
-            traffic,
-            out,
-            "content_block_delta",
-            &serde_json::json!({
-                "type": "content_block_delta",
-                "index": index,
-                "delta": {"type": "signature_delta", "signature": signature}
-            }),
-        );
-        self.emit(
-            traffic,
-            out,
-            "content_block_stop",
-            &serde_json::json!({
-                "type": "content_block_stop",
-                "index": index,
-            }),
-        );
-    }
-
-    fn close_thinking(&mut self, traffic: Option<&TrafficCapture>, out: &mut Vec<u8>) {
-        let Some(thinking) = self.thinking.take() else {
-            return;
-        };
-        if let Some((_, signature)) = self.reasoning_by_output_index.take(thinking.output_index) {
-            self.emit(
-                traffic,
-                out,
-                "content_block_delta",
-                &serde_json::json!({
-                    "type": "content_block_delta",
-                    "index": thinking.anthropic_index,
-                    "delta": {"type": "signature_delta", "signature": signature}
-                }),
-            );
-        }
-        self.emit(
-            traffic,
-            out,
-            "content_block_stop",
-            &serde_json::json!({
-                "type": "content_block_stop",
-                "index": thinking.anthropic_index,
-            }),
-        );
-    }
 }
 
-fn web_search_query(item: &serde_json::Value) -> String {
+pub(super) fn web_search_query(item: &serde_json::Value) -> String {
     let Some(action) = item.get("action") else {
         return String::new();
     };
@@ -1065,14 +303,14 @@ fn web_search_query(item: &serde_json::Value) -> String {
         .to_string()
 }
 
-fn output_index(payload: &serde_json::Value) -> usize {
+pub(super) fn output_index(payload: &serde_json::Value) -> usize {
     payload
         .get("output_index")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize
 }
 
-fn parse_codex_usage(response: &serde_json::Value) -> CodexUsage {
+pub(super) fn parse_codex_usage(response: &serde_json::Value) -> CodexUsage {
     let usage = match response.get("usage") {
         Some(u) => u,
         None => return CodexUsage::default(),
@@ -1092,79 +330,13 @@ fn parse_codex_usage(response: &serde_json::Value) -> CodexUsage {
     }
 }
 
-fn repair_whitespace_stalled_read_args(
-    name: &str,
-    args: &str,
-    call_id: Option<&str>,
-) -> Option<String> {
-    if name != "Read" {
-        return None;
-    }
-    let trimmed = args.trim_end();
-    let trailing_whitespace = args.len().saturating_sub(trimmed.len());
-    if trailing_whitespace < BUFFERED_READ_REPAIR_TRAILING_WHITESPACE_BYTES {
-        return None;
-    }
-    parse_read_args_candidate(trimmed, call_id).or_else(|| {
-        let with_brace = format!("{trimmed}}}");
-        parse_read_args_candidate(&with_brace, call_id)
-    })
-}
-
-fn parse_read_args_candidate(args: &str, call_id: Option<&str>) -> Option<String> {
-    let parsed: serde_json::Value = serde_json::from_str(args).ok()?;
-    if !is_valid_read_args(&parsed) {
-        return None;
-    }
-    Some(sanitize_read_args(
-        "Read",
-        &serde_json::to_string(&parsed).ok()?,
-        call_id,
-    ))
-}
-
-fn is_valid_read_args(value: &serde_json::Value) -> bool {
-    let Some(obj) = value.as_object() else {
-        return false;
-    };
-    for key in obj.keys() {
-        if !matches!(key.as_str(), "file_path" | "offset" | "limit" | "pages") {
-            return false;
-        }
-    }
-    let Some(file_path) = obj.get("file_path").and_then(|v| v.as_str()) else {
-        return false;
-    };
-    if file_path.is_empty() {
-        return false;
-    }
-    if let Some(offset) = obj.get("offset").and_then(|v| v.as_i64())
-        && offset < 0
-    {
-        return false;
-    }
-    if let Some(limit) = obj.get("limit").and_then(|v| v.as_i64())
-        && limit <= 0
-    {
-        return false;
-    }
-    if obj.get("offset").is_some_and(|v| !v.is_i64()) {
-        return false;
-    }
-    if obj.get("limit").is_some_and(|v| !v.is_i64()) {
-        return false;
-    }
-    if obj.get("pages").is_some_and(|v| !v.is_string()) {
-        return false;
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::anthropic::sse::parse_sse_events;
     use serde_json::json;
+
+    use crate::anthropic::sse::parse_sse_events;
+
+    use super::*;
 
     fn render(events: Vec<serde_json::Value>) -> String {
         render_with(LiveStreamTranslator::new("msg_1", "gpt-5.5"), events)
