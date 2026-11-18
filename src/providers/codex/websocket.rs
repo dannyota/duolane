@@ -18,18 +18,19 @@ use tokio_tungstenite::{
         Message,
         client::IntoClientRequest,
         handshake::{client::generate_key, derive_accept_key},
-        protocol::Role,
+        protocol::{Role, WebSocketConfig},
     },
 };
 
 use crate::logging::create_logger;
-use crate::provider::RequestContext;
+use crate::provider::{MAX_BUFFERED_RESPONSE_BYTES, RequestContext};
 use crate::request_identity::ConversationIdentity;
 use crate::retry::sleep as retry_sleep;
 use crate::traffic::TrafficCapture;
 
 use super::client::{
-    ActualTransport, CodexError, CodexErrorOrigin, CodexResponse, OwnerAwareCodexResponse,
+    ActualTransport, CodexError, CodexErrorOrigin, CodexResponse, MAX_UPSTREAM_FRAME_BYTES,
+    OwnerAwareCodexResponse,
 };
 use super::continuation::ContinuationReservation;
 
@@ -861,7 +862,7 @@ pub(super) async fn codex_websocket_request(
 
     if let Some(tc) = traffic {
         write_websocket_metadata_capture(tc, &ws_url, reservation, used_pooled);
-        write_websocket_response_capture(tc, status, started_at.elapsed(), &sse_body);
+        write_websocket_response_capture(tc, status, started_at.elapsed());
     }
 
     Ok(OwnerAwareCodexResponse::new(
@@ -1137,6 +1138,29 @@ fn missing_terminal_error() -> CodexError {
     }
 }
 
+fn websocket_stream_error(message: impl Into<String>) -> CodexError {
+    CodexError {
+        status: 0,
+        message: message.into(),
+        detail: None,
+        retry_after: None,
+        usage_limit: None,
+        origin: CodexErrorOrigin::WebSocket,
+    }
+}
+
+fn websocket_idle_timeout_error(timeout_ms: u64) -> CodexError {
+    websocket_stream_error(format!("WebSocket idle timeout after {timeout_ms}ms"))
+}
+
+fn websocket_config() -> WebSocketConfig {
+    WebSocketConfig {
+        max_message_size: Some(MAX_UPSTREAM_FRAME_BYTES),
+        max_frame_size: Some(MAX_UPSTREAM_FRAME_BYTES),
+        ..WebSocketConfig::default()
+    }
+}
+
 fn response_start_timeout_error(timeout_ms: u64) -> CodexError {
     CodexError {
         status: 0,
@@ -1177,12 +1201,7 @@ fn write_websocket_metadata_capture(
     );
 }
 
-fn write_websocket_response_capture(
-    traffic: &TrafficCapture,
-    status: u16,
-    elapsed: Duration,
-    sse_body: &[u8],
-) {
+fn write_websocket_response_capture(traffic: &TrafficCapture, status: u16, elapsed: Duration) {
     traffic.write_json(
         "030-upstream-response-headers",
         &serde_json::json!({
@@ -1193,14 +1212,6 @@ fn write_websocket_response_capture(
             },
         }),
     );
-    if status >= 400 {
-        traffic.write_text(
-            "031-upstream-error-body",
-            &String::from_utf8_lossy(sse_body),
-        );
-    } else {
-        traffic.write_bytes("032-upstream-response-body.sse", sse_body);
-    }
 }
 
 const MAX_HANDSHAKE_ERROR_DETAIL_BYTES: usize = 1024;
@@ -1754,10 +1765,11 @@ async fn connect_via_http_proxy_tunnel(
     let subprotocols = requested_subprotocols(headers);
     let request = tunneled_websocket_request(url, headers, &websocket_key)
         .map_err(ConnectAttemptError::Origin)?;
-    let (websocket, response) = tokio_tungstenite::client_async(request, stream)
-        .await
-        .map_err(tungstenite_handshake_error)
-        .map_err(ConnectAttemptError::Origin)?;
+    let (websocket, response) =
+        tokio_tungstenite::client_async_with_config(request, stream, Some(websocket_config()))
+            .await
+            .map_err(tungstenite_handshake_error)
+            .map_err(ConnectAttemptError::Origin)?;
     validate_websocket_upgrade(
         response.version(),
         response.headers(),
@@ -1833,7 +1845,7 @@ async fn connect_via_http_upgrade(
         .await
         .map_err(|_| websocket_protocol_error("WebSocket upgrade stream was not available"))?;
     let upgraded: BoxedWebSocketIo = Box::new(upgraded);
-    Ok(WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await)
+    Ok(WebSocketStream::from_raw_socket(upgraded, Role::Client, Some(websocket_config())).await)
 }
 
 async fn connect_once(
@@ -2017,14 +2029,7 @@ where
                 Some(remaining) if !remaining.is_zero() => remaining,
                 _ => {
                     invalidate_pool_owner(pool_owner, pool_entry);
-                    return Err(CodexError {
-                        status: 0,
-                        message: format!("WebSocket idle timeout after {idle_timeout_ms}ms"),
-                        detail: None,
-                        retry_after: None,
-                        usage_limit: None,
-                        origin: CodexErrorOrigin::WebSocket,
-                    });
+                    return Err(websocket_idle_timeout_error(idle_timeout_ms));
                 }
             }
         } else {
@@ -2042,14 +2047,7 @@ where
             WebSocketRead::Timeout => {
                 invalidate_pool_owner(pool_owner, pool_entry);
                 return Err(if response_started {
-                    CodexError {
-                        status: 0,
-                        message: format!("WebSocket idle timeout after {idle_timeout_ms}ms"),
-                        detail: None,
-                        retry_after: None,
-                        usage_limit: None,
-                        origin: CodexErrorOrigin::WebSocket,
-                    }
+                    websocket_idle_timeout_error(idle_timeout_ms)
                 } else {
                     response_start_timeout_error(idle_timeout_ms)
                 });
@@ -2069,6 +2067,12 @@ where
 
         match frame {
             Some(Ok(Message::Text(text))) => {
+                if sse_body.len().saturating_add(text.len()) > MAX_BUFFERED_RESPONSE_BYTES {
+                    invalidate_pool_owner(pool_owner, pool_entry);
+                    return Err(websocket_stream_error(
+                        "Codex WebSocket response exceeds the size limit",
+                    ));
+                }
                 let parsed: serde_json::Value = match serde_json::from_str(&text) {
                     Ok(v) => v,
                     Err(_) => {
@@ -2110,14 +2114,9 @@ where
             }
             Some(Ok(Message::Binary(_))) => {
                 invalidate_pool_owner(pool_owner, pool_entry);
-                return Err(CodexError {
-                    status: 0,
-                    message: "WebSocket binary frames not supported".to_string(),
-                    detail: None,
-                    retry_after: None,
-                    usage_limit: None,
-                    origin: CodexErrorOrigin::WebSocket,
-                });
+                return Err(websocket_stream_error(
+                    "WebSocket binary frames not supported",
+                ));
             }
             Some(Ok(Message::Ping(data))) => {
                 let _ = ws.send(Message::Pong(data)).await;
@@ -2135,14 +2134,9 @@ where
             }
             Some(Err(e)) => {
                 invalidate_pool_owner(pool_owner, pool_entry);
-                return Err(CodexError {
-                    status: 0,
-                    message: format!("WebSocket stream error: {e}"),
-                    detail: None,
-                    retry_after: None,
-                    usage_limit: None,
-                    origin: CodexErrorOrigin::WebSocket,
-                });
+                return Err(websocket_stream_error(format!(
+                    "WebSocket stream error: {e}"
+                )));
             }
             None => {
                 invalidate_pool_owner(pool_owner, pool_entry);
@@ -2164,7 +2158,6 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let started_at = Instant::now();
-    let mut sse_body: Vec<u8> = Vec::new();
     let response_event_budget = Duration::from_millis(idle_timeout_ms);
     let response_wait_started = Instant::now();
     let mut last_response_event_at = response_wait_started;
@@ -2184,14 +2177,7 @@ where
                 Some(remaining) if !remaining.is_zero() => remaining,
                 _ => {
                     terminal_item = Some(Err(if response_started {
-                        CodexError {
-                            status: 0,
-                            message: format!("WebSocket idle timeout after {idle_timeout_ms}ms"),
-                            detail: None,
-                            retry_after: None,
-                            usage_limit: None,
-                            origin: CodexErrorOrigin::WebSocket,
-                        }
+                        websocket_idle_timeout_error(idle_timeout_ms)
                     } else {
                         response_start_timeout_error(idle_timeout_ms)
                     }));
@@ -2210,14 +2196,7 @@ where
                 WebSocketRead::Frame(frame) => frame,
                 WebSocketRead::Timeout => {
                     terminal_item = Some(Err(if response_started {
-                        CodexError {
-                            status: 0,
-                            message: format!("WebSocket idle timeout after {idle_timeout_ms}ms"),
-                            detail: None,
-                            retry_after: None,
-                            usage_limit: None,
-                            origin: CodexErrorOrigin::WebSocket,
-                        }
+                        websocket_idle_timeout_error(idle_timeout_ms)
                     } else {
                         response_start_timeout_error(idle_timeout_ms)
                     }));
@@ -2251,12 +2230,10 @@ where
                                 }),
                             );
                         }
-                        sse_body.extend_from_slice(&encode_sse(&text));
                         continue;
                     }
                 };
 
-                sse_body.extend_from_slice(&encode_sse(&text));
                 if let Some(tc) = traffic.as_deref() {
                     tc.write_json_event("040-upstream-event", &parsed);
                 }
@@ -2325,7 +2302,7 @@ where
     }
 
     if let Some(tc) = traffic.as_deref() {
-        write_websocket_response_capture(tc, status, started_at.elapsed(), &sse_body);
+        write_websocket_response_capture(tc, status, started_at.elapsed());
     }
     (reusable, terminal_item)
 }

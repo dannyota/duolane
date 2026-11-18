@@ -545,16 +545,6 @@ impl NativeResponseObserver {
         let Some(traffic) = self.ctx.traffic.as_deref() else {
             return;
         };
-        if !self.raw.is_empty() {
-            traffic.write_bytes(
-                if self.is_sse {
-                    "032-upstream-response-body.sse"
-                } else {
-                    "032-upstream-response-body.json"
-                },
-                &self.raw,
-            );
-        }
         for event in &self.captured_events {
             traffic.write_json_event("040-upstream-event", event);
         }

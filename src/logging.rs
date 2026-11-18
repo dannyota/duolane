@@ -1,3 +1,4 @@
+use crate::text::{terminal_text, truncate_at_char_boundary};
 use crate::{config, paths};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -5,13 +6,17 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const MAX_LOG_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_ROTATED_LOGS: usize = 5;
+const MAX_LOGGED_STRING_BYTES: usize = 4_000;
 
 static STDERR_SUPPRESSION_DEPTH: AtomicUsize = AtomicUsize::new(0);
+static LOG_ROTATION_LOCK: Mutex<()> = Mutex::new(());
 
-pub const REDACT_KEYS: [&str; 16] = [
+pub const REDACT_KEYS: [&str; 15] = [
     "authorization",
     "proxy-authorization",
     "access",
@@ -19,7 +24,6 @@ pub const REDACT_KEYS: [&str; 16] = [
     "refresh",
     "refresh_token",
     "id_token",
-    "code",
     "code_verifier",
     "chatgpt-account-id",
     "cookie",
@@ -107,7 +111,7 @@ impl Logger {
 
         let mirror_to_stderr = should_mirror_to_stderr(level);
         if mirror_to_stderr {
-            let _ = writeln!(io::stderr(), "{line}");
+            let _ = writeln!(io::stderr(), "{}", terminal_text(&line));
         }
 
         let _ = write_log_line(&line);
@@ -127,11 +131,21 @@ fn write_log_line(line: &str) -> io::Result<()> {
         create_dir(dir, 0o700)?;
     }
 
-    if fs::metadata(&file).is_ok_and(|meta| meta.len() > MAX_LOG_BYTES) {
-        rotate_file(&file)?;
+    {
+        let _rotation = LOG_ROTATION_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if fs::metadata(&file).is_ok_and(|meta| meta.len() > MAX_LOG_BYTES) {
+            rotate_file(&file)?;
+            prune_rotated_logs(&file);
+        }
     }
 
-    let mut out = OpenOptions::new().create(true).append(true).open(&file)?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut out = options.open(&file)?;
     out.write_all(line.as_bytes())?;
     out.write_all(b"\n")?;
     Ok(())
@@ -145,6 +159,34 @@ fn rotate_file(path: &Path) -> io::Result<()> {
     let rotated = path.with_extension(format!("{ts}"));
     fs::rename(path, rotated)?;
     Ok(())
+}
+
+fn prune_rotated_logs(path: &Path) {
+    let (Some(dir), Some(stem)) = (
+        path.parent(),
+        path.file_stem().and_then(|stem| stem.to_str()),
+    ) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut rotated: Vec<(u128, std::path::PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let suffix = name.strip_prefix(stem)?.strip_prefix('.')?;
+            let stamp = suffix.parse::<u128>().ok()?;
+            suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+                .then(|| (stamp, entry.path()))
+        })
+        .collect();
+    rotated.sort_unstable_by(|left, right| right.cmp(left));
+    for (_, stale) in rotated.into_iter().skip(MAX_ROTATED_LOGS) {
+        let _ = fs::remove_file(stale);
+    }
 }
 
 fn create_dir(path: &Path, mode: u32) -> io::Result<()> {
@@ -187,8 +229,9 @@ fn redact_with_depth(value: Value, depth: u8) -> Value {
         Value::String(s) => {
             if config::log_verbose() {
                 Value::String(s)
-            } else if s.len() > 4000 {
-                Value::String(format!("{}…[{} more]", &s[..4000], s.len() - 4000))
+            } else if s.len() > MAX_LOGGED_STRING_BYTES {
+                let kept = truncate_at_char_boundary(&s, MAX_LOGGED_STRING_BYTES);
+                Value::String(format!("{kept}…[{} more]", s.len() - kept.len()))
             } else {
                 Value::String(s)
             }
@@ -202,7 +245,7 @@ fn redact_with_depth(value: Value, depth: u8) -> Value {
         Value::Object(fields) => {
             let mut out = serde_json::Map::new();
             for (key, value) in fields {
-                if REDACT_KEYS.contains(&key.to_lowercase().as_str()) {
+                if is_credential_key(&key) {
                     out.insert(key, redact_key_redaction(value));
                 } else {
                     out.insert(key, redact_with_depth(value, depth + 1));
@@ -223,6 +266,22 @@ fn redact_key_redaction(value: Value) -> Value {
 
 pub fn redacted_keys() -> HashSet<&'static str> {
     REDACT_KEYS.iter().copied().collect()
+}
+
+pub fn is_credential_key(name: &str) -> bool {
+    let normalized: String = credential_key_chars(name).collect();
+    ["token", "secret", "password"]
+        .iter()
+        .any(|suffix| normalized.ends_with(suffix))
+        || REDACT_KEYS
+            .iter()
+            .any(|key| credential_key_chars(key).eq(normalized.chars()))
+}
+
+fn credential_key_chars(name: &str) -> impl Iterator<Item = char> + '_ {
+    name.chars()
+        .filter(|ch| !matches!(ch, '-' | '_'))
+        .flat_map(char::to_lowercase)
 }
 
 #[cfg(test)]

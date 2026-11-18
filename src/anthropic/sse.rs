@@ -69,6 +69,36 @@ pub fn encode_sse_event(event: Option<&str>, data: &str) -> Vec<u8> {
     out.into_bytes()
 }
 
+pub fn usage_from_anthropic_sse(bytes: &[u8]) -> (Option<u64>, Option<u64>) {
+    let text = String::from_utf8_lossy(bytes);
+    let mut input_tokens = None;
+    let mut output_tokens = None;
+    for line in text.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(data.trim()) else {
+            continue;
+        };
+        for usage in [
+            value.pointer("/usage"),
+            value.pointer("/delta/usage"),
+            value.pointer("/message/usage"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(tokens) = usage.get("input_tokens").and_then(|value| value.as_u64()) {
+                input_tokens = Some(tokens);
+            }
+            if let Some(tokens) = usage.get("output_tokens").and_then(|value| value.as_u64()) {
+                output_tokens = Some(tokens);
+            }
+        }
+    }
+    (input_tokens, output_tokens)
+}
+
 fn normalize_lines(input: &str) -> String {
     let mut normalized = String::new();
     let mut chars = input.chars().peekable();
@@ -127,4 +157,21 @@ fn parse_block(block: &str) -> Vec<SseEvent> {
     push_if_relevant(event.take(), &mut data_lines);
 
     events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_usage_extracts_final_message_delta_tokens() {
+        let sse = br#"event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":12,"output_tokens":48}}
+
+"#;
+        assert_eq!(usage_from_anthropic_sse(sse), (Some(12), Some(48)));
+    }
 }

@@ -2,6 +2,7 @@ use super::{
     ActiveRequest, CompletedRequest, EndpointKind, MonitorState, RequestStatus, SessionSummary,
     Throughput,
 };
+use crate::text::terminal_text;
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
@@ -59,7 +60,10 @@ impl SnapshotUpdate {
                 let snapshot = match self {
                     Self::Live(snapshot) | Self::Disconnected { snapshot, .. } => snapshot,
                 };
-                Self::Disconnected { snapshot, error }
+                Self::Disconnected {
+                    snapshot,
+                    error: terminal_text(&error),
+                }
             }
         }
     }
@@ -74,6 +78,50 @@ pub struct MonitorSnapshot {
     pub sessions: Vec<SessionSnapshot>,
     pub active: Vec<ActiveSnapshot>,
     pub recent: Vec<CompletedSnapshot>,
+}
+
+impl MonitorSnapshot {
+    pub fn for_terminal(&self) -> Self {
+        let mut snapshot = self.clone();
+        for session in &mut snapshot.sessions {
+            terminal_fields([
+                &mut session.session_id,
+                &mut session.project,
+                &mut session.provider,
+                &mut session.model,
+                &mut session.effort,
+            ]);
+        }
+        for request in &mut snapshot.active {
+            request.request_id = terminal_text(&request.request_id);
+            terminal_fields([
+                &mut request.session_id,
+                &mut request.project,
+                &mut request.provider,
+                &mut request.model,
+                &mut request.effort,
+                &mut request.error,
+            ]);
+        }
+        for request in &mut snapshot.recent {
+            request.request_id = terminal_text(&request.request_id);
+            terminal_fields([
+                &mut request.session_id,
+                &mut request.project,
+                &mut request.provider,
+                &mut request.model,
+                &mut request.effort,
+                &mut request.error,
+            ]);
+        }
+        snapshot
+    }
+}
+
+fn terminal_fields<const N: usize>(fields: [&mut Option<String>; N]) {
+    for field in fields.into_iter().flatten() {
+        *field = terminal_text(field);
+    }
 }
 
 impl From<MonitorState> for MonitorSnapshot {

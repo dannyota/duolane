@@ -1,10 +1,10 @@
 use crate::{
     anthropic::{MAX_ANTHROPIC_REQUEST_BYTES, json_error},
-    logging::{Logger, REDACT_KEYS, create_logger},
+    logging::{Logger, create_logger, is_credential_key},
     monitor::{EndpointKind, MonitorHandle},
     openai_compat::{MAX_OPENAI_REQUEST_BYTES, OpenAiError, request::extract_model},
     project,
-    provider::RequestContext,
+    provider::{MAX_BUFFERED_RESPONSE_BYTES, RequestContext},
     providers::codex::{
         chat_completions::{ChatCompletionsBackend, request::translate_request},
         images::{
@@ -34,16 +34,26 @@ use axum::{
     routing::{get, post},
 };
 use http_body_util::{BodyExt, StreamBody};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo, TokioTimer},
+    server::{conn::auto::Builder, graceful::GracefulShutdown},
+    service::TowerToHyperService,
+};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
-use std::fs::{self, File};
 use std::future::Future;
-use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
-use tokio::net::TcpListener;
+use std::time::{Duration, Instant};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tower::ServiceExt;
 use uuid::Uuid;
+
+mod error_capture;
+
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_OPEN_CONNECTIONS: usize = 128;
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_secs(1);
 
 const CLAUDE_AUTO_REVIEW_SYSTEM_PREFIX: &str =
     "You are a security monitor for autonomous AI coding agents.";
@@ -172,13 +182,71 @@ pub async fn serve_listener(
         app_with_monitor(Arc::new(Registry::with_default_alias()), monitor),
         policy,
     );
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown)
-    .await?;
+    serve_connections(listener, app, shutdown, HEADER_READ_TIMEOUT).await;
     Ok(())
+}
+
+async fn serve_connections(
+    listener: TcpListener,
+    app: Router,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+    header_read_timeout: Duration,
+) {
+    let permits = Arc::new(Semaphore::new(MAX_OPEN_CONNECTIONS));
+    let graceful = GracefulShutdown::new();
+    let mut builder = Builder::new(TokioExecutor::new()).http1_only();
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(header_read_timeout);
+    tokio::pin!(shutdown);
+    loop {
+        let accepted = tokio::select! {
+            () = &mut shutdown => break,
+            accepted = accept_connection(&listener, &permits) => accepted,
+        };
+        let Some((stream, peer, permit)) = accepted else {
+            continue;
+        };
+        let service = app.clone().map_request(move |mut request: Request<_>| {
+            request
+                .extensions_mut()
+                .insert(axum::extract::ConnectInfo(peer));
+            request
+        });
+        let connection = builder
+            .serve_connection(TokioIo::new(stream), TowerToHyperService::new(service))
+            .into_owned();
+        let connection = graceful.watch(connection);
+        tokio::spawn(async move {
+            let _ = connection.await;
+            drop(permit);
+        });
+    }
+    drop(listener);
+    graceful.shutdown().await;
+}
+
+async fn accept_connection(
+    listener: &TcpListener,
+    permits: &Arc<Semaphore>,
+) -> Option<(TcpStream, std::net::SocketAddr, OwnedSemaphorePermit)> {
+    let permit = permits.clone().acquire_owned().await.ok()?;
+    match listener.accept().await {
+        Ok((stream, peer)) => Some((stream, peer, permit)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            None
+        }
+        Err(_) => {
+            tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
+            None
+        }
+    }
 }
 
 pub fn app(registry: Arc<Registry>) -> Router {
@@ -1421,12 +1489,8 @@ async fn dispatch_request(
         }
     };
 
-    if let Some(project) = project::name_from_request(
-        body.extra.get("system"),
-        body.messages.iter().rev().map(|message| &message.content),
-    ) && let Some(monitor) = state.monitor.as_ref()
-    {
-        monitor.project_resolved(&req_id, project);
+    if let Some(monitor) = state.monitor.as_ref() {
+        project::resolve_in_background(&body, monitor.clone(), req_id.clone());
     }
 
     let model = match body.model.as_deref() {
@@ -1853,8 +1917,8 @@ async fn record_failed_response(
 
     let status = response.status();
     let (parts, body) = response.into_parts();
-    let bytes = match body.collect().await {
-        Ok(collected) => collected.to_bytes(),
+    let bytes = match axum::body::to_bytes(body, MAX_BUFFERED_RESPONSE_BYTES).await {
+        Ok(bytes) => bytes,
         Err(err) => {
             log.info(
                 "request_failed",
@@ -1888,7 +1952,7 @@ async fn record_failed_response(
         "message": message,
         "response": response_body,
     });
-    let error_file = write_error_capture(ctx.req_id, &redact_error_value(document));
+    let error_file = error_capture::write(ctx.req_id, document).await;
 
     let mut fields = serde_json::Map::from_iter([
         ("reqId".to_string(), json!(ctx.req_id)),
@@ -1934,66 +1998,6 @@ fn error_message_from_response(response_body: &Value) -> Option<String> {
                 .filter(|text| !text.is_empty())
         })
         .map(std::string::ToString::to_string)
-}
-
-fn write_error_capture(req_id: &str, document: &Value) -> Option<PathBuf> {
-    let dir = crate::paths::state_dir().join("errors");
-    fs::create_dir_all(&dir).ok()?;
-    set_mode(&dir, 0o700);
-    let path = dir.join(format!(
-        "{}-{}.json",
-        current_millis(),
-        sanitize_path_part(req_id)
-    ));
-    let mut file = File::create(&path).ok()?;
-    set_mode(&path, 0o600);
-    let payload = serde_json::to_vec_pretty(document).ok()?;
-    file.write_all(&payload).ok()?;
-    file.write_all(b"\n").ok()?;
-    Some(path)
-}
-
-fn sanitize_path_part(raw: &str) -> String {
-    let sanitized: String = raw
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if sanitized.is_empty() {
-        "unknown".to_string()
-    } else {
-        sanitized
-    }
-}
-
-fn redact_error_value(value: Value) -> Value {
-    match value {
-        Value::Array(values) => Value::Array(values.into_iter().map(redact_error_value).collect()),
-        Value::Object(fields) => {
-            let mut out = Map::new();
-            for (key, value) in fields {
-                if REDACT_KEYS.contains(&key.to_lowercase().as_str()) {
-                    out.insert(key, redact_error_key(value));
-                } else {
-                    out.insert(key, redact_error_value(value));
-                }
-            }
-            Value::Object(out)
-        }
-        value => value,
-    }
-}
-
-fn redact_error_key(value: Value) -> Value {
-    match value {
-        Value::String(value) => Value::String(format!("[redacted len={}]", value.len())),
-        _ => Value::String("[redacted]".to_string()),
-    }
 }
 
 struct RequestMonitorGuard {
@@ -2042,7 +2046,7 @@ fn headers_to_record(headers: &http::HeaderMap) -> Value {
     let mut out = Map::new();
     for (key, value) in headers {
         if let Ok(raw) = value.to_str() {
-            let recorded = if REDACT_KEYS.contains(&key.as_str().to_lowercase().as_str())
+            let recorded = if is_credential_key(key.as_str())
                 || matches!(
                     key.as_str(),
                     CLAUDE_AGENT_HEADER | CLAUDE_PARENT_AGENT_HEADER
@@ -2064,8 +2068,7 @@ fn redacted_query(uri: &http::Uri) -> Value {
     };
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         let key = key.into_owned();
-        let lower = key.to_lowercase();
-        let value = if REDACT_KEYS.contains(&lower.as_str()) {
+        let value = if is_credential_key(&key) {
             Value::String(format!("[redacted len={}]", value.len()))
         } else {
             Value::String(value.into_owned())
@@ -2110,22 +2113,6 @@ fn current_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-fn set_mode(path: &Path, mode: u32) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(path) {
-            let mut perm = meta.permissions();
-            perm.set_mode(mode);
-            let _ = fs::set_permissions(path, perm);
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, mode);
-    }
 }
 
 #[allow(dead_code)]
@@ -2382,5 +2369,87 @@ mod auto_review_tests {
                 .is_none()
         );
         assert_eq!(classifier.model.as_deref(), Some("gpt-5.6-sol"));
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::{headers_to_record, redacted_query};
+    use crate::logging::redact_value;
+    use crate::traffic::redact_traffic;
+    use serde_json::json;
+
+    #[test]
+    fn credential_names_redact_headers_query_and_nested_values_of_any_type() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-upstream-token", "header-secret".parse().unwrap());
+        headers.insert("x-client_secret", "client-secret".parse().unwrap());
+        headers.insert("x-request-tokens", "17".parse().unwrap());
+        let recorded = headers_to_record(&headers);
+        assert_eq!(recorded["x-upstream-token"], "[redacted len=13]");
+        assert_eq!(recorded["x-client_secret"], "[redacted len=13]");
+        assert_eq!(recorded["x-request-tokens"], "17");
+
+        let uri: http::Uri = "/v1/messages?Refresh-Token=query-secret&API_KEY=key&beta=true"
+            .parse()
+            .unwrap();
+        let query = redacted_query(&uri);
+        assert_eq!(query["Refresh-Token"], "[redacted len=12]");
+        assert_eq!(query["API_KEY"], "[redacted len=3]");
+        assert_eq!(query["beta"], "true");
+
+        let body = json!({
+            "metadata": {
+                "Session_Token": {"value": "nested-secret"},
+                "items": [{"db-password": ["array-secret"], "max_tokens": 5}],
+                "access": 42
+            },
+            "input": [{"type": "input_image", "image_url": {
+                "url": "data:image/png,raw-image-bytes",
+                "detail": "high"
+            }}]
+        });
+        for redacted in [redact_traffic(&body), redact_value(body.clone())] {
+            let rendered = redacted.to_string();
+            for secret in ["nested-secret", "array-secret", "42"] {
+                assert!(!rendered.contains(secret), "{rendered}");
+            }
+            assert_eq!(redacted["metadata"]["Session_Token"], "[redacted]");
+            assert_eq!(redacted["metadata"]["items"][0]["max_tokens"], 5);
+        }
+        let traffic = redact_traffic(&body);
+        let image = &traffic["input"][0]["image_url"];
+        assert_eq!(image["detail"], "high");
+        assert!(!image["url"].as_str().unwrap().contains("raw-image-bytes"));
+    }
+}
+
+#[cfg(test)]
+mod listener_tests {
+    use super::serve_connections;
+    use axum::Router;
+    use std::time::{Duration, Instant};
+    use tokio::io::AsyncReadExt;
+    use tokio::net::{TcpListener, TcpStream};
+
+    #[tokio::test]
+    async fn silent_connection_is_closed_after_the_header_read_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(serve_connections(
+            listener,
+            Router::new(),
+            std::future::pending(),
+            Duration::from_millis(200),
+        ));
+
+        let mut socket = TcpStream::connect(address).await.unwrap();
+        let started = Instant::now();
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), socket.read_to_end(&mut received))
+            .await
+            .expect("a silent connection must be closed")
+            .ok();
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

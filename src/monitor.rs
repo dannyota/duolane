@@ -16,6 +16,8 @@ pub const SESSION_TOKEN_BUCKET_SECS: u64 = 10;
 pub const SESSION_OUTPUT_HISTORY_BUCKETS: u64 = 60 * 60 / SESSION_TOKEN_BUCKET_SECS;
 const SESSION_USAGE_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const SESSION_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_SESSION_USAGE_ENTRIES: usize = 1_000;
+const MAX_MONITOR_TEXT_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -368,8 +370,8 @@ impl MonitorHandle {
         endpoint: EndpointKind,
     ) {
         self.publish(MonitorEvent::RequestStarted {
-            request_id: request_id.into(),
-            session_id,
+            request_id: bounded_text(request_id),
+            session_id: session_id.map(bounded_text),
             session_seq,
             endpoint,
         });
@@ -377,8 +379,8 @@ impl MonitorHandle {
 
     pub fn project_resolved(&self, request_id: impl Into<String>, project: impl Into<String>) {
         self.publish(MonitorEvent::ProjectResolved {
-            request_id: request_id.into(),
-            project: project.into(),
+            request_id: bounded_text(request_id),
+            project: bounded_text(project),
         });
     }
 
@@ -397,17 +399,17 @@ impl MonitorHandle {
         effort: Option<String>,
     ) {
         self.publish(MonitorEvent::ProviderSelected {
-            request_id: request_id.into(),
-            provider: provider.into(),
-            model: model.into(),
-            effort,
+            request_id: bounded_text(request_id),
+            provider: bounded_text(provider),
+            model: bounded_text(model),
+            effort: effort.map(bounded_text),
         });
     }
 
     pub fn model_resolved(&self, request_id: impl Into<String>, model: impl Into<String>) {
         self.publish(MonitorEvent::ModelResolved {
-            request_id: request_id.into(),
-            model: model.into(),
+            request_id: bounded_text(request_id),
+            model: bounded_text(model),
         });
     }
 
@@ -488,16 +490,16 @@ impl MonitorHandle {
         error: impl Into<String>,
     ) {
         self.publish(MonitorEvent::RequestFailed {
-            request_id: request_id.into(),
+            request_id: bounded_text(request_id),
             http_status,
-            error: error.into(),
+            error: bounded_text(error),
         });
     }
 
     pub fn request_abandoned(&self, request_id: impl Into<String>, error: impl Into<String>) {
         self.publish(MonitorEvent::RequestAbandoned {
-            request_id: request_id.into(),
-            error: error.into(),
+            request_id: bounded_text(request_id),
+            error: bounded_text(error),
         });
     }
 }
@@ -570,11 +572,11 @@ impl MonitorStore {
             }
             MonitorEvent::ModelResolved { request_id, model } => {
                 if let Some(active) = self.active.get_mut(&request_id) {
-                    active.model = Some(match active.model.take() {
+                    active.model = Some(bounded_text(match active.model.take() {
                         Some(incoming) if incoming != model => format!("{incoming} → {model}"),
                         Some(incoming) => incoming,
                         None => model,
-                    });
+                    }));
                 }
             }
             MonitorEvent::CompactionStarted { request_id } => {
@@ -865,10 +867,28 @@ impl MonitorStore {
         input_tokens: u64,
         output_tokens: u64,
     ) {
+        self.make_room_for_session(&session_id);
         let usage = self.session_usage.entry(session_id).or_default();
         usage.input_tokens = usage.input_tokens.saturating_add(input_tokens);
         usage.output_tokens = usage.output_tokens.saturating_add(output_tokens);
         usage.last_seen = SystemTime::now();
+    }
+
+    fn make_room_for_session(&mut self, session_id: &Option<String>) {
+        if self.session_usage.contains_key(session_id)
+            || self.session_usage.len() < MAX_SESSION_USAGE_ENTRIES
+        {
+            return;
+        }
+        if let Some(oldest) = self
+            .session_usage
+            .iter()
+            .min_by_key(|(_, usage)| usage.last_seen)
+            .map(|(id, _)| id.clone())
+        {
+            self.session_usage.remove(&oldest);
+            self.session_output_buckets.remove(&oldest);
+        }
     }
 
     fn record_session_output(
@@ -1077,6 +1097,12 @@ fn update_token_count(current: &mut Option<u64>, incoming: Option<u64>) -> u64 {
     incoming.saturating_sub(previous)
 }
 
+fn bounded_text(text: impl Into<String>) -> String {
+    let mut text = text.into();
+    text.truncate(text.floor_char_boundary(MAX_MONITOR_TEXT_BYTES));
+    text
+}
+
 fn max_system_time(left: SystemTime, right: SystemTime) -> SystemTime {
     if right.duration_since(left).is_ok() {
         right
@@ -1105,36 +1131,6 @@ pub fn throughput(
         return Throughput::EventsPerSecond(stream_chunks as f64 / secs);
     }
     Throughput::None
-}
-
-pub fn usage_from_anthropic_sse(bytes: &[u8]) -> (Option<u64>, Option<u64>) {
-    let text = String::from_utf8_lossy(bytes);
-    let mut input_tokens = None;
-    let mut output_tokens = None;
-    for line in text.lines() {
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(data.trim()) else {
-            continue;
-        };
-        for usage in [
-            value.pointer("/usage"),
-            value.pointer("/delta/usage"),
-            value.pointer("/message/usage"),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if let Some(tokens) = usage.get("input_tokens").and_then(|value| value.as_u64()) {
-                input_tokens = Some(tokens);
-            }
-            if let Some(tokens) = usage.get("output_tokens").and_then(|value| value.as_u64()) {
-                output_tokens = Some(tokens);
-            }
-        }
-    }
-    (input_tokens, output_tokens)
 }
 
 #[cfg(test)]
@@ -1297,6 +1293,32 @@ mod tests {
     }
 
     #[test]
+    fn multibyte_text_is_truncated_on_char_boundaries_for_logs_and_monitor() {
+        let logged = format!("{}é{}", "a".repeat(3_999), "b".repeat(100));
+        let redacted = crate::logging::redact_value(serde_json::json!({ "message": logged }));
+        let kept = redacted["message"].as_str().unwrap();
+        assert!(kept.starts_with(&"a".repeat(3_999)), "{kept}");
+        assert!(kept.ends_with("…[102 more]"), "{kept}");
+
+        let monitor = MonitorHandle::new(10);
+        let model = "€".repeat(400);
+        monitor.request_started("r1", Some("€".repeat(400)), None, EndpointKind::Messages);
+        monitor.provider_selected("r1", "codex", model.clone(), Some("€".repeat(400)));
+        monitor.request_failed("r1", Some(400), "€".repeat(20_000));
+        let state = monitor.snapshot();
+        let request = &state.recent[0];
+        for text in [
+            request.session_id.as_deref().unwrap(),
+            request.model.as_deref().unwrap(),
+            request.effort.as_deref().unwrap(),
+            request.error.as_deref().unwrap(),
+        ] {
+            assert_eq!(text.len(), 1_023);
+            assert!(model.starts_with(text));
+        }
+    }
+
+    #[test]
     fn abandoned_requests_leave_active_once() {
         let monitor = MonitorHandle::new(10);
         monitor.request_started("r1", None, None, EndpointKind::Messages);
@@ -1353,18 +1375,6 @@ mod tests {
             throughput(None, 0, 36, elapsed),
             Throughput::EventsPerSecond(18.0)
         );
-    }
-
-    #[test]
-    fn sse_usage_extracts_final_message_delta_tokens() {
-        let sse = br#"event: message_start
-data: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}
-
-event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":12,"output_tokens":48}}
-
-"#;
-        assert_eq!(usage_from_anthropic_sse(sse), (Some(12), Some(48)));
     }
 
     fn completed_request(
