@@ -130,6 +130,10 @@ fn main() -> Result<()> {
                     if exposed {
                         monitor_listen_url.push_str("  plain HTTP: use an encrypted path");
                     }
+                    if traffic_capture_enabled() {
+                        monitor_listen_url
+                            .push_str("  traffic capture on: stores conversation content");
+                    }
                     let server_monitor = monitor.clone();
                     let server_task = runtime.spawn(async move {
                         let result =
@@ -186,10 +190,12 @@ fn main() -> Result<()> {
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(std::time::Duration::from_secs(2))
                 .build()?;
-            let monitor = runtime.block_on(duolane::monitor::remote::RemoteMonitor::connect(
-                client,
-                url.clone(),
-            ))?;
+            let monitor = runtime
+                .block_on(duolane::monitor::remote::RemoteMonitor::connect(
+                    client,
+                    url.clone(),
+                ))
+                .map_err(|err| anyhow::anyhow!(terminal_text(&format!("{err:#}"))))?;
             tui::run_attached_monitor(|| monitor.snapshot(), url.to_string())?;
             Ok(())
         }

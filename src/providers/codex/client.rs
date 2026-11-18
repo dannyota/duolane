@@ -2668,10 +2668,7 @@ fn write_upstream_response_capture(
     body: &[u8],
 ) {
     write_upstream_response_headers_capture(traffic, status, elapsed, headers);
-    if status >= 400 {
-        traffic.write_text("031-upstream-error-body", &String::from_utf8_lossy(body));
-    } else {
-        traffic.write_bytes("032-upstream-response-body.sse", body);
+    if status < 400 {
         write_codex_sse_event_capture(traffic, body);
     }
 }

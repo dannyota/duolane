@@ -255,9 +255,6 @@ impl StreamState {
         let Some(traffic) = self.ctx.traffic.as_deref() else {
             return;
         };
-        if !self.raw.is_empty() {
-            traffic.write_bytes("032-upstream-response-body.sse", &self.raw);
-        }
         traffic.write_json(
             "033-chat-completions-response-capture",
             &json!({

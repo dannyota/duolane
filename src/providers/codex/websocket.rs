@@ -26,7 +26,7 @@ use crate::logging::create_logger;
 use crate::provider::{MAX_BUFFERED_RESPONSE_BYTES, RequestContext};
 use crate::request_identity::ConversationIdentity;
 use crate::retry::sleep as retry_sleep;
-use crate::traffic::{MAX_SSE_CAPTURE_BYTES, TrafficCapture};
+use crate::traffic::TrafficCapture;
 
 use super::client::{
     ActualTransport, CodexError, CodexErrorOrigin, CodexResponse, MAX_UPSTREAM_FRAME_BYTES,
@@ -862,7 +862,7 @@ pub(super) async fn codex_websocket_request(
 
     if let Some(tc) = traffic {
         write_websocket_metadata_capture(tc, &ws_url, reservation, used_pooled);
-        write_websocket_response_capture(tc, status, started_at.elapsed(), &sse_body);
+        write_websocket_response_capture(tc, status, started_at.elapsed());
     }
 
     Ok(OwnerAwareCodexResponse::new(
@@ -1161,12 +1161,6 @@ fn websocket_config() -> WebSocketConfig {
     }
 }
 
-fn capture_sse_event(sse_body: &mut Vec<u8>, traffic: Option<&TrafficCapture>, text: &str) {
-    if traffic.is_some() && sse_body.len() < MAX_SSE_CAPTURE_BYTES {
-        sse_body.extend_from_slice(&encode_sse(text));
-    }
-}
-
 fn response_start_timeout_error(timeout_ms: u64) -> CodexError {
     CodexError {
         status: 0,
@@ -1207,12 +1201,7 @@ fn write_websocket_metadata_capture(
     );
 }
 
-fn write_websocket_response_capture(
-    traffic: &TrafficCapture,
-    status: u16,
-    elapsed: Duration,
-    sse_body: &[u8],
-) {
+fn write_websocket_response_capture(traffic: &TrafficCapture, status: u16, elapsed: Duration) {
     traffic.write_json(
         "030-upstream-response-headers",
         &serde_json::json!({
@@ -1223,14 +1212,6 @@ fn write_websocket_response_capture(
             },
         }),
     );
-    if status >= 400 {
-        traffic.write_text(
-            "031-upstream-error-body",
-            &String::from_utf8_lossy(sse_body),
-        );
-    } else {
-        traffic.write_bytes("032-upstream-response-body.sse", sse_body);
-    }
 }
 
 const MAX_HANDSHAKE_ERROR_DETAIL_BYTES: usize = 1024;
@@ -2177,7 +2158,6 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let started_at = Instant::now();
-    let mut sse_body: Vec<u8> = Vec::new();
     let response_event_budget = Duration::from_millis(idle_timeout_ms);
     let response_wait_started = Instant::now();
     let mut last_response_event_at = response_wait_started;
@@ -2250,12 +2230,10 @@ where
                                 }),
                             );
                         }
-                        capture_sse_event(&mut sse_body, traffic.as_deref(), &text);
                         continue;
                     }
                 };
 
-                capture_sse_event(&mut sse_body, traffic.as_deref(), &text);
                 if let Some(tc) = traffic.as_deref() {
                     tc.write_json_event("040-upstream-event", &parsed);
                 }
@@ -2324,7 +2302,7 @@ where
     }
 
     if let Some(tc) = traffic.as_deref() {
-        write_websocket_response_capture(tc, status, started_at.elapsed(), &sse_body);
+        write_websocket_response_capture(tc, status, started_at.elapsed());
     }
     (reusable, terminal_item)
 }

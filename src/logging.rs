@@ -6,6 +6,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const MAX_LOG_BYTES: u64 = 20 * 1024 * 1024;
@@ -13,8 +14,9 @@ const MAX_ROTATED_LOGS: usize = 5;
 const MAX_LOGGED_STRING_BYTES: usize = 4_000;
 
 static STDERR_SUPPRESSION_DEPTH: AtomicUsize = AtomicUsize::new(0);
+static LOG_ROTATION_LOCK: Mutex<()> = Mutex::new(());
 
-pub const REDACT_KEYS: [&str; 16] = [
+pub const REDACT_KEYS: [&str; 15] = [
     "authorization",
     "proxy-authorization",
     "access",
@@ -22,7 +24,6 @@ pub const REDACT_KEYS: [&str; 16] = [
     "refresh",
     "refresh_token",
     "id_token",
-    "code",
     "code_verifier",
     "chatgpt-account-id",
     "cookie",
@@ -130,9 +131,14 @@ fn write_log_line(line: &str) -> io::Result<()> {
         create_dir(dir, 0o700)?;
     }
 
-    if fs::metadata(&file).is_ok_and(|meta| meta.len() > MAX_LOG_BYTES) {
-        rotate_file(&file)?;
-        prune_rotated_logs(&file);
+    {
+        let _rotation = LOG_ROTATION_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if fs::metadata(&file).is_ok_and(|meta| meta.len() > MAX_LOG_BYTES) {
+            rotate_file(&file)?;
+            prune_rotated_logs(&file);
+        }
     }
 
     let mut options = OpenOptions::new();

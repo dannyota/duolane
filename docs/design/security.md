@@ -106,7 +106,7 @@ Rejections use the Anthropic error shape and never echo request values:
 | Image edit request                  | 64 MiB                    |
 | Transcription request               | 26 MiB                    |
 | Inbound header read timeout         | 30 seconds                |
-| Open inbound connections            | 256                       |
+| Open inbound connections            | 128                       |
 | Buffered upstream response          | 64 MiB                    |
 | Image response                      | 128 MiB                   |
 | Transcription response              | 1 MiB                     |
@@ -136,7 +136,8 @@ truncated on a character boundary.
 ## Stored data
 
 - Traffic capture is off by default and warns when enabled, because it stores
-  conversation content.
+  conversation content. It stores only redacted JSON events, never raw upstream
+  bodies.
 - Logs and captures are readable only by the user.
 - Traffic captures replace image payloads, `encrypted_content`, and duolane
   signatures with a length marker, and keep Anthropic signatures. An image

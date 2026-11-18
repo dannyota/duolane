@@ -1809,7 +1809,12 @@ async fn smoke_codex_http_traffic_capture_writes_upstream_artifacts() {
         traffic_json(&files, "030-upstream-response-headers.json")["status"],
         200
     );
-    traffic_file(&files, "032-upstream-response-body.sse");
+    assert!(
+        !files.iter().any(|path| path
+            .to_string_lossy()
+            .ends_with("032-upstream-response-body.sse")),
+        "raw upstream body was captured: {files:?}"
+    );
     traffic_file(&files, "040-upstream-event.json");
 }
 
@@ -3305,6 +3310,11 @@ async fn smoke_codex_websocket_traffic_capture_writes_upstream_artifacts() {
         traffic_json(&files, "030-upstream-response-headers.json")["status"],
         200
     );
-    traffic_file(&files, "032-upstream-response-body.sse");
+    assert!(
+        !files.iter().any(|path| path
+            .to_string_lossy()
+            .ends_with("032-upstream-response-body.sse")),
+        "raw upstream body was captured: {files:?}"
+    );
     traffic_file(&files, "040-upstream-event.json");
 }

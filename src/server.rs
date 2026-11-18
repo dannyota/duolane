@@ -52,7 +52,7 @@ use uuid::Uuid;
 mod error_capture;
 
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_OPEN_CONNECTIONS: usize = 256;
+const MAX_OPEN_CONNECTIONS: usize = 128;
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_secs(1);
 
 const CLAUDE_AUTO_REVIEW_SYSTEM_PREFIX: &str =
@@ -182,7 +182,7 @@ pub async fn serve_listener(
         app_with_monitor(Arc::new(Registry::with_default_alias()), monitor),
         policy,
     );
-    serve_connections(listener, app, shutdown).await;
+    serve_connections(listener, app, shutdown, HEADER_READ_TIMEOUT).await;
     Ok(())
 }
 
@@ -190,14 +190,15 @@ async fn serve_connections(
     listener: TcpListener,
     app: Router,
     shutdown: impl Future<Output = ()> + Send + 'static,
+    header_read_timeout: Duration,
 ) {
     let permits = Arc::new(Semaphore::new(MAX_OPEN_CONNECTIONS));
     let graceful = GracefulShutdown::new();
-    let mut builder = Builder::new(TokioExecutor::new());
+    let mut builder = Builder::new(TokioExecutor::new()).http1_only();
     builder
         .http1()
         .timer(TokioTimer::new())
-        .header_read_timeout(HEADER_READ_TIMEOUT);
+        .header_read_timeout(header_read_timeout);
     tokio::pin!(shutdown);
     loop {
         let accepted = tokio::select! {
@@ -214,7 +215,7 @@ async fn serve_connections(
             request
         });
         let connection = builder
-            .serve_connection_with_upgrades(TokioIo::new(stream), TowerToHyperService::new(service))
+            .serve_connection(TokioIo::new(stream), TowerToHyperService::new(service))
             .into_owned();
         let connection = graceful.watch(connection);
         tokio::spawn(async move {
@@ -1488,10 +1489,8 @@ async fn dispatch_request(
         }
     };
 
-    if let Some(monitor) = state.monitor.as_ref()
-        && let Some(project) = project::name_from_messages(&body).await
-    {
-        monitor.project_resolved(&req_id, project);
+    if let Some(monitor) = state.monitor.as_ref() {
+        project::resolve_in_background(&body, monitor.clone(), req_id.clone());
     }
 
     let model = match body.model.as_deref() {
@@ -2422,5 +2421,35 @@ mod redaction_tests {
         let image = &traffic["input"][0]["image_url"];
         assert_eq!(image["detail"], "high");
         assert!(!image["url"].as_str().unwrap().contains("raw-image-bytes"));
+    }
+}
+
+#[cfg(test)]
+mod listener_tests {
+    use super::serve_connections;
+    use axum::Router;
+    use std::time::{Duration, Instant};
+    use tokio::io::AsyncReadExt;
+    use tokio::net::{TcpListener, TcpStream};
+
+    #[tokio::test]
+    async fn silent_connection_is_closed_after_the_header_read_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(serve_connections(
+            listener,
+            Router::new(),
+            std::future::pending(),
+            Duration::from_millis(200),
+        ));
+
+        let mut socket = TcpStream::connect(address).await.unwrap();
+        let started = Instant::now();
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), socket.read_to_end(&mut received))
+            .await
+            .expect("a silent connection must be closed")
+            .ok();
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

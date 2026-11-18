@@ -4,8 +4,10 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::anthropic::schema::MessagesRequest;
+use crate::monitor::MonitorHandle;
 
 const MAX_GIT_MARKER_BYTES: u64 = 4 * 1024;
+const MAX_WORKING_DIRECTORY_BYTES: usize = 4 * 1024;
 
 const WORKING_DIRECTORY_PREFIXES: [&str; 3] = [
     "Primary working directory:",
@@ -13,15 +15,18 @@ const WORKING_DIRECTORY_PREFIXES: [&str; 3] = [
     "Current working directory:",
 ];
 
-pub async fn name_from_messages(body: &MessagesRequest) -> Option<String> {
-    let working_directory = working_directory_from_request(
+pub fn resolve_in_background(body: &MessagesRequest, monitor: MonitorHandle, req_id: String) {
+    let Some(working_directory) = working_directory_from_request(
         body.extra.get("system"),
         body.messages.iter().rev().map(|message| &message.content),
-    )?;
-    tokio::task::spawn_blocking(move || name_from_working_directory(&working_directory))
-        .await
-        .ok()
-        .flatten()
+    ) else {
+        return;
+    };
+    tokio::task::spawn_blocking(move || {
+        if let Some(project) = name_from_working_directory(&working_directory) {
+            monitor.project_resolved(req_id, project);
+        }
+    });
 }
 
 fn working_directory_from_request<'a>(
@@ -60,7 +65,7 @@ fn working_directory_from_line(line: &str) -> Option<&str> {
     WORKING_DIRECTORY_PREFIXES.iter().find_map(|prefix| {
         line.strip_prefix(prefix)
             .map(str::trim)
-            .filter(|path| !path.is_empty())
+            .filter(|path| !path.is_empty() && path.len() <= MAX_WORKING_DIRECTORY_BYTES)
     })
 }
 
