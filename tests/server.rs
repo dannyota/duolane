@@ -1356,7 +1356,11 @@ async fn removed_backend_models_return_400_listing_supported_models() {
             ),
             ("/v1/responses", json!({"model":model,"input":"hello"})),
         ] {
-            let app = app_with_options(Arc::new(Registry::with_default_alias()), None, true);
+            let app = app_with_options(
+                Arc::new(Registry::new(AliasProvider::Anthropic)),
+                None,
+                true,
+            );
             let response = app
                 .oneshot(
                     Request::builder()

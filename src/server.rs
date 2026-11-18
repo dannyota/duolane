@@ -951,10 +951,11 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
     };
     if provider.name() != "codex" {
         let response = OpenAiError::unsupported_provider(provider.name()).response();
-        log_native_request_completed(
+        log_routed_openai_request_completed(
             &log,
             &req_id,
             "responses",
+            provider.name(),
             Some(&normalized_model),
             response.status(),
             started_at,
@@ -1132,10 +1133,11 @@ async fn handler_chat_completions(
     };
     if provider.name() != "codex" {
         let response = OpenAiError::unsupported_provider(provider.name()).response();
-        log_native_request_completed(
+        log_routed_openai_request_completed(
             &log,
             &req_id,
             "chat_completions",
+            provider.name(),
             Some(&normalized_model),
             response.status(),
             started_at,

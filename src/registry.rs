@@ -294,6 +294,40 @@ mod tests {
     }
 
     #[test]
+    fn unknown_codex_model_message_lists_only_codex() {
+        let provider = |login_hint| {
+            Arc::new(ToyProvider {
+                name: "codex",
+                model: "gpt-toy",
+                login_hint,
+            }) as Arc<dyn Provider>
+        };
+        let anthropic = || {
+            Arc::new(ToyProvider {
+                name: "anthropic",
+                model: "claude-toy",
+                login_hint: None,
+            }) as Arc<dyn Provider>
+        };
+
+        let signed_in =
+            Registry::from_providers(AliasProvider::Anthropic, [anthropic(), provider(None)]);
+        assert_eq!(
+            signed_in.unknown_codex_model_message(),
+            "Supported: codex: gpt-toy."
+        );
+
+        let signed_out = Registry::from_providers(
+            AliasProvider::Anthropic,
+            [anthropic(), provider(Some("run `codex login`"))],
+        );
+        assert_eq!(
+            signed_out.unknown_codex_model_message(),
+            "Not signed in: codex (run `codex login`)."
+        );
+    }
+
+    #[test]
     fn signed_out_backends_are_named_instead_of_listed() {
         let registry = Registry::from_providers(
             AliasProvider::Anthropic,
