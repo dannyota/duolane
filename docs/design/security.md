@@ -119,8 +119,8 @@ truncated on a character boundary.
 - Traffic captures replace image payloads, `encrypted_content`, and duolane
   signatures with a length marker, and keep Anthropic signatures. An image
   source without a `media_type` is still redacted, because capture runs before
-  validation. An image field keeps its object shape, with each string inside it
-  replaced.
+  validation. An image field keeps its object shape, with each data URL inside
+  it replaced.
 - Under a credential key name, the whole value is replaced whatever its type.
   Header names, body keys, and query parameters share one matcher, which also
   covers names ending in `token`, `secret`, or `password`.

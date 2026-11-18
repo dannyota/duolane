@@ -51,11 +51,11 @@ other model.
   Claude Code adds only ids that start with `claude` or `anthropic`, so the
   Claude aliases are what reach its `/model` picker. Codex ids are still listed
   for other clients.
-- Every response to a `POST` route carries a `request-id` header, which Claude
-  Code records as the transcript `requestId`. duolane keeps an upstream value
-  and otherwise sets its own, before the body streams.
-- `/monitor` returns elapsed durations and computed rates, never process-local
-  clock readings.
+- Every response a `POST` handler produces carries a `request-id` header, which
+  Claude Code records as the transcript `requestId`. duolane keeps an upstream
+  value and otherwise sets its own, before the body streams.
+- `/monitor` returns wall-clock timestamps, elapsed durations, and computed
+  rates, never monotonic clock readings.
 
 ## Claude route
 
@@ -140,8 +140,9 @@ so the conversation stays valid.
 These inherited assumptions need a live check:
 
 - Switching backends while a tool call is pending.
-- Claude Code adding only discovered ids that start with `claude` or
-  `anthropic`, and recording `request-id` as `requestId`.
+- Claude Code using `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` and adding only
+  discovered ids that start with `claude` or `anthropic`, and recording
+  `request-id` as `requestId`.
 - Claude Code running web search through a client-side `WebSearch` tool and an
   isolated inner request, which would keep hosted search blocks out of the outer
   transcript. The Claude route logs `hosted_web_search_in_history` if such

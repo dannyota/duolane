@@ -66,9 +66,9 @@ Codex serves two lanes: the full Responses API and Responses Lite.
 
 ## Continuation
 
-When `DUOLANE_CODEX_PREVIOUS_RESPONSE_ID` is on and a request extends the
-transcript of a stored response, duolane sends `previous_response_id` with only
-the new items.
+When `DUOLANE_CODEX_PREVIOUS_RESPONSE_ID` is on and a WebSocket request extends
+the transcript of a stored response, duolane sends `previous_response_id` with
+only the new items.
 
 - `function_call.arguments` are compared as JSON values. The stored transcript
   keeps the text the model streamed, while the next request re-serializes the
@@ -163,6 +163,6 @@ first-party source confirms them, so recheck them during live verification.
   response headers after first output, `usage_limit_reached` and its headers,
   and `codex.rate_limits` with remaining credits.
 - Claude Code: the compaction markers, `DeferredToolPlaceholder`, repeating a
-  503 up to ten times, `thinking_tokens`, the subagent counter, and the
-  `anthropic-ratelimit-unified-*` headers it reads.
+  `thinking_tokens`, the subagent counter, the `anthropic-ratelimit-unified-*`
+  headers it reads, and sleeping for the full `Retry-After` value.
 - The tolerated `ping` event was observed from another Responses provider.
