@@ -6,7 +6,7 @@ Shared rules live here and in `instructions/`. [CLAUDE.md](CLAUDE.md) adds Claud
 
 `duolane` is Danny's personal local proxy. It lets Claude Code use a Claude subscription and a ChatGPT subscription in one session, chosen per request by model name. It is written in Rust, licensed under MIT, and not affiliated with Anthropic or OpenAI. The repository and CI logs are public.
 
-The code is being migrated to this design. The [foundation plan](docs/plans/foundation.md) owns the order. Until its slices land, the code still carries the inherited crate name.
+The code is being migrated to this design. The [foundation plan](docs/plans/foundation.md) owns the order. Until its slices land, parts of the code differ from the design.
 
 ## Map
 

@@ -133,13 +133,13 @@ fn load_config_from_env(env: &HashMap<String, String>, config_dir: PathBuf) -> L
         config_dir: config_dir.clone(),
     };
 
-    if let Some(raw) = env.get("CCP_BIND_ADDRESS") {
+    if let Some(raw) = env.get("DUOLANE_BIND_ADDRESS") {
         out.bind_address = raw.clone();
     } else if let Some(bind_address) = file.as_ref().and_then(|f| f.bind_address.clone()) {
         out.bind_address = bind_address;
     }
 
-    if let Some(raw) = env.get("CCP_ALIAS_PROVIDER") {
+    if let Some(raw) = env.get("DUOLANE_ALIAS_PROVIDER") {
         if let Some(alias) = parse_alias(raw) {
             out.alias_provider = alias;
         }
@@ -159,7 +159,7 @@ fn load_config_from_env(env: &HashMap<String, String>, config_dir: PathBuf) -> L
         out.port = port;
     }
 
-    if env.contains_key("CCP_LOG_VERBOSE") {
+    if env.contains_key("DUOLANE_LOG_VERBOSE") {
         out.log_verbose = true;
     } else if let Some(value) = file
         .as_ref()
@@ -168,7 +168,7 @@ fn load_config_from_env(env: &HashMap<String, String>, config_dir: PathBuf) -> L
         out.log_verbose = value;
     }
 
-    if env.contains_key("CCP_LOG_STDERR") {
+    if env.contains_key("DUOLANE_LOG_STDERR") {
         out.log_stderr = true;
     } else if let Some(value) = file
         .as_ref()
@@ -208,50 +208,50 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     let file = read_file_config(&cfg.config_dir);
     let env: HashMap<_, _> = std::env::vars().collect();
     let mut out = Vec::new();
-    if env.contains_key("CCP_BIND_ADDRESS") {
+    if env.contains_key("DUOLANE_BIND_ADDRESS") {
         out.push("bindAddress (env)".to_string());
     }
     if env.contains_key("PORT") {
         out.push("port (env)".to_string());
     }
-    if env.contains_key("CCP_ALIAS_PROVIDER") {
+    if env.contains_key("DUOLANE_ALIAS_PROVIDER") {
         out.push("aliasProvider (env)".to_string());
     }
-    if env.contains_key("CCP_LOG_VERBOSE") {
+    if env.contains_key("DUOLANE_LOG_VERBOSE") {
         out.push("log.verbose (env)".to_string());
     }
-    if env.contains_key("CCP_LOG_STDERR") {
+    if env.contains_key("DUOLANE_LOG_STDERR") {
         out.push("log.stderr (env)".to_string());
     }
-    if env.contains_key("CCP_CODEX_RESPONSES_API") {
+    if env.contains_key("DUOLANE_CODEX_RESPONSES_API") {
         out.push("codex.responsesApi (env)".to_string());
     }
-    if env.contains_key("CCP_CODEX_FULL_LANE") {
+    if env.contains_key("DUOLANE_CODEX_FULL_LANE") {
         out.push("codex.fullLane (env)".to_string());
     }
-    if env.contains_key("CCP_CODEX_IMAGES_API") {
+    if env.contains_key("DUOLANE_CODEX_IMAGES_API") {
         out.push("codex.imagesApi (env)".to_string());
     }
-    if env.contains_key("CCP_CODEX_IMAGES_BASE_URL") {
+    if env.contains_key("DUOLANE_CODEX_IMAGES_BASE_URL") {
         out.push("codex.imagesBaseUrl (env)".to_string());
     }
-    if env.contains_key("CCP_CODEX_TRANSCRIPTIONS_API") {
+    if env.contains_key("DUOLANE_CODEX_TRANSCRIPTIONS_API") {
         out.push("codex.transcriptionsApi (env)".to_string());
     }
     if env
-        .get("CCP_CODEX_REASONING_SUMMARY")
+        .get("DUOLANE_CODEX_REASONING_SUMMARY")
         .is_some_and(|raw| !raw.is_empty())
     {
-        out.push("CCP_CODEX_REASONING_SUMMARY (env)".to_string());
+        out.push("DUOLANE_CODEX_REASONING_SUMMARY (env)".to_string());
     }
-    if env.contains_key("CCP_CODEX_SERVER_COMPACTION") {
-        out.push("CCP_CODEX_SERVER_COMPACTION (env)".to_string());
+    if env.contains_key("DUOLANE_CODEX_SERVER_COMPACTION") {
+        out.push("DUOLANE_CODEX_SERVER_COMPACTION (env)".to_string());
     }
     if env
-        .get("CCP_AUTO_REVIEW_MODEL")
+        .get("DUOLANE_AUTO_REVIEW_MODEL")
         .is_some_and(|raw| !raw.is_empty())
     {
-        out.push("CCP_AUTO_REVIEW_MODEL (env)".to_string());
+        out.push("DUOLANE_AUTO_REVIEW_MODEL (env)".to_string());
     }
     if let Some(file_cfg) = file {
         if let Some(bind_address) = file_cfg.bind_address {
@@ -316,7 +316,7 @@ pub fn is_verbose() -> bool {
 
 /// Token required on the proxy's own routes. Unset or blank leaves them open.
 pub fn auth_token() -> Option<String> {
-    std::env::var("CCP_AUTH_TOKEN")
+    std::env::var("DUOLANE_AUTH_TOKEN")
         .ok()
         .or_else(|| read_file_config(&paths::config_dir())?.auth_token)
         .map(|token| token.trim().to_string())
@@ -325,7 +325,7 @@ pub fn auth_token() -> Option<String> {
 
 pub fn anthropic_base_url() -> String {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_ANTHROPIC_BASE_URL") {
+    if let Some(raw) = env.get("DUOLANE_ANTHROPIC_BASE_URL") {
         return raw.clone();
     }
     "https://api.anthropic.com".to_string()
@@ -337,10 +337,7 @@ pub fn anthropic_base_url() -> String {
 
 pub fn codex_base_url(default: &str) -> String {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_CODEX_BASE_URL") {
-        return raw.clone();
-    }
-    if let Some(raw) = env.get("CLAUDE_CODE_PROXY_CODEX_BASE_URL") {
+    if let Some(raw) = env.get("DUOLANE_CODEX_BASE_URL") {
         return raw.clone();
     }
     let config_dir = paths::config_dir();
@@ -355,7 +352,7 @@ pub fn codex_base_url(default: &str) -> String {
 
 pub fn codex_originator(default: &str) -> String {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_CODEX_ORIGINATOR") {
+    if let Some(raw) = env.get("DUOLANE_CODEX_ORIGINATOR") {
         return raw.clone();
     }
     let config_dir = paths::config_dir();
@@ -370,10 +367,10 @@ pub fn codex_originator(default: &str) -> String {
 
 pub fn codex_user_agent(default: &str) -> String {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_CODEX_USER_AGENT") {
+    if let Some(raw) = env.get("DUOLANE_CODEX_USER_AGENT") {
         return raw.clone();
     }
-    if let Some(raw) = env.get("CCP_USER_AGENT") {
+    if let Some(raw) = env.get("DUOLANE_USER_AGENT") {
         return raw.clone();
     }
     let config_dir = paths::config_dir();
@@ -388,7 +385,7 @@ pub fn codex_user_agent(default: &str) -> String {
 
 pub fn codex_previous_response_id() -> bool {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_CODEX_PREVIOUS_RESPONSE_ID") {
+    if let Some(raw) = env.get("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID") {
         return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
     }
     let config_dir = paths::config_dir();
@@ -403,7 +400,7 @@ pub fn codex_previous_response_id() -> bool {
 
 pub fn codex_server_compaction() -> bool {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_CODEX_SERVER_COMPACTION") {
+    if let Some(raw) = env.get("DUOLANE_CODEX_SERVER_COMPACTION") {
         match raw.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => return true,
             "0" | "false" | "no" | "off" => return false,
@@ -422,7 +419,7 @@ pub fn codex_server_compaction() -> bool {
 
 pub fn codex_responses_api() -> bool {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_CODEX_RESPONSES_API") {
+    if let Some(raw) = env.get("DUOLANE_CODEX_RESPONSES_API") {
         return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
     }
     let config_dir = paths::config_dir();
@@ -437,7 +434,7 @@ pub fn codex_responses_api() -> bool {
 
 pub fn codex_full_lane() -> bool {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_CODEX_FULL_LANE") {
+    if let Some(raw) = env.get("DUOLANE_CODEX_FULL_LANE") {
         return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
     }
     let config_dir = paths::config_dir();
@@ -452,7 +449,7 @@ pub fn codex_full_lane() -> bool {
 
 pub fn codex_images_api() -> bool {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_CODEX_IMAGES_API") {
+    if let Some(raw) = env.get("DUOLANE_CODEX_IMAGES_API") {
         return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
     }
     let config_dir = paths::config_dir();
@@ -467,7 +464,7 @@ pub fn codex_images_api() -> bool {
 
 pub fn codex_transcriptions_api() -> bool {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_CODEX_TRANSCRIPTIONS_API") {
+    if let Some(raw) = env.get("DUOLANE_CODEX_TRANSCRIPTIONS_API") {
         return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
     }
     let config_dir = paths::config_dir();
@@ -482,7 +479,7 @@ pub fn codex_transcriptions_api() -> bool {
 
 pub fn codex_images_base_url() -> String {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_CODEX_IMAGES_BASE_URL") {
+    if let Some(raw) = env.get("DUOLANE_CODEX_IMAGES_BASE_URL") {
         return raw.clone();
     }
     let config_dir = paths::config_dir();
@@ -497,7 +494,7 @@ pub fn codex_images_base_url() -> String {
 
 pub fn codex_service_tier() -> Option<String> {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_CODEX_SERVICE_TIER") {
+    if let Some(raw) = env.get("DUOLANE_CODEX_SERVICE_TIER") {
         return Some(raw.clone());
     }
     let config_dir = paths::config_dir();
@@ -511,7 +508,7 @@ pub fn codex_service_tier() -> Option<String> {
 
 pub fn codex_effort() -> Option<String> {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_CODEX_EFFORT") {
+    if let Some(raw) = env.get("DUOLANE_CODEX_EFFORT") {
         return Some(raw.clone());
     }
     let config_dir = paths::config_dir();
@@ -526,7 +523,7 @@ pub fn codex_effort() -> Option<String> {
 pub fn codex_reasoning_summary() -> Option<String> {
     let env: HashMap<_, _> = std::env::vars().collect();
     if let Some(raw) = env
-        .get("CCP_CODEX_REASONING_SUMMARY")
+        .get("DUOLANE_CODEX_REASONING_SUMMARY")
         .filter(|raw| !raw.is_empty())
     {
         return Some(raw.clone());
@@ -543,7 +540,7 @@ pub fn codex_reasoning_summary() -> Option<String> {
 
 pub fn codex_model() -> Option<String> {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_CODEX_MODEL") {
+    if let Some(raw) = env.get("DUOLANE_CODEX_MODEL") {
         return Some(raw.clone());
     }
     let config_dir = paths::config_dir();
@@ -558,7 +555,7 @@ pub fn codex_model() -> Option<String> {
 pub fn auto_review_model() -> Option<String> {
     let env: HashMap<_, _> = std::env::vars().collect();
     if let Some(raw) = env
-        .get("CCP_AUTO_REVIEW_MODEL")
+        .get("DUOLANE_AUTO_REVIEW_MODEL")
         .filter(|raw| !raw.is_empty())
     {
         return Some(raw.clone());
@@ -600,7 +597,7 @@ fn parse_codex_transport(raw: &str) -> Option<CodexTransport> {
 
 pub fn codex_transport() -> CodexTransport {
     let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("CCP_CODEX_TRANSPORT")
+    if let Some(raw) = env.get("DUOLANE_CODEX_TRANSPORT")
         && let Some(transport) = parse_codex_transport(raw)
     {
         return transport;
@@ -631,7 +628,7 @@ pub const CODEX_MIN_HEADER_TIMEOUT_MS: u64 = 1_000;
 pub fn codex_header_timeout_ms() -> u64 {
     let env: HashMap<_, _> = std::env::vars().collect();
     if let Some(ms) = env
-        .get("CCP_CODEX_HEADER_TIMEOUT_MS")
+        .get("DUOLANE_CODEX_HEADER_TIMEOUT_MS")
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|ms| *ms >= CODEX_MIN_HEADER_TIMEOUT_MS)
     {
@@ -660,33 +657,33 @@ mod tests {
     /// Clears the environment knobs the config accessors read and points the
     /// config dir at `config`, so neither the developer's shell nor their real
     /// config.json can leak into the test. Every change is restored when the
-    /// guards drop, including `CCP_CONFIG_DIR`: a plain `remove_var` here would
-    /// strip a `CCP_CONFIG_DIR` the developer exported to isolate the whole
+    /// guards drop, including `DUOLANE_CONFIG_DIR`: a plain `remove_var` here would
+    /// strip a `DUOLANE_CONFIG_DIR` the developer exported to isolate the whole
     /// run, and every later test in the process that reads config through
     /// `paths::config_dir()` would fall back to the real config file.
     fn isolated_env(config: &tempfile::TempDir) -> Vec<EnvGuard> {
         let mut guards = vec![
-            EnvGuard::unset("CCP_BIND_ADDRESS"),
-            EnvGuard::unset("CCP_CODEX_TRANSPORT"),
-            EnvGuard::unset("CCP_LOG_VERBOSE"),
-            EnvGuard::unset("CCP_LOG_STDERR"),
-            EnvGuard::unset("CCP_CODEX_REASONING_SUMMARY"),
-            EnvGuard::unset("CCP_CODEX_SERVER_COMPACTION"),
-            EnvGuard::unset("CCP_CODEX_RESPONSES_API"),
-            EnvGuard::unset("CCP_CODEX_FULL_LANE"),
-            EnvGuard::unset("CCP_CODEX_IMAGES_API"),
-            EnvGuard::unset("CCP_CODEX_IMAGES_BASE_URL"),
-            EnvGuard::unset("CCP_CODEX_TRANSCRIPTIONS_API"),
-            EnvGuard::unset("CCP_CODEX_HEADER_TIMEOUT_MS"),
-            EnvGuard::unset("CCP_AUTO_REVIEW_MODEL"),
+            EnvGuard::unset("DUOLANE_BIND_ADDRESS"),
+            EnvGuard::unset("DUOLANE_CODEX_TRANSPORT"),
+            EnvGuard::unset("DUOLANE_LOG_VERBOSE"),
+            EnvGuard::unset("DUOLANE_LOG_STDERR"),
+            EnvGuard::unset("DUOLANE_CODEX_REASONING_SUMMARY"),
+            EnvGuard::unset("DUOLANE_CODEX_SERVER_COMPACTION"),
+            EnvGuard::unset("DUOLANE_CODEX_RESPONSES_API"),
+            EnvGuard::unset("DUOLANE_CODEX_FULL_LANE"),
+            EnvGuard::unset("DUOLANE_CODEX_IMAGES_API"),
+            EnvGuard::unset("DUOLANE_CODEX_IMAGES_BASE_URL"),
+            EnvGuard::unset("DUOLANE_CODEX_TRANSCRIPTIONS_API"),
+            EnvGuard::unset("DUOLANE_CODEX_HEADER_TIMEOUT_MS"),
+            EnvGuard::unset("DUOLANE_AUTO_REVIEW_MODEL"),
         ];
-        guards.push(EnvGuard::set("CCP_CONFIG_DIR", config.path()));
+        guards.push(EnvGuard::set("DUOLANE_CONFIG_DIR", config.path()));
         guards
     }
 
     fn config_env(config: &tempfile::TempDir) -> HashMap<String, String> {
         HashMap::from([(
-            "CCP_CONFIG_DIR".to_string(),
+            "DUOLANE_CONFIG_DIR".to_string(),
             config.path().to_string_lossy().into_owned(),
         )])
     }
@@ -710,7 +707,7 @@ mod tests {
         let mut env = config_env(&config);
 
         assert_eq!(load_config_for_env(&env).bind_address, "192.0.2.10");
-        env.insert("CCP_BIND_ADDRESS".to_string(), "0.0.0.0".to_string());
+        env.insert("DUOLANE_BIND_ADDRESS".to_string(), "0.0.0.0".to_string());
         assert_eq!(load_config_for_env(&env).bind_address, "0.0.0.0");
     }
 
@@ -752,7 +749,7 @@ mod tests {
     fn isolated_env_restores_an_exported_config_dir() {
         let _guard = ENV_LOCK.lock().unwrap();
         let exported = tempfile::TempDir::new().unwrap();
-        let _exported_env = EnvGuard::set("CCP_CONFIG_DIR", exported.path());
+        let _exported_env = EnvGuard::set("DUOLANE_CONFIG_DIR", exported.path());
         {
             let config = tempfile::TempDir::new().unwrap();
             let _env = isolated_env(&config);
@@ -774,7 +771,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let config = tempfile::TempDir::new().unwrap();
         let _env = isolated_env(&config);
-        let _transport = EnvGuard::set("CCP_CODEX_TRANSPORT", "auto");
+        let _transport = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "auto");
         assert_eq!(codex_transport(), CodexTransport::Auto);
     }
 
@@ -783,7 +780,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let config = tempfile::TempDir::new().unwrap();
         let _env = isolated_env(&config);
-        let _transport = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+        let _transport = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
         assert_eq!(codex_transport(), CodexTransport::WebSocket);
     }
 
@@ -792,7 +789,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let config = tempfile::TempDir::new().unwrap();
         let _env = isolated_env(&config);
-        let _transport = EnvGuard::set("CCP_CODEX_TRANSPORT", "invalid");
+        let _transport = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "invalid");
         assert_eq!(codex_transport(), CodexTransport::Auto);
     }
 
@@ -801,7 +798,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let config = tempfile::TempDir::new().unwrap();
         let _env = isolated_env(&config);
-        let _transport = EnvGuard::set("CCP_CODEX_TRANSPORT", "");
+        let _transport = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "");
         assert_eq!(codex_transport(), CodexTransport::Auto);
     }
 
@@ -822,7 +819,7 @@ mod tests {
             .unwrap();
             assert_eq!(codex_transport(), expected);
             for env_value in ["", "invalid"] {
-                let _transport = EnvGuard::set("CCP_CODEX_TRANSPORT", env_value);
+                let _transport = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", env_value);
                 assert_eq!(codex_transport(), expected);
             }
             for (env_value, expected) in [
@@ -830,7 +827,7 @@ mod tests {
                 ("websocket", CodexTransport::WebSocket),
                 ("auto", CodexTransport::Auto),
             ] {
-                let _transport = EnvGuard::set("CCP_CODEX_TRANSPORT", env_value);
+                let _transport = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", env_value);
                 assert_eq!(codex_transport(), expected);
             }
         }
@@ -865,7 +862,7 @@ mod tests {
         .unwrap();
         assert_eq!(codex_header_timeout_ms(), 600_000);
         {
-            let _timeout_env = EnvGuard::set("CCP_CODEX_HEADER_TIMEOUT_MS", "120000");
+            let _timeout_env = EnvGuard::set("DUOLANE_CODEX_HEADER_TIMEOUT_MS", "120000");
             assert_eq!(codex_header_timeout_ms(), 120_000);
         }
         // Below the floor is ignored, not clamped: a value that small is a typo,
@@ -876,7 +873,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(codex_header_timeout_ms(), CODEX_DEFAULT_HEADER_TIMEOUT_MS);
-        let _timeout_env = EnvGuard::set("CCP_CODEX_HEADER_TIMEOUT_MS", "0");
+        let _timeout_env = EnvGuard::set("DUOLANE_CODEX_HEADER_TIMEOUT_MS", "0");
         assert_eq!(codex_header_timeout_ms(), CODEX_DEFAULT_HEADER_TIMEOUT_MS);
     }
 
@@ -904,8 +901,8 @@ mod tests {
     fn log_env_presence_enables_legacy_verbose_and_stderr() {
         let config = tempfile::TempDir::new().unwrap();
         let mut env = config_env(&config);
-        env.insert("CCP_LOG_VERBOSE".to_string(), "0".to_string());
-        env.insert("CCP_LOG_STDERR".to_string(), String::new());
+        env.insert("DUOLANE_LOG_VERBOSE".to_string(), "0".to_string());
+        env.insert("DUOLANE_LOG_STDERR".to_string(), String::new());
 
         let loaded = load_config_for_env(&env);
         assert!(loaded.log_verbose);
@@ -948,7 +945,7 @@ mod tests {
         let _env = isolated_env(&config);
 
         assert!(codex_responses_api());
-        let _responses_env = EnvGuard::set("CCP_CODEX_RESPONSES_API", "false");
+        let _responses_env = EnvGuard::set("DUOLANE_CODEX_RESPONSES_API", "false");
         assert!(!codex_responses_api());
     }
 
@@ -965,7 +962,7 @@ mod tests {
         )
         .unwrap();
         assert!(codex_full_lane());
-        let _full_lane_env = EnvGuard::set("CCP_CODEX_FULL_LANE", "false");
+        let _full_lane_env = EnvGuard::set("DUOLANE_CODEX_FULL_LANE", "false");
         assert!(!codex_full_lane());
     }
 
@@ -975,11 +972,11 @@ mod tests {
         let config = tempfile::TempDir::new().unwrap();
         let _env = isolated_env(&config);
         for value in ["1", "true", "TRUE", "yes"] {
-            let _flag = EnvGuard::set("CCP_CODEX_FULL_LANE", value);
+            let _flag = EnvGuard::set("DUOLANE_CODEX_FULL_LANE", value);
             assert!(codex_full_lane(), "{value}");
         }
         for value in ["0", "false", "no", "invalid", ""] {
-            let _flag = EnvGuard::set("CCP_CODEX_FULL_LANE", value);
+            let _flag = EnvGuard::set("DUOLANE_CODEX_FULL_LANE", value);
             assert!(!codex_full_lane(), "{value}");
         }
     }
@@ -991,7 +988,7 @@ mod tests {
         let _env = isolated_env(&config);
 
         for value in ["1", "true", "TRUE", "yes"] {
-            let _responses_env = EnvGuard::set("CCP_CODEX_RESPONSES_API", value);
+            let _responses_env = EnvGuard::set("DUOLANE_CODEX_RESPONSES_API", value);
             assert!(codex_responses_api(), "{value}");
         }
     }
@@ -1012,9 +1009,9 @@ mod tests {
             codex_images_base_url(),
             "https://chatgpt.com/backend-api/codex-custom"
         );
-        let _enabled_env = EnvGuard::set("CCP_CODEX_IMAGES_API", "false");
+        let _enabled_env = EnvGuard::set("DUOLANE_CODEX_IMAGES_API", "false");
         let _base_env = EnvGuard::set(
-            "CCP_CODEX_IMAGES_BASE_URL",
+            "DUOLANE_CODEX_IMAGES_BASE_URL",
             "https://chatgpt.com/backend-api/codex",
         );
         assert!(!codex_images_api());
@@ -1036,7 +1033,7 @@ mod tests {
         let _env = isolated_env(&config);
 
         assert!(codex_transcriptions_api());
-        let _enabled_env = EnvGuard::set("CCP_CODEX_TRANSCRIPTIONS_API", "false");
+        let _enabled_env = EnvGuard::set("DUOLANE_CODEX_TRANSCRIPTIONS_API", "false");
         assert!(!codex_transcriptions_api());
     }
 
@@ -1065,11 +1062,11 @@ mod tests {
         .unwrap();
         let _env = isolated_env(&config);
         {
-            let _summary_env = EnvGuard::set("CCP_CODEX_REASONING_SUMMARY", "auto");
+            let _summary_env = EnvGuard::set("DUOLANE_CODEX_REASONING_SUMMARY", "auto");
             assert_eq!(codex_reasoning_summary().as_deref(), Some("auto"));
         }
         {
-            let _summary_env = EnvGuard::set("CCP_CODEX_REASONING_SUMMARY", "");
+            let _summary_env = EnvGuard::set("DUOLANE_CODEX_REASONING_SUMMARY", "");
             assert_eq!(codex_reasoning_summary().as_deref(), Some("off"));
         }
     }
@@ -1087,11 +1084,11 @@ mod tests {
 
         assert_eq!(auto_review_model().as_deref(), Some("gpt-6-luna"));
         {
-            let _model_env = EnvGuard::set("CCP_AUTO_REVIEW_MODEL", "gpt-5.6-terra");
+            let _model_env = EnvGuard::set("DUOLANE_AUTO_REVIEW_MODEL", "gpt-5.6-terra");
             assert_eq!(auto_review_model().as_deref(), Some("gpt-5.6-terra"));
         }
         {
-            let _model_env = EnvGuard::set("CCP_AUTO_REVIEW_MODEL", "");
+            let _model_env = EnvGuard::set("DUOLANE_AUTO_REVIEW_MODEL", "");
             assert_eq!(auto_review_model().as_deref(), Some("gpt-6-luna"));
         }
     }
@@ -1104,7 +1101,7 @@ mod tests {
 
         assert!(!codex_server_compaction());
         {
-            let _enabled_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "on");
+            let _enabled_env = EnvGuard::set("DUOLANE_CODEX_SERVER_COMPACTION", "on");
             assert!(codex_server_compaction());
         }
         std::fs::write(
@@ -1113,7 +1110,7 @@ mod tests {
         )
         .unwrap();
         assert!(codex_server_compaction());
-        let _disabled_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "false");
+        let _disabled_env = EnvGuard::set("DUOLANE_CODEX_SERVER_COMPACTION", "false");
         assert!(!codex_server_compaction());
     }
 }

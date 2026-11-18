@@ -4,11 +4,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use claude_codex::providers::codex::websocket::{
+use duolane::providers::codex::websocket::{
     WEBSOCKET_PROTOCOL_HEADER, invalidate_codex_websocket_pool_owner,
 };
-use claude_codex::request_identity::ConversationIdentity;
-use claude_codex::server;
+use duolane::request_identity::ConversationIdentity;
+use duolane::server;
 use futures_util::{SinkExt, StreamExt};
 use http::{HeaderMap, StatusCode};
 use serde_json::{Value, json};
@@ -79,14 +79,14 @@ fn configure_environment(config_dir: &Path, upstream_url: &str) -> Vec<EnvGuard>
         "ALL_PROXY",
         "all_proxy",
         "REQUEST_METHOD",
-        "CCP_AUTO_REVIEW_MODEL",
-        "CCP_CODEX_MODEL",
-        "CCP_CODEX_SERVICE_TIER",
-        "CCP_CODEX_EFFORT",
-        "CCP_CODEX_REASONING_SUMMARY",
-        "CCP_CODEX_ORIGINATOR",
-        "CCP_CODEX_USER_AGENT",
-        "CCP_USER_AGENT",
+        "DUOLANE_AUTO_REVIEW_MODEL",
+        "DUOLANE_CODEX_MODEL",
+        "DUOLANE_CODEX_SERVICE_TIER",
+        "DUOLANE_CODEX_EFFORT",
+        "DUOLANE_CODEX_REASONING_SUMMARY",
+        "DUOLANE_CODEX_ORIGINATOR",
+        "DUOLANE_CODEX_USER_AGENT",
+        "DUOLANE_USER_AGENT",
     ]
     .into_iter()
     .map(EnvGuard::unset)
@@ -94,13 +94,16 @@ fn configure_environment(config_dir: &Path, upstream_url: &str) -> Vec<EnvGuard>
     guards.extend([
         EnvGuard::set("NO_PROXY", "127.0.0.1,localhost"),
         EnvGuard::set("no_proxy", "127.0.0.1,localhost"),
-        EnvGuard::set("CCP_CONFIG_DIR", config_dir),
-        EnvGuard::set("CCP_CODEX_AUTH_FILE", config_dir.join("codex/auth.json")),
-        EnvGuard::set("CCP_ALIAS_PROVIDER", "codex"),
-        EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket"),
-        EnvGuard::set("CCP_CODEX_BASE_URL", upstream_url),
-        EnvGuard::set("CCP_CODEX_PREVIOUS_RESPONSE_ID", "1"),
-        EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "0"),
+        EnvGuard::set("DUOLANE_CONFIG_DIR", config_dir),
+        EnvGuard::set(
+            "DUOLANE_CODEX_AUTH_FILE",
+            config_dir.join("codex/auth.json"),
+        ),
+        EnvGuard::set("DUOLANE_ALIAS_PROVIDER", "codex"),
+        EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket"),
+        EnvGuard::set("DUOLANE_CODEX_BASE_URL", upstream_url),
+        EnvGuard::set("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "1"),
+        EnvGuard::set("DUOLANE_CODEX_SERVER_COMPACTION", "0"),
     ]);
     guards
 }

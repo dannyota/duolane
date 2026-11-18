@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 #
-# claude-codex installation script
-# Usage: curl -fsSL https://raw.githubusercontent.com/fcakyon/claude-code-with-codex/main/scripts/install.sh | bash
+# duolane installation script
+# Usage: curl -fsSL https://raw.githubusercontent.com/dannyota/duolane/main/scripts/install.sh | bash
 #
 # Environment variables:
-#   CLAUDE_CODEX_VERSION      - Pin a specific version (e.g., v0.1.0)
-#   CLAUDE_CODEX_INSTALL_DIR  - Override install directory (default: /usr/local/bin or ~/.local/bin)
+#   DUOLANE_VERSION      - Pin a specific version (e.g., v0.1.0)
+#   DUOLANE_INSTALL_DIR  - Override install directory (default: /usr/local/bin or ~/.local/bin)
 #
 # Examples:
-#   CLAUDE_CODEX_VERSION=v0.1.0 bash install.sh
-#   CLAUDE_CODEX_INSTALL_DIR=/opt/bin bash install.sh
+#   DUOLANE_VERSION=v0.1.0 bash install.sh
+#   DUOLANE_INSTALL_DIR=/opt/bin bash install.sh
 #
 
 set -e
 
-BIN_NAME="claude-codex"
-REPO="fcakyon/claude-code-with-codex"
+BIN_NAME="duolane"
+REPO="dannyota/duolane"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -38,8 +38,8 @@ detect_platform() {
 		log_error "Unsupported operating system: $(uname -s)"
 		echo ""
 		echo "${BIN_NAME} supports macOS and Linux."
-		echo "For other platforms, build from source with Bun:"
-		echo "  git clone https://github.com/${REPO}"
+		echo "For other platforms, build from source with Cargo:"
+		echo "  cargo install --git https://github.com/${REPO} --locked"
 		echo ""
 		exit 1
 		;;
@@ -52,8 +52,8 @@ detect_platform() {
 		log_error "Unsupported architecture: $(uname -m)"
 		echo ""
 		echo "${BIN_NAME} prebuilt binaries are available for amd64 and arm64."
-		echo "For other architectures, build from source with Bun:"
-		echo "  git clone https://github.com/${REPO}"
+		echo "For other architectures, build from source with Cargo:"
+		echo "  cargo install --git https://github.com/${REPO} --locked"
 		echo ""
 		exit 1
 		;;
@@ -70,7 +70,7 @@ install_from_release() {
 	tmp_dir=$(mktemp -d)
 	trap 'rm -rf "$tmp_dir"' EXIT
 
-	local version="${CLAUDE_CODEX_VERSION:-}"
+	local version="${DUOLANE_VERSION:-}"
 
 	if [ -z "$version" ]; then
 		log_info "Fetching latest release..."
@@ -78,9 +78,9 @@ install_from_release() {
 		local release_json
 
 		if command -v curl &>/dev/null; then
-			release_json=$(curl -fsSL --retry 3 --retry-connrefused --connect-timeout 10 --max-time 30 "$latest_url")
+			release_json=$(curl -fsSL --retry 3 --retry-connrefused --connect-timeout 10 --max-time 30 "$latest_url" || true)
 		elif command -v wget &>/dev/null; then
-			release_json=$(wget --tries=3 --timeout=30 -qO- "$latest_url")
+			release_json=$(wget --tries=3 --timeout=30 -qO- "$latest_url" || true)
 		else
 			log_error "Neither curl nor wget found. Please install one of them."
 			exit 1
@@ -91,9 +91,12 @@ install_from_release() {
 		if [ -z "$version" ]; then
 			log_error "Failed to fetch latest version"
 			echo ""
-			echo "This might be due to network issues or GitHub API rate limits."
+			echo "No release may exist yet, or GitHub may be unreachable or rate limited."
+			echo "To install from source:"
+			echo "  cargo install --git https://github.com/${REPO} --locked"
+			echo ""
 			echo "You can specify a version manually:"
-			echo "  CLAUDE_CODEX_VERSION=v0.1.0 bash install.sh"
+			echo "  DUOLANE_VERSION=v0.1.0 bash install.sh"
 			echo ""
 			exit 1
 		fi
@@ -166,7 +169,7 @@ install_from_release() {
 		exit 1
 	fi
 
-	local install_dir="${CLAUDE_CODEX_INSTALL_DIR:-}"
+	local install_dir="${DUOLANE_INSTALL_DIR:-}"
 	if [ -z "$install_dir" ]; then
 		if [[ -w /usr/local/bin ]]; then
 			install_dir="/usr/local/bin"

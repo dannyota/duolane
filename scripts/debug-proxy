@@ -3,24 +3,24 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Start an isolated claude-codex debugging instance on a random localhost port.
+Start an isolated duolane debugging instance on a random localhost port.
 
 Usage:
   scripts/debug-proxy
   scripts/debug-proxy --help
 
 Prerequisites:
-  - Run from a checkout of claude-codex.
+  - Run from a checkout of duolane.
   - Install cargo, curl, and the upstream provider credentials you need.
-  - Authenticate providers with the normal `claude-codex <provider> auth`
+  - Authenticate providers with the normal `duolane <provider> auth`
     commands. This helper reads the normal config directory, so existing logins
     remain available.
 
 The helper builds the debug binary, retries random dynamic ports until the
 health endpoint responds, and enables:
-  - complete string fields in proxy.log via CCP_LOG_VERBOSE=1
-  - mirrored process output via CCP_LOG_STDERR=1
-  - full request and event captures via CCP_TRAFFIC_LOG=1
+  - complete string fields in duolane.log via DUOLANE_LOG_VERBOSE=1
+  - mirrored process output via DUOLANE_LOG_STDERR=1
+  - full request and event captures via DUOLANE_TRAFFIC_LOG=1
   - an isolated XDG state directory under the system temporary directory
 
 It prints a client.env path for another shell, exact log and capture paths, and
@@ -49,10 +49,10 @@ for command in git cargo curl; do
 done
 
 if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-  printf 'error: run this helper from a claude-codex checkout\n' >&2
+  printf 'error: run this helper from a duolane checkout\n' >&2
   exit 1
 fi
-run_dir="$(mktemp -d "${TMPDIR:-/tmp}/claude-codex-debug.XXXXXX")"
+run_dir="$(mktemp -d "${TMPDIR:-/tmp}/duolane-debug.XXXXXX")"
 state_home="$run_dir/state"
 server_log="$run_dir/server.log"
 client_env="$run_dir/client.env"
@@ -71,17 +71,17 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 cd "$repo_root"
-cargo build --quiet --bin claude-codex
+cargo build --quiet --bin duolane
 
 for _attempt in {1..20}; do
   proxy_port=$((49152 + (RANDOM % 16384)))
   : > "$server_log"
 
   XDG_STATE_HOME="$state_home" \
-  CCP_LOG_STDERR=1 \
-  CCP_LOG_VERBOSE=1 \
-  CCP_TRAFFIC_LOG=1 \
-    "$repo_root/target/debug/claude-codex" serve \
+  DUOLANE_LOG_STDERR=1 \
+  DUOLANE_LOG_VERBOSE=1 \
+  DUOLANE_TRAFFIC_LOG=1 \
+    "$repo_root/target/debug/duolane" serve \
       --port "$proxy_port" \
       --no-monitor >> "$server_log" 2>&1 &
   proxy_pid=$!
@@ -135,10 +135,10 @@ Live process output:
   tail -F "$server_log"
 
 Structured JSONL log:
-  tail -F "$state_home/claude-code-proxy/proxy.log"
+  tail -F "$state_home/duolane/duolane.log"
 
 Full traffic captures:
-  $state_home/claude-code-proxy/traffic
+  $state_home/duolane/traffic
 
 Press Ctrl-C here to stop the proxy. Debug artifacts remain in:
   $run_dir

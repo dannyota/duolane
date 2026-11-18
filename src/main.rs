@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
-use claude_codex::{
+use duolane::{
     config, logging,
     monitor::MonitorHandle,
     paths,
@@ -14,7 +14,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "claude-codex",
+    name = "duolane",
     version = VERSION,
     about = "Anthropic-compatible proxy for Claude Code provider backends",
     disable_version_flag = true
@@ -59,7 +59,7 @@ enum Commands {
 enum ProviderGroup {
     Auth {
         #[command(subcommand)]
-        command: claude_codex::provider::AuthCommand,
+        command: duolane::provider::AuthCommand,
     },
 }
 
@@ -67,7 +67,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.version_flag {
-        println!("claude-codex {}", VERSION);
+        println!("duolane {}", VERSION);
         return Ok(());
     }
 
@@ -78,7 +78,7 @@ fn main() -> Result<()> {
 
     match commands {
         Commands::Version => {
-            println!("claude-codex {}", VERSION);
+            println!("duolane {}", VERSION);
             Ok(())
         }
         Commands::Serve { port, no_monitor } => {
@@ -158,9 +158,10 @@ fn main() -> Result<()> {
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(std::time::Duration::from_secs(2))
                 .build()?;
-            let monitor = runtime.block_on(
-                claude_codex::monitor::remote::RemoteMonitor::connect(client, url.clone()),
-            )?;
+            let monitor = runtime.block_on(duolane::monitor::remote::RemoteMonitor::connect(
+                client,
+                url.clone(),
+            ))?;
             tui::run_attached_monitor(|| monitor.snapshot(), url.to_string())?;
             Ok(())
         }
@@ -273,28 +274,28 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
     let handlers = provider.cli();
     match command {
         ProviderGroup::Auth { command } => match command {
-            claude_codex::provider::AuthCommand::Login => {
+            duolane::provider::AuthCommand::Login => {
                 if let Err(err) = handlers.login() {
                     eprintln!("{err}");
                     std::process::exit(2);
                 }
                 Ok(())
             }
-            claude_codex::provider::AuthCommand::Device => {
+            duolane::provider::AuthCommand::Device => {
                 if let Err(err) = handlers.device() {
                     eprintln!("{err}");
                     std::process::exit(2);
                 }
                 Ok(())
             }
-            claude_codex::provider::AuthCommand::Status => {
+            duolane::provider::AuthCommand::Status => {
                 if let Err(err) = handlers.status() {
                     println!("{err}");
                     std::process::exit(1);
                 }
                 Ok(())
             }
-            claude_codex::provider::AuthCommand::Logout => {
+            duolane::provider::AuthCommand::Logout => {
                 handlers.logout()?;
                 Ok(())
             }
@@ -319,7 +320,7 @@ fn listen_url(bind_address: &str, port: u16) -> String {
 }
 
 fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
-    println!("Proxy listening on {}", listen_url(bind_address, port));
+    println!("duolane listening on {}", listen_url(bind_address, port));
     println!("Logs: {}", paths::log_file().display());
     let cfg = paths::config_dir();
     if cfg.exists() {
@@ -368,7 +369,7 @@ mod tests {
 
     #[test]
     fn demo_command_parses_without_server_options() {
-        let cli = Cli::try_parse_from(["claude-codex", "demo"]).unwrap();
+        let cli = Cli::try_parse_from(["duolane", "demo"]).unwrap();
 
         assert!(matches!(cli.command, Some(Commands::Demo)));
     }

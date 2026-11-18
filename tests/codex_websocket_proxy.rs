@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use claude_codex::providers::codex::websocket::clear_codex_websocket_pool_for_tests;
-use claude_codex::{registry::Registry, server::app};
+use duolane::providers::codex::websocket::clear_codex_websocket_pool_for_tests;
+use duolane::{registry::Registry, server::app};
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use serde_json::json;
@@ -55,14 +55,14 @@ struct ZeroRetryDelayGuard;
 
 impl ZeroRetryDelayGuard {
     fn new() -> Self {
-        claude_codex::retry::set_zero_retry_delay_for_tests(true);
+        duolane::retry::set_zero_retry_delay_for_tests(true);
         Self
     }
 }
 
 impl Drop for ZeroRetryDelayGuard {
     fn drop(&mut self) {
-        claude_codex::retry::set_zero_retry_delay_for_tests(false);
+        duolane::retry::set_zero_retry_delay_for_tests(false);
     }
 }
 
@@ -85,13 +85,16 @@ fn clear_proxy_environment() -> Vec<EnvGuard> {
 
 fn configure_codex(config_dir: &Path, base_url: &str) -> Vec<EnvGuard> {
     vec![
-        EnvGuard::set("CCP_CONFIG_DIR", config_dir),
-        EnvGuard::set("CCP_CODEX_AUTH_FILE", config_dir.join("codex/auth.json")),
-        EnvGuard::set("CCP_ALIAS_PROVIDER", "codex"),
-        EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket"),
-        EnvGuard::set("CCP_CODEX_BASE_URL", base_url),
-        EnvGuard::set("CCP_CODEX_PREVIOUS_RESPONSE_ID", "0"),
-        EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "0"),
+        EnvGuard::set("DUOLANE_CONFIG_DIR", config_dir),
+        EnvGuard::set(
+            "DUOLANE_CODEX_AUTH_FILE",
+            config_dir.join("codex/auth.json"),
+        ),
+        EnvGuard::set("DUOLANE_ALIAS_PROVIDER", "codex"),
+        EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket"),
+        EnvGuard::set("DUOLANE_CODEX_BASE_URL", base_url),
+        EnvGuard::set("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "0"),
+        EnvGuard::set("DUOLANE_CODEX_SERVER_COMPACTION", "0"),
     ]
 }
 
@@ -332,8 +335,8 @@ async fn check_transport_policy(
         let mut guards = clear_proxy_environment();
         guards.extend(configure_codex(config_dir, &origin_url));
         guards.push(match transport {
-            Some(value) => EnvGuard::set("CCP_CODEX_TRANSPORT", value),
-            None => EnvGuard::unset("CCP_CODEX_TRANSPORT"),
+            Some(value) => EnvGuard::set("DUOLANE_CODEX_TRANSPORT", value),
+            None => EnvGuard::unset("DUOLANE_CODEX_TRANSPORT"),
         });
         tokio::time::timeout(
             Duration::from_secs(10),
@@ -615,7 +618,7 @@ async fn codex_websocket_inherits_environment_proxy_configuration() {
         let mut guards = clear_proxy_environment();
         guards.extend(configure_codex(config_dir.path(), &origin_url));
         guards.push(EnvGuard::set("HTTP_PROXY", &failing_proxy_url));
-        guards.push(EnvGuard::set("CCP_CODEX_TRANSPORT", "auto"));
+        guards.push(EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "auto"));
         call_messages("proxy-env-no-direct-fallback").await
     };
     let _ = stop.send(());

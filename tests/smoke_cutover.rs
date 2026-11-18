@@ -4,10 +4,10 @@ mod isolated_codex;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
-use claude_codex::providers::codex::compaction::clear_all_compactions_for_tests;
-use claude_codex::providers::codex::continuation::clear_all_continuations_for_tests;
-use claude_codex::providers::codex::websocket::clear_codex_websocket_pool_for_tests;
-use claude_codex::{
+use duolane::providers::codex::compaction::clear_all_compactions_for_tests;
+use duolane::providers::codex::continuation::clear_all_continuations_for_tests;
+use duolane::providers::codex::websocket::clear_codex_websocket_pool_for_tests;
+use duolane::{
     registry::Registry,
     server::{app, app_with_options},
 };
@@ -42,7 +42,7 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 
 /// Write a Codex CLI style `auth.json` and point the proxy at it for the test's
 /// lifetime. The proxy reads Codex credentials from the Codex CLI file, not the
-/// proxy config dir, so tests must set `CCP_CODEX_AUTH_FILE` to stay hermetic
+/// proxy config dir, so tests must set `DUOLANE_CODEX_AUTH_FILE` to stay hermetic
 /// instead of falling back to the developer's real `~/.codex/auth.json`.
 fn write_codex_auth(config_dir: &std::path::Path) -> EnvGuard {
     let dir = config_dir.join("codex");
@@ -56,7 +56,7 @@ fn write_codex_auth(config_dir: &std::path::Path) -> EnvGuard {
         }
     });
     std::fs::write(&path, serde_json::to_vec(&auth).unwrap()).unwrap();
-    EnvGuard::set("CCP_CODEX_AUTH_FILE", path)
+    EnvGuard::set("DUOLANE_CODEX_AUTH_FILE", path)
 }
 
 struct EnvGuard {
@@ -146,7 +146,7 @@ fn collect_files(root: &Path) -> Vec<PathBuf> {
 fn traffic_files(state_dir: &Path) -> Vec<PathBuf> {
     collect_files(
         &state_dir
-            .join("claude-code-proxy")
+            .join("duolane")
             .join("traffic")
             .join("smoke-session"),
     )
@@ -318,9 +318,9 @@ async fn assert_codex_http_retries_structural_body_error(first_body: Vec<u8>) {
     let upstream =
         spawn_retrying_truncated_http_upstream(first_body, success_body, attempts.clone()).await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -375,9 +375,9 @@ async fn assert_codex_http_presemantic_retry(first_response: Vec<u8>) {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -1013,9 +1013,9 @@ async fn smoke_codex_http_messages_uses_mock_upstream() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages("gpt-5.5").await;
 
     assert_eq!(response.status(), StatusCode::OK);
@@ -1049,8 +1049,8 @@ async fn smoke_codex_native_responses_preserves_parallel_tool_calls() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
     let response = call_responses_body(json!({
         "model":"gpt-5.4",
         "input":"hello",
@@ -1069,14 +1069,14 @@ struct ZeroRetryDelayGuard;
 
 impl ZeroRetryDelayGuard {
     fn enable() -> Self {
-        claude_codex::retry::set_zero_retry_delay_for_tests(true);
+        duolane::retry::set_zero_retry_delay_for_tests(true);
         ZeroRetryDelayGuard
     }
 }
 
 impl Drop for ZeroRetryDelayGuard {
     fn drop(&mut self) {
-        claude_codex::retry::set_zero_retry_delay_for_tests(false);
+        duolane::retry::set_zero_retry_delay_for_tests(false);
     }
 }
 
@@ -1198,9 +1198,9 @@ async fn smoke_codex_http_usage_limit_event_fast_fails_live_request() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -1245,9 +1245,9 @@ async fn smoke_codex_http_header_only_usage_limit_event_fast_fails_live_request(
         axum::serve(listener, mock).await.ok();
     });
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", format!("http://{addr}"));
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", format!("http://{addr}"));
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -1278,9 +1278,9 @@ async fn smoke_codex_http_usage_limit_event_fast_fails_buffered_request() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages("gpt-5.5").await;
 
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
@@ -1309,9 +1309,9 @@ async fn smoke_codex_http_retries_empty_completion() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
 
     let response = call_messages("gpt-5.5").await;
     let status = response.status();
@@ -1352,9 +1352,9 @@ async fn smoke_codex_http_retries_empty_message_completion() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
 
     let response = call_messages("gpt-5.5").await;
     let status = response.status();
@@ -1391,9 +1391,9 @@ async fn smoke_codex_http_stream_retries_empty_completion() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
 
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
@@ -1438,9 +1438,9 @@ async fn smoke_codex_http_empty_completions_exhaust_to_service_unavailable() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
 
     let response = call_messages("gpt-5.5").await;
     let status = response.status();
@@ -1496,10 +1496,10 @@ async fn smoke_auto_review_uses_codex_default_and_configured_override() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
-    let _codex_model_env = EnvGuard::set("CCP_CODEX_MODEL", "gpt-5.6-sol");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
+    let _codex_model_env = EnvGuard::set("DUOLANE_CODEX_MODEL", "gpt-5.6-sol");
     let classifier_body = || {
         json!({
             "model": "gpt-5.6-sol",
@@ -1521,7 +1521,7 @@ async fn smoke_auto_review_uses_codex_default_and_configured_override() {
         .unwrap();
 
     {
-        let _review_model_env = EnvGuard::set("CCP_AUTO_REVIEW_MODEL", "gpt-5.6-terra");
+        let _review_model_env = EnvGuard::set("DUOLANE_AUTO_REVIEW_MODEL", "gpt-5.6-terra");
         let classifier = call_messages_body(classifier_body()).await;
         assert_eq!(classifier.status(), StatusCode::OK);
         let _ = axum::body::to_bytes(classifier.into_body(), usize::MAX)
@@ -1564,10 +1564,10 @@ async fn smoke_codex_http_server_compaction_fast_fails_usage_limit() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
-    let _compaction_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "1");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
+    let _compaction_env = EnvGuard::set("DUOLANE_CODEX_SERVER_COMPACTION", "1");
     let response = call_messages_body(json!({
         "model": "gpt-5.6-sol",
         "max_tokens": 64,
@@ -1594,7 +1594,7 @@ async fn smoke_codex_http_server_compaction_fast_fails_usage_limit() {
 #[tokio::test]
 async fn smoke_codex_http_server_compaction_replays_native_history() {
     let _guard = env_lock();
-    let _full_lane_env = EnvGuard::set("CCP_CODEX_FULL_LANE", "0");
+    let _full_lane_env = EnvGuard::set("DUOLANE_CODEX_FULL_LANE", "0");
     clear_all_compactions_for_tests();
     let config = TempDir::new().unwrap();
     let _codex_auth = write_codex_auth(config.path());
@@ -1637,10 +1637,10 @@ async fn smoke_codex_http_server_compaction_replays_native_history() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
-    let _compaction_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "1");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
+    let _compaction_env = EnvGuard::set("DUOLANE_CODEX_SERVER_COMPACTION", "1");
     let compact_response = call_messages_body(json!({
         "model": "gpt-5.6-sol",
         "max_tokens": 64,
@@ -1740,10 +1740,10 @@ async fn smoke_codex_http_compaction_failure_preserves_portable_summary() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
-    let _compaction_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "1");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
+    let _compaction_env = EnvGuard::set("DUOLANE_CODEX_SERVER_COMPACTION", "1");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -1781,9 +1781,9 @@ async fn smoke_codex_http_context_window_error_requests_compaction() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages("gpt-5.5").await;
     let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1823,11 +1823,11 @@ async fn smoke_codex_http_traffic_capture_writes_upstream_artifacts() {
     })
     .await;
 
-    let _traffic_env = EnvGuard::set("CCP_TRAFFIC_LOG", "1");
+    let _traffic_env = EnvGuard::set("DUOLANE_TRAFFIC_LOG", "1");
     let _state_env = EnvGuard::set("XDG_STATE_HOME", state.path());
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages("gpt-5.5").await;
 
     assert_eq!(response.status(), StatusCode::OK);
@@ -1871,11 +1871,11 @@ async fn smoke_codex_http_stream_traffic_captures_downstream_events() {
     })
     .await;
 
-    let _traffic_env = EnvGuard::set("CCP_TRAFFIC_LOG", "1");
+    let _traffic_env = EnvGuard::set("DUOLANE_TRAFFIC_LOG", "1");
     let _state_env = EnvGuard::set("XDG_STATE_HOME", state.path());
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -1953,9 +1953,9 @@ async fn smoke_codex_http_stream_returns_before_upstream_completion() {
         axum::serve(listener, mock).await.ok();
     });
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = tokio::time::timeout(
         Duration::from_secs(3),
         call_messages_body(json!({
@@ -1966,7 +1966,7 @@ async fn smoke_codex_http_stream_returns_before_upstream_completion() {
         })),
     )
     .await
-    .expect("CCP must return streaming headers before upstream completion");
+    .expect("duolane must return streaming headers before upstream completion");
     assert_eq!(response.status(), StatusCode::OK);
 
     let mut body = response.into_body();
@@ -2096,9 +2096,9 @@ async fn smoke_codex_http_incomplete_after_text_is_an_error() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -2142,9 +2142,9 @@ async fn smoke_codex_http_preserves_permanent_policy_failure() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages("gpt-5.5").await;
 
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
@@ -2183,9 +2183,9 @@ async fn smoke_codex_http_rate_limit_snapshot_does_not_end_response() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -2250,9 +2250,9 @@ async fn smoke_codex_http_usage_limit_status_fast_fails_live_request() {
         axum::serve(listener, mock).await.ok();
     });
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -2295,9 +2295,9 @@ async fn smoke_codex_http_bounds_initial_status_retries() {
         axum::serve(listener, mock).await.ok();
     });
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -2350,9 +2350,9 @@ async fn smoke_codex_http_does_not_retry_overload_after_semantic_output() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -2401,9 +2401,9 @@ async fn smoke_codex_http_stops_after_retry_limit() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -2455,9 +2455,9 @@ async fn smoke_codex_http_cancels_retry_backoff_when_request_drops() {
     })
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let request = tokio::spawn(call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -2493,9 +2493,9 @@ async fn smoke_codex_http_body_error_after_semantic_output_preserves_message() {
     ).as_bytes())
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -2544,9 +2544,9 @@ async fn smoke_codex_http_body_error_after_closed_tool_is_not_success() {
     ).as_bytes())
     .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -2588,11 +2588,11 @@ async fn smoke_codex_http_truncated_upstream_writes_reducer_diagnostic() {
     })
     .await;
 
-    let _traffic_env = EnvGuard::set("CCP_TRAFFIC_LOG", "1");
+    let _traffic_env = EnvGuard::set("DUOLANE_TRAFFIC_LOG", "1");
     let _state_env = EnvGuard::set("XDG_STATE_HOME", state.path());
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let response = call_messages("gpt-5.5").await;
 
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -2620,9 +2620,9 @@ async fn smoke_codex_auto_fallback_usage_limit_fast_fails_live_request() {
         spawn_auto_fallback_usage_limit_upstream(websocket_attempts.clone(), http_attempts.clone())
             .await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "auto");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "auto");
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
@@ -2657,9 +2657,9 @@ async fn smoke_codex_websocket_messages_uses_mock_upstream() {
     let captured = Arc::new(Mutex::new(None));
     let upstream = spawn_websocket_upstream(captured.clone()).await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
     let response = call_messages("gpt-5.5").await;
 
     let ws_status = response.status();
@@ -2700,9 +2700,9 @@ async fn smoke_codex_websocket_usage_limit_fast_fails_request() {
 
     let attempts = Arc::new(AtomicUsize::new(0));
     let upstream = spawn_websocket_usage_limit_upstream(attempts.clone()).await;
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
 
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
@@ -2726,9 +2726,9 @@ async fn smoke_codex_websocket_uses_credits_after_included_limit() {
     clear_codex_websocket_pool_for_tests();
 
     let upstream = spawn_websocket_credited_rate_limit_upstream().await;
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
 
     let response = call_messages("gpt-5.5").await;
     let status = response.status();
@@ -2755,9 +2755,9 @@ async fn smoke_codex_websocket_stream_uses_credits_after_included_limit() {
     clear_codex_websocket_pool_for_tests();
 
     let upstream = spawn_websocket_credited_rate_limit_upstream().await;
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
 
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
@@ -2793,9 +2793,9 @@ async fn smoke_codex_websocket_stream_returns_delta_before_terminal() {
 
     let upstream = spawn_websocket_delayed_terminal_upstream().await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
 
     let response = tokio::time::timeout(
         Duration::from_millis(1_500),
@@ -2847,9 +2847,9 @@ async fn smoke_codex_websocket_context_window_error_requests_compaction() {
 
     let upstream = spawn_websocket_error_upstream("input exceeds context window").await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
 
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
@@ -2887,10 +2887,10 @@ async fn smoke_codex_websocket_stream_uses_previous_response_id() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream = spawn_websocket_sequence_upstream(captured.clone()).await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
-    let _previous_response_env = EnvGuard::set("CCP_CODEX_PREVIOUS_RESPONSE_ID", "1");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
+    let _previous_response_env = EnvGuard::set("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "1");
 
     let first = call_messages_body(json!({
         "model": "gpt-5.5",
@@ -2953,10 +2953,10 @@ async fn smoke_codex_websocket_stream_retries_missing_previous_response_id() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream = spawn_websocket_previous_missing_then_retry_upstream(captured.clone()).await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
-    let _previous_response_env = EnvGuard::set("CCP_CODEX_PREVIOUS_RESPONSE_ID", "1");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
+    let _previous_response_env = EnvGuard::set("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "1");
 
     let first = call_messages_body(json!({
         "model": "gpt-5.5",
@@ -3017,10 +3017,10 @@ async fn smoke_codex_websocket_stream_retries_empty_close_with_full_context() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream = spawn_websocket_close_then_retry_upstream(captured.clone()).await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
-    let _previous_response_env = EnvGuard::set("CCP_CODEX_PREVIOUS_RESPONSE_ID", "1");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
+    let _previous_response_env = EnvGuard::set("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "1");
 
     let first = call_messages_body(json!({
         "model": "gpt-5.5",
@@ -3097,12 +3097,12 @@ async fn smoke_codex_websocket_stream_retries_terminal_only_completion_with_full
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream = spawn_websocket_empty_completion_then_retry_upstream(captured.clone()).await;
 
-    let _traffic_env = EnvGuard::set("CCP_TRAFFIC_LOG", "1");
+    let _traffic_env = EnvGuard::set("DUOLANE_TRAFFIC_LOG", "1");
     let _state_env = EnvGuard::set("XDG_STATE_HOME", state.path());
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
-    let _previous_response_env = EnvGuard::set("CCP_CODEX_PREVIOUS_RESPONSE_ID", "1");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
+    let _previous_response_env = EnvGuard::set("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "1");
 
     let first = call_messages_body(json!({
         "model": "gpt-5.5",
@@ -3181,9 +3181,9 @@ async fn smoke_codex_websocket_empty_completions_exhaust_to_service_unavailable(
     let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let upstream = spawn_websocket_always_empty_completion_upstream(request_count.clone()).await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
 
     let response = call_messages_body(json!({
         "model": "gpt-5.5",
@@ -3230,10 +3230,10 @@ async fn smoke_codex_websocket_previous_response_id_sends_delta_on_second_turn()
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream = spawn_websocket_sequence_upstream(captured.clone()).await;
 
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
-    let _previous_response_env = EnvGuard::set("CCP_CODEX_PREVIOUS_RESPONSE_ID", "1");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
+    let _previous_response_env = EnvGuard::set("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "1");
 
     let first = call_messages_body(json!({
         "model": "gpt-5.5",
@@ -3327,11 +3327,11 @@ async fn smoke_codex_websocket_traffic_capture_writes_upstream_artifacts() {
     let captured = Arc::new(Mutex::new(None));
     let upstream = spawn_websocket_upstream(captured.clone()).await;
 
-    let _traffic_env = EnvGuard::set("CCP_TRAFFIC_LOG", "1");
+    let _traffic_env = EnvGuard::set("DUOLANE_TRAFFIC_LOG", "1");
     let _state_env = EnvGuard::set("XDG_STATE_HOME", state.path());
-    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
-    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
-    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
     let response = call_messages("gpt-5.5").await;
 
     assert_eq!(response.status(), StatusCode::OK);

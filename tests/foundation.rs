@@ -1,12 +1,12 @@
-use claude_codex::anthropic::{
+use duolane::anthropic::{
     encode_sse_event, parse_sse_events, parse_sse_events_with_stats, schema::MessagesRequest,
 };
-use claude_codex::auth::{AuthStorage, InMemoryAuthStore};
-use claude_codex::config::{AliasProvider, load_config_for_env};
-use claude_codex::logging::{create_logger, redact_value};
-use claude_codex::paths::{self, DirResolverEnv};
-use claude_codex::retry::{RETRY_INITIAL_DELAY_MS, RETRY_MAX_DELAY_MS, compute_backoff_delay};
-use claude_codex::traffic::{
+use duolane::auth::{AuthStorage, InMemoryAuthStore};
+use duolane::config::{AliasProvider, load_config_for_env};
+use duolane::logging::{create_logger, redact_value};
+use duolane::paths::{self, DirResolverEnv};
+use duolane::retry::{RETRY_INITIAL_DELAY_MS, RETRY_MAX_DELAY_MS, compute_backoff_delay};
+use duolane::traffic::{
     TrafficCaptureOptions, create_traffic_capture, redact_traffic, sanitize_path_part,
     traffic_capture_enabled_for_env,
 };
@@ -53,7 +53,10 @@ fn messages_fixture_and_sse_parsing() {
 #[test]
 fn path_resolvers_cover_platform_rules() {
     let mut env = HashMap::new();
-    env.insert("CCP_CONFIG_DIR".to_string(), "/tmp/ccp-config".to_string());
+    env.insert(
+        "DUOLANE_CONFIG_DIR".to_string(),
+        "/tmp/ccp-config".to_string(),
+    );
     let deps = DirResolverEnv {
         platform: "darwin".to_string(),
         home: "/home/u".into(),
@@ -71,7 +74,7 @@ fn path_resolvers_cover_platform_rules() {
     };
     assert_eq!(
         paths::resolve_config_dir(&deps).to_string_lossy(),
-        "/home/u/.config/claude-code-proxy"
+        "/home/u/.config/duolane"
     );
 
     let deps = DirResolverEnv {
@@ -81,7 +84,7 @@ fn path_resolvers_cover_platform_rules() {
     };
     assert_eq!(
         paths::resolve_config_dir(&deps).to_string_lossy(),
-        "/x/claude-code-proxy"
+        "/x/duolane"
     );
 
     let deps = DirResolverEnv {
@@ -91,7 +94,59 @@ fn path_resolvers_cover_platform_rules() {
     };
     assert_eq!(
         paths::resolve_config_dir(&deps).to_string_lossy(),
-        "C:/Users/u/AppData/Roaming/claude-code-proxy"
+        "C:/Users/u/AppData/Roaming/duolane"
+    );
+}
+
+#[test]
+fn config_dir_override_honors_only_the_duolane_variable() {
+    let with_var = |name: String| DirResolverEnv {
+        platform: "linux".to_string(),
+        home: "/home/u".into(),
+        env: HashMap::from([(name, "/tmp/override".to_string())]),
+    };
+
+    assert_eq!(
+        paths::resolve_config_dir(&with_var("DUOLANE_CONFIG_DIR".to_string())).to_string_lossy(),
+        "/tmp/override"
+    );
+    assert_eq!(
+        paths::resolve_config_dir(&with_var(["CCP", "CONFIG_DIR"].join("_"))).to_string_lossy(),
+        "/home/u/.config/duolane"
+    );
+}
+
+#[test]
+fn default_config_and_state_dirs_end_in_duolane() {
+    for platform in ["linux", "darwin", "win32"] {
+        let deps = DirResolverEnv {
+            platform: platform.to_string(),
+            home: "/home/u".into(),
+            env: HashMap::new(),
+        };
+        let config = paths::resolve_config_dir(&deps);
+        let state = paths::resolve_state_dir(&deps);
+        assert!(config.ends_with("duolane"), "{platform}: {config:?}");
+        assert!(state.ends_with("duolane"), "{platform}: {state:?}");
+    }
+}
+
+#[test]
+fn log_file_is_named_after_the_product() {
+    assert_eq!(
+        paths::log_file().file_name().and_then(|name| name.to_str()),
+        Some("duolane.log")
+    );
+}
+
+#[test]
+fn inbound_token_header_is_redacted_in_logs() {
+    let redacted = redact_value(json!({"x-duolane-key": "s3cret"}));
+    assert!(
+        redacted["x-duolane-key"]
+            .as_str()
+            .unwrap()
+            .contains("redacted")
     );
 }
 
@@ -117,7 +172,7 @@ fn logging_redaction_and_truncation() {
 #[test]
 fn traffic_capture_helpers() {
     let mut env = HashMap::new();
-    env.insert("CCP_TRAFFIC_LOG".into(), "1".into());
+    env.insert("DUOLANE_TRAFFIC_LOG".into(), "1".into());
     assert!(traffic_capture_enabled_for_env(&env));
     assert!(!traffic_capture_enabled_for_env(&HashMap::new()));
 
@@ -158,7 +213,7 @@ fn traffic_capture_helpers() {
     assert!(redacted.contains("Bearer text is ordinary message content"));
 
     unsafe {
-        env::set_var("CCP_TRAFFIC_LOG", "1");
+        env::set_var("DUOLANE_TRAFFIC_LOG", "1");
     }
     let temp = TempDir::new().unwrap();
     let capture = create_traffic_capture(TrafficCaptureOptions {
@@ -187,7 +242,7 @@ fn traffic_capture_helpers() {
     .unwrap();
     assert!(!captured.contains("abc"));
     unsafe {
-        env::remove_var("CCP_TRAFFIC_LOG");
+        env::remove_var("DUOLANE_TRAFFIC_LOG");
     }
 }
 
@@ -222,7 +277,7 @@ async fn auth_store_read_write_and_logout() {
 fn config_env_precedence_and_defaults() {
     let config = TempDir::new().unwrap();
     let mut env = HashMap::from([(
-        "CCP_CONFIG_DIR".to_string(),
+        "DUOLANE_CONFIG_DIR".to_string(),
         config.path().to_string_lossy().into_owned(),
     )]);
     assert_eq!(load_config_for_env(&env).port, 18765);
@@ -230,7 +285,7 @@ fn config_env_precedence_and_defaults() {
     env.insert("PORT".to_string(), "19999".to_string());
     assert_eq!(load_config_for_env(&env).port, 19999);
 
-    env.insert("CCP_ALIAS_PROVIDER".to_string(), "codex".to_string());
+    env.insert("DUOLANE_ALIAS_PROVIDER".to_string(), "codex".to_string());
     assert!(matches!(
         load_config_for_env(&env).alias_provider,
         AliasProvider::Codex
@@ -241,7 +296,7 @@ fn config_env_precedence_and_defaults() {
 fn alias_provider_has_expected_default() {
     let config = TempDir::new().unwrap();
     let env = HashMap::from([(
-        "CCP_CONFIG_DIR".to_string(),
+        "DUOLANE_CONFIG_DIR".to_string(),
         config.path().to_string_lossy().into_owned(),
     )]);
     assert!(matches!(

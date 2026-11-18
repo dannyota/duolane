@@ -1,12 +1,11 @@
 [package]
-name = "claude-codex"
-version = "0.8.0"
-description = "Run Claude Code on your Claude and ChatGPT subscriptions at once, routed per model name"
+name = "duolane"
+version = "0.1.0"
+description = "Run Claude Code on your Claude and ChatGPT subscriptions at once, routed per model"
 edition = "2024"
 authors = ["Danny"]
 license = "MIT"
 repository = "https://github.com/dannyota/duolane"
-homepage = "https://github.com/dannyota/duolane"
 readme = "README.md"
 keywords = ["claude-code", "codex", "openai", "anthropic", "gpt"]
 categories = ["command-line-utilities", "development-tools"]

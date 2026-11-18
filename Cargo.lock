@@ -336,48 +336,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
-name = "claude-codex"
-version = "0.8.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "bytes",
- "clap",
- "crossterm",
- "futures-core",
- "futures-util",
- "http",
- "http-body-util",
- "hyper-util",
- "jiff",
- "once_cell",
- "predicates",
- "ratatui",
- "regex-lite",
- "reqwest",
- "rustls",
- "rustls-native-certs",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tiktoken-rs",
- "time",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite",
- "tower",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "webpki-roots",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -543,6 +501,48 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "duolane"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "clap",
+ "crossterm",
+ "futures-core",
+ "futures-util",
+ "http",
+ "http-body-util",
+ "hyper-util",
+ "jiff",
+ "once_cell",
+ "predicates",
+ "ratatui",
+ "regex-lite",
+ "reqwest",
+ "rustls",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tiktoken-rs",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "webpki-roots",
 ]
 
 [[package]]

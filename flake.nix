@@ -34,15 +34,15 @@
 
             installPhase = ''
               runHook preInstall
-              install -Dm755 target/release/claude-codex "$out/bin/claude-codex"
+              install -Dm755 target/release/duolane "$out/bin/duolane"
               runHook postInstall
             '';
 
             meta = with pkgs.lib; {
               description = cargoToml.package.description;
-              homepage = cargoToml.package.homepage;
+              homepage = cargoToml.package.repository;
               license = licenses.mit;
-              mainProgram = "claude-codex";
+              mainProgram = "duolane";
             };
           };
         }
@@ -51,7 +51,7 @@
       apps = forAllSystems (system: {
         default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/claude-codex";
+          program = "${self.packages.${system}.default}/bin/duolane";
         };
       });
 

@@ -25,7 +25,7 @@ pub const REDACT_KEYS: [&str; 16] = [
     "cookie",
     "set-cookie",
     "x-api-key",
-    "x-claude-codex-key",
+    "x-duolane-key",
     "apikey",
     "api_key",
 ];

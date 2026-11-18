@@ -9,14 +9,14 @@ const ID_TOKEN_ACCT: &str =
     "eyJhbGciOiJub25lIn0.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0X2lkdG9rIn0.sig";
 
 /// Build a `codex auth status` command whose credential source is an isolated temp
-/// `auth.json` (via CCP_CODEX_AUTH_FILE, which takes precedence over $CODEX_HOME/$HOME).
+/// `auth.json` (via DUOLANE_CODEX_AUTH_FILE, which takes precedence over $CODEX_HOME/$HOME).
 fn codex_cmd() -> (Command, TempDir, std::path::PathBuf) {
     let temp = TempDir::new().unwrap();
     let auth_path = temp.path().join(".codex").join("auth.json");
-    let mut cmd = Command::cargo_bin("claude-codex").unwrap();
+    let mut cmd = Command::cargo_bin("duolane").unwrap();
     cmd.args(["codex", "auth", "status"]);
-    cmd.env("CCP_CONFIG_DIR", temp.path());
-    cmd.env("CCP_CODEX_AUTH_FILE", &auth_path);
+    cmd.env("DUOLANE_CONFIG_DIR", temp.path());
+    cmd.env("DUOLANE_CODEX_AUTH_FILE", &auth_path);
     (cmd, temp, auth_path)
 }
 

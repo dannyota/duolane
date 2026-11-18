@@ -168,7 +168,7 @@ pub type DefaultCodexAuthStore = CodexCliAuthStore;
 
 /// Locate the Codex CLI credential file, honoring `$CODEX_HOME` (and a test override).
 pub fn codex_auth_file() -> PathBuf {
-    if let Some(explicit) = std::env::var_os("CCP_CODEX_AUTH_FILE") {
+    if let Some(explicit) = std::env::var_os("DUOLANE_CODEX_AUTH_FILE") {
         return PathBuf::from(explicit);
     }
     if let Some(home) = std::env::var_os("CODEX_HOME") {
