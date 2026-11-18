@@ -15,7 +15,7 @@ use std::{
 };
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -198,7 +198,7 @@ fn run_monitor_events(
         }
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
-                Event::Key(key) => match key.code {
+                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Char('q') if app.is_attached() => return Ok(MonitorExit::Detached),
                     KeyCode::Char('c')
                         if app.is_attached() && key.modifiers.contains(KeyModifiers::CONTROL) =>
