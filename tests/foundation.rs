@@ -213,6 +213,22 @@ fn empty_override_variables_are_treated_as_unset() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn hermetic_root_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let root = home.parent().unwrap();
+    assert!(
+        root.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("duolane-hermetic-")
+    );
+    let mode = std::fs::metadata(root).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+}
+
 #[test]
 fn every_test_binary_includes_the_hermetic_environment() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -223,7 +239,9 @@ fn every_test_binary_includes_the_hermetic_environment() {
         if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
             continue;
         }
-        let source = std::fs::read_to_string(&path).unwrap();
+        let source = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\r\n", "\n");
         assert!(
             source.contains(include),
             "{} lacks {include}",
@@ -234,7 +252,9 @@ fn every_test_binary_includes_the_hermetic_environment() {
     assert!(checked > 0);
     let unit_include = "#[cfg(test)]\n#[path = \"../tests/support/hermetic.rs\"]";
     for file in ["src/lib.rs", "src/main.rs"] {
-        let source = std::fs::read_to_string(root.join(file)).unwrap();
+        let source = std::fs::read_to_string(root.join(file))
+            .unwrap()
+            .replace("\r\n", "\n");
         assert!(
             source.contains(unit_include),
             "{file} lacks the unit-test include"

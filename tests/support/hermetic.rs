@@ -16,8 +16,14 @@ fn fail(message: &str) -> ! {
 }
 
 extern "C" fn isolate_process_environment() {
-    let dir = tempfile::Builder::new()
-        .prefix("duolane-hermetic-")
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("duolane-hermetic-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let dir = builder
         .tempdir()
         .unwrap_or_else(|err| fail(&format!("cannot create private root: {err}")));
     let root = dir.path().to_path_buf();
