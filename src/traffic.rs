@@ -212,6 +212,8 @@ fn redact_traffic_with_depth(value: &Value, depth: u16) -> Value {
             for (key, value) in map {
                 let normalized = key.to_lowercase();
                 if normalized == "image_url" {
+                    // `input_image` parts carry data URLs; never
+                    // persist the payload in traffic captures.
                     out.insert(key.clone(), redact_traffic_value(value));
                 } else if normalized == "data" && looks_like_image_source(map) {
                     // Anthropic image blocks carry raw base64 under
@@ -300,6 +302,8 @@ fn looks_like_image_source(map: &Map<String, Value>) -> bool {
 fn redact_traffic_value(value: &Value) -> Value {
     match value {
         Value::String(s) => Value::String(format!("[redacted len={}]", s.len())),
+        // Structured values keep their shape so captures stay
+        // parseable; only the payload leaves.
         Value::Object(_) | Value::Array(_) => redact_traffic(value),
         _ => Value::String("[redacted]".to_string()),
     }
@@ -658,6 +662,8 @@ mod tests {
 
     #[test]
     fn redact_traffic_keeps_structured_image_url_shape() {
+        // Object-shaped image_url: redact the payload but keep the object
+        // structure so captures stay parseable.
         let value = serde_json::json!({
             "image_url": {"url": "DATA:IMAGE/PNG;BASE64,iVBORw0KGgoAAAANSUhEUg"}
         });

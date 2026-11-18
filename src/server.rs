@@ -942,7 +942,7 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
         let response = OpenAiError::invalid(
             format!(
                 "Unknown model \"{normalized_model}\". {}",
-                state.registry.unknown_model_message()
+                state.registry.unknown_codex_model_message()
             ),
             Some("model"),
         )
@@ -950,10 +950,16 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
         return monitor_response_body(response, request_guard);
     };
     if provider.name() != "codex" {
-        return monitor_response_body(
-            OpenAiError::unsupported_provider(provider.name()).response(),
-            request_guard,
+        let response = OpenAiError::unsupported_provider(provider.name()).response();
+        log_native_request_completed(
+            &log,
+            &req_id,
+            "responses",
+            Some(&normalized_model),
+            response.status(),
+            started_at,
         );
+        return monitor_response_body(response, request_guard);
     }
     if let Err(response) = validate_native_request_model(&body) {
         return monitor_response_body(response, request_guard);
@@ -1117,7 +1123,7 @@ async fn handler_chat_completions(
         let response = OpenAiError::invalid(
             format!(
                 "Unknown model \"{normalized_model}\". {}",
-                state.registry.unknown_model_message()
+                state.registry.unknown_codex_model_message()
             ),
             Some("model"),
         )
@@ -1125,10 +1131,16 @@ async fn handler_chat_completions(
         return monitor_response_body(response, request_guard);
     };
     if provider.name() != "codex" {
-        return monitor_response_body(
-            OpenAiError::unsupported_provider(provider.name()).response(),
-            request_guard,
+        let response = OpenAiError::unsupported_provider(provider.name()).response();
+        log_native_request_completed(
+            &log,
+            &req_id,
+            "chat_completions",
+            Some(&normalized_model),
+            response.status(),
+            started_at,
         );
+        return monitor_response_body(response, request_guard);
     }
     let translated = match translate_request(body.clone()) {
         Ok(translated) => translated,

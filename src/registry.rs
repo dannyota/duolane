@@ -172,25 +172,37 @@ impl Registry {
     }
 
     pub fn unknown_model_message(&self) -> String {
+        self.unknown_model_message_for(|_| true)
+    }
+
+    pub fn unknown_codex_model_message(&self) -> String {
+        self.unknown_model_message_for(|provider| provider == "codex")
+    }
+
+    fn unknown_model_message_for(&self, include: impl Fn(&str) -> bool) -> String {
         let signed_out = self.signed_out();
         let mut parts = Vec::new();
         for (provider, models) in self.grouped_models() {
-            if signed_out.contains_key(provider.as_str()) {
+            if !include(&provider) || signed_out.contains_key(provider.as_str()) {
                 continue;
             }
             let mut models = models;
             models.sort_unstable();
             parts.push(format!("{}: {}", provider, models.join(", ")));
         }
-        let mut message = format!("Supported: {}.", parts.join("; "));
-        if !signed_out.is_empty() {
-            let hints: Vec<String> = signed_out
-                .iter()
-                .map(|(provider, hint)| format!("{provider} ({hint})"))
-                .collect();
-            message.push_str(&format!(" Not signed in: {}.", hints.join("; ")));
+        let hints: Vec<String> = signed_out
+            .iter()
+            .filter(|(provider, _)| include(provider))
+            .map(|(provider, hint)| format!("{provider} ({hint})"))
+            .collect();
+        let mut sentences = Vec::new();
+        if !parts.is_empty() {
+            sentences.push(format!("Supported: {}.", parts.join("; ")));
         }
-        message
+        if !hints.is_empty() {
+            sentences.push(format!("Not signed in: {}.", hints.join("; ")));
+        }
+        sentences.join(" ")
     }
 }
 

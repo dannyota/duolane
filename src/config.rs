@@ -1080,19 +1080,19 @@ mod tests {
         let config = tempfile::TempDir::new().unwrap();
         std::fs::write(
             config.path().join("config.json"),
-            r#"{"autoReviewModel":"gpt-5.6-terra"}"#,
+            r#"{"autoReviewModel":"gpt-6-luna"}"#,
         )
         .unwrap();
         let _env = isolated_env(&config);
 
-        assert_eq!(auto_review_model().as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(auto_review_model().as_deref(), Some("gpt-6-luna"));
         {
             let _model_env = EnvGuard::set("CCP_AUTO_REVIEW_MODEL", "gpt-5.6-terra");
             assert_eq!(auto_review_model().as_deref(), Some("gpt-5.6-terra"));
         }
         {
             let _model_env = EnvGuard::set("CCP_AUTO_REVIEW_MODEL", "");
-            assert_eq!(auto_review_model().as_deref(), Some("gpt-5.6-terra"));
+            assert_eq!(auto_review_model().as_deref(), Some("gpt-6-luna"));
         }
     }
 

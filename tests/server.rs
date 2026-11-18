@@ -1375,8 +1375,18 @@ async fn removed_backend_models_return_400_listing_supported_models() {
                 message.contains(&format!("Unknown model \"{model}\"")),
                 "{uri} {message}"
             );
-            assert!(message.contains("Supported:"), "{uri} {message}");
-            assert!(message.contains("claude-opus-5-5"), "{uri} {message}");
+            if uri == "/v1/messages" {
+                assert!(message.contains("Supported:"), "{uri} {message}");
+                assert!(message.contains("claude-opus-5-5"), "{uri} {message}");
+            } else {
+                assert!(
+                    message.contains("Supported: codex:")
+                        || message.contains("Not signed in: codex"),
+                    "{uri} {message}"
+                );
+                assert!(!message.contains("anthropic:"), "{uri} {message}");
+                assert!(!message.contains("claude-opus-5-5"), "{uri} {message}");
+            }
         }
     }
 }
