@@ -109,7 +109,8 @@ The proxy speaks plain HTTP, including your token and Claude login. Bind beyond
 loopback only over an encrypted path, such as an SSH tunnel or WireGuard.
 duolane refuses to start beyond loopback, or with `DUOLANE_ALLOWED_HOSTS`,
 without `DUOLANE_AUTH_TOKEN`. Claude Code sends the token in its own header, and
-`duolane monitor` sends the configured token itself:
+`duolane monitor` sends the configured token itself, to a loopback or HTTPS URL
+only:
 
 ```json
 {

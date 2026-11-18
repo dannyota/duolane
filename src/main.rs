@@ -90,9 +90,11 @@ fn main() -> Result<()> {
         Commands::Serve { port, no_monitor } => {
             let bind_address = config::bind_address();
             let effective_port = port.unwrap_or_else(config::port);
-            if let Ok(ip) = bind_address.parse::<std::net::IpAddr>()
-                && !InboundPolicy::from_config(ip)?.is_loopback()
-            {
+            let exposed = match bind_address.parse::<std::net::IpAddr>() {
+                Ok(ip) => !InboundPolicy::from_config(ip)?.is_loopback(),
+                Err(_) => false,
+            };
+            if exposed {
                 eprintln!("{PLAIN_HTTP_WARNING}");
             }
             let registry = Registry::with_default_alias();
@@ -118,8 +120,11 @@ fn main() -> Result<()> {
                     let listener = runtime
                         .block_on(server::bind_proxy_listener(&bind_address, effective_port))?;
                     let local_addr = listener.local_addr()?;
-                    let monitor_listen_url =
+                    let mut monitor_listen_url =
                         listen_url(&local_addr.ip().to_string(), local_addr.port());
+                    if exposed {
+                        monitor_listen_url.push_str("  plain HTTP: use an encrypted path");
+                    }
                     let server_monitor = monitor.clone();
                     let server_task = runtime.spawn(async move {
                         let result =
@@ -165,7 +170,7 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()?;
             let mut headers = reqwest::header::HeaderMap::new();
-            if let Some(token) = config::auth_token() {
+            if let Some(token) = config::auth_token().filter(|_| token_may_travel(&url)) {
                 let mut value = reqwest::header::HeaderValue::from_str(&token)?;
                 value.set_sensitive(true);
                 headers.insert(PROXY_KEY_HEADER, value);
@@ -330,6 +335,16 @@ fn print_models(registry: &Registry) {
     }
 }
 
+fn token_may_travel(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        || match url.host() {
+            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.to_canonical().is_loopback(),
+            None => false,
+        }
+}
+
 fn listen_url(bind_address: &str, port: u16) -> String {
     match bind_address.parse::<std::net::IpAddr>() {
         Ok(ip) => format!("http://{}", std::net::SocketAddr::new(ip, port)),
@@ -400,6 +415,20 @@ mod tests {
         let mut signals = ServiceShutdownSignals::new().unwrap();
         let receive = signals.recv();
         assert_io_future(&receive);
+    }
+
+    #[test]
+    fn monitor_token_travels_only_to_loopback_or_https() {
+        for (url, expected) in [
+            ("http://127.0.0.1:18765/", true),
+            ("http://LOCALHOST:18765/", true),
+            ("http://[::1]:18765/", true),
+            ("https://proxy.example/", true),
+            ("http://proxy.example:18765/", false),
+            ("http://192.0.2.1:18765/", false),
+        ] {
+            assert_eq!(token_may_travel(&url.parse().unwrap()), expected, "{url}");
+        }
     }
 
     #[test]

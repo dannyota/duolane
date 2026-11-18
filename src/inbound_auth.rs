@@ -24,6 +24,7 @@ const MULTIPART: &str = "multipart/form-data";
 pub struct InboundPolicy {
     token: Option<Arc<str>>,
     loopback: bool,
+    local_hosts: Vec<String>,
     hosts: Vec<String>,
 }
 
@@ -52,25 +53,33 @@ impl InboundPolicy {
                 "allowed hosts require an inbound token; set DUOLANE_AUTH_TOKEN or authToken"
             );
         }
+        if let Some(host) = extra_hosts.iter().find(|host| !valid_extra_host(host)) {
+            anyhow::bail!(
+                "invalid allowed host {host:?}: use a bare host name or a bracketed IPv6 address, without scheme, port, path, userinfo, or trailing dot"
+            );
+        }
         let literal = match bind {
             IpAddr::V4(ip) => ip.to_string(),
             IpAddr::V6(ip) => format!("[{ip}]"),
         };
-        let mut hosts = vec![
+        let local_hosts = vec![
             "localhost".to_string(),
             "127.0.0.1".to_string(),
             "[::1]".to_string(),
             literal,
         ];
+        let mut hosts = local_hosts.clone();
         hosts.extend(extra_hosts);
         Ok(Self {
             token: token.map(Arc::from),
             loopback,
+            local_hosts,
             hosts,
         })
     }
 
     pub fn from_config(bind: IpAddr) -> anyhow::Result<Self> {
+        crate::config::check_config_file()?;
         Self::new(
             bind,
             crate::config::auth_token(),
@@ -98,7 +107,13 @@ async fn check_request(
     if request.uri().path() == "/healthz" {
         return next.run(request).await;
     }
-    if policy.loopback && !host_allowed(&policy.hosts, &request) {
+    let monitor = request.uri().path() == "/monitor";
+    let hosts = if monitor {
+        &policy.local_hosts
+    } else {
+        &policy.hosts
+    };
+    if (policy.loopback || monitor) && !host_allowed(hosts, &request) {
         return json_error(
             StatusCode::FORBIDDEN,
             "permission_error",
@@ -183,6 +198,22 @@ fn authority_host(authority: &str) -> Option<&str> {
             !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
         });
     (port_ok && !host.is_empty() && !host.ends_with('.') && !host.contains('@')).then_some(host)
+}
+
+fn valid_extra_host(host: &str) -> bool {
+    match host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    {
+        Some(ip) => ip.parse::<std::net::Ipv6Addr>().is_ok(),
+        None => {
+            !host.is_empty()
+                && !host.ends_with('.')
+                && host
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        }
+    }
 }
 
 fn required_media_types(method: &Method, path: &str) -> &'static [&'static str] {

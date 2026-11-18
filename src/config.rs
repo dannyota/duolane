@@ -186,6 +186,25 @@ pub fn config_path() -> PathBuf {
     paths::config_dir().join("config.json")
 }
 
+pub fn check_config_file() -> anyhow::Result<()> {
+    let path = config_path();
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => anyhow::bail!("cannot read {}: {error}", path.display()),
+    };
+    serde_json::from_str::<FileConfig>(&raw)
+        .map(|_| ())
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "cannot parse {}: invalid JSON or setting at line {}, column {}",
+                path.display(),
+                error.line(),
+                error.column()
+            )
+        })
+}
+
 pub fn port() -> u16 {
     load_config().port
 }

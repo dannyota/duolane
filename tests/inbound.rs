@@ -105,8 +105,10 @@ async fn inbound_guard_admits_claude_code_and_rejects_foreign_hosts_and_origins(
 
     let deny = StatusCode::FORBIDDEN;
     let alternate = policy("127.0.0.2", None, &[]).unwrap();
+    let proxied = policy("127.0.0.1", Some(TOKEN), &["proxy.example"]).unwrap();
     let hosts: &[(&InboundPolicy, &[&str], StatusCode)] = &[
         (&loopback, &["[::1]:18765"], PASS),
+        (&proxied, &["PROXY.example:8443"], PASS),
         (&loopback, &["LOCALHOST:18765"], PASS),
         (&alternate, &["127.0.0.2:18765"], PASS),
         (&loopback, &["127.0.0.2:18765"], deny),
@@ -131,9 +133,12 @@ async fn inbound_guard_admits_claude_code_and_rejects_foreign_hosts_and_origins(
     ];
     let mut cases = Vec::new();
     for (policy, values, expected) in hosts {
-        let headers = values.iter().map(|value| ("host", *value)).collect();
+        let mut headers: Vec<_> = values.iter().map(|value| ("host", *value)).collect();
+        headers.push(("x-duolane-key", TOKEN));
         cases.push((*policy, "GET", "/v1/models", headers, *expected));
     }
+    let remote_monitor = vec![("host", "proxy.example"), ("x-duolane-key", TOKEN)];
+    cases.push((&proxied, "GET", "/monitor", remote_monitor, deny));
     for (method, path, origin, expected) in origins {
         let mut headers = vec![("host", HOST), ("access-control-request-method", "POST")];
         headers.extend(origin.map(|origin| ("origin", origin)));
@@ -205,8 +210,29 @@ fn inbound_startup_rejects_unsafe_token_and_bind_settings() {
     assert!(policy("::ffff:127.0.0.1", None, &[]).unwrap().is_loopback());
     assert!(policy("127.0.0.1", Some(&TOKEN[..32]), &["proxy.example"]).is_ok());
     assert!(!policy("0.0.0.0", Some(TOKEN), &[]).unwrap().is_loopback());
+    for host in [
+        "proxy.example:8443",
+        "https://proxy.example",
+        "proxy.example/v1",
+        "user@proxy.example",
+        "proxy.example.",
+        "::1",
+    ] {
+        let error = policy("127.0.0.1", Some(TOKEN), &[host]).unwrap_err();
+        assert!(error.to_string().contains(host), "{host}");
+    }
 
+    let broken = tempfile::TempDir::new().unwrap();
+    let broken_file = broken.path().join("config.json");
+    std::fs::write(&broken_file, format!(r#"{{"port":"{TOKEN}"}}"#)).unwrap();
+    let broken_dir = broken.path().to_string_lossy().into_owned();
+    let broken_file = broken_file.to_string_lossy().into_owned();
     for (name, value, message) in [
+        (
+            "DUOLANE_CONFIG_DIR",
+            broken_dir.as_str(),
+            broken_file.as_str(),
+        ),
         ("DUOLANE_AUTH_TOKEN", short, "at least 32 characters"),
         (
             "DUOLANE_BIND_ADDRESS",
