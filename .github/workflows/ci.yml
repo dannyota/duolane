@@ -199,7 +199,7 @@ jobs:
         run: |
           if [ -z "$BASE_SHA" ]; then
             echo "check=true" >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$BASE_SHA" HEAD -- .tool-versions rust-toolchain.toml package.json package-lock.json .github/workflows scripts/tools-outdated.sh; then
+          elif git diff --quiet "$BASE_SHA" HEAD -- .tool-versions rust-toolchain.toml package.json package-lock.json .github/workflows scripts/tools-outdated.sh scripts/check-workflow-pins.py; then
             echo "check=false" >> "$GITHUB_OUTPUT"
           else
             echo "check=true" >> "$GITHUB_OUTPUT"
