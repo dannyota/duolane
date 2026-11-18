@@ -153,7 +153,7 @@ async fn reasoning_survives_codex_to_claude_to_codex() {
     assert_eq!(claude_answer, claude_reply);
     let sent_to_claude = claude_requests.lock().unwrap()[0].clone();
     assert!(!sent_to_claude.contains("duolane:"), "{sent_to_claude}");
-    assert!(!sent_to_claude.contains("enc-secret"), "{sent_to_claude}");
+    assert!(!sent_to_claude.contains("enc-secret"));
     let sent: Value = serde_json::from_str(&sent_to_claude).unwrap();
     assert_eq!(
         sent["messages"][1]["content"][0],
@@ -187,7 +187,7 @@ async fn reasoning_survives_codex_to_claude_to_codex() {
     for body in refused {
         let reply = send_raw(body, StatusCode::BAD_REQUEST).await;
         assert_eq!(reply["error"]["type"], "invalid_request_error");
-        assert!(!reply.to_string().contains("enc-secret"), "{reply}");
+        assert!(!reply.to_string().contains("enc-secret"));
     }
     assert_eq!(claude_requests.lock().unwrap().len(), 3);
 
