@@ -68,6 +68,7 @@ It is opt-in, because every Claude Code surface then depends on duolane running.
 - The pair lasts 90 days. When fewer than 14 days remain, `duolane serve` adds a
   new CA certificate to `ca.pem` beside the old one, and serves the new leaf
   only once the old one expires, so sessions started in between keep working.
+  The pending pair is stored beside the current one until then.
 - duolane verifies the real `api.anthropic.com` certificate as in every other
   mode.
 
@@ -106,7 +107,8 @@ only by the owner:
    Without it, another local user could spend the Codex login through the proxy.
 3. Only `api.anthropic.com:443` is intercepted. The list is not configurable.
 4. `CONNECT` is refused when the target resolves to a loopback or unspecified
-   address, including IPv4-mapped forms. Other targets and ports are tunneled.
+   address, including IPv4-mapped forms. duolane connects to the address it
+   checked, never to a second lookup. Other targets and ports are tunneled.
 5. Inside the intercepted connection, duolane checks that `Host` is
    `api.anthropic.com` and applies the request limits. The `Origin` and content
    type rules do not apply there, because no browser can reach it.
