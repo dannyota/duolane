@@ -1,3 +1,6 @@
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use duolane::providers::codex::websocket::clear_codex_websocket_pool_for_tests;

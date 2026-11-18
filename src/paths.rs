@@ -25,17 +25,13 @@ pub fn resolve_config_dir(deps: &DirResolverEnv) -> PathBuf {
         return Path::new(override_dir).to_path_buf();
     }
 
-    if deps.platform == "win32" {
+    if deps.platform == "windows" {
         let appdata = deps
             .env
             .get("APPDATA")
             .cloned()
             .unwrap_or_else(|| format!("{}\\AppData\\Roaming", deps.home));
         return join_with_sep(&appdata, &["duolane"], true);
-    }
-
-    if deps.platform == "darwin" {
-        return join_with_sep(&deps.home, &[".config", "duolane"], false);
     }
 
     let base = deps.env.get("XDG_CONFIG_HOME").cloned().unwrap_or_else(|| {
@@ -47,7 +43,11 @@ pub fn resolve_config_dir(deps: &DirResolverEnv) -> PathBuf {
 }
 
 pub fn resolve_state_dir(deps: &DirResolverEnv) -> PathBuf {
-    if deps.platform == "win32" {
+    if let Some(override_dir) = deps.env.get("DUOLANE_STATE_DIR") {
+        return Path::new(override_dir).to_path_buf();
+    }
+
+    if deps.platform == "windows" {
         let local = deps
             .env
             .get("LOCALAPPDATA")

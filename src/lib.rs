@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "../tests/support/hermetic.rs"]
+mod hermetic;
+
 pub mod anthropic;
 pub mod auth;
 pub mod config;

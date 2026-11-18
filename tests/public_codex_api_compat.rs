@@ -1,5 +1,8 @@
 #![allow(deprecated)]
 
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
