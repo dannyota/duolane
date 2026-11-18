@@ -544,13 +544,6 @@ fn input_suffix_after_prefix(
     Some(input[prefix.len()..].to_vec())
 }
 
-/// Compares two transcript items for continuation prefix purposes.
-///
-/// `function_call.arguments` is a JSON string that is asymmetric across the two
-/// sides: the recorded transcript keeps the raw text the model streamed, while
-/// the next request re-serializes the client's parsed tool input (sorted keys,
-/// no whitespace). Compare those two as JSON values so a purely textual
-/// difference does not break an otherwise append-only prefix.
 fn input_items_equivalent(a: &ResponsesInputItem, b: &ResponsesInputItem) -> bool {
     match (a, b) {
         (

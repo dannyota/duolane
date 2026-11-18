@@ -316,7 +316,6 @@ pub fn translate_stream_bytes_with_traffic(
                 web_search_requests,
                 ..
             } => {
-                // Emit web search compat blocks
                 if !web_search_events.is_empty() {
                     let text_from_deferred: String = deferred_content_events
                         .iter()
@@ -417,7 +416,6 @@ pub fn translate_stream_bytes_with_traffic(
                     }
                 }
 
-                // Emit deferred content
                 for deferred in &deferred_content_events {
                     emit_content_event(
                         &mut out,

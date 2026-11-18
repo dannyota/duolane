@@ -24,15 +24,9 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use tower::util::ServiceExt;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-/// Serialize all env-var-mutating tests so they never run concurrently.
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    // Recover from a poisoned mutex so a failing test doesn't cascade
     let m = ENV_LOCK.get_or_init(|| Mutex::new(()));
     match m.lock() {
         Ok(guard) => guard,
@@ -40,10 +34,6 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     }
 }
 
-/// Write a Codex CLI style `auth.json` and point the proxy at it for the test's
-/// lifetime. The proxy reads Codex credentials from the Codex CLI file, not the
-/// proxy config dir, so tests must set `DUOLANE_CODEX_AUTH_FILE` to stay hermetic
-/// instead of falling back to the developer's real `~/.codex/auth.json`.
 fn write_codex_auth(config_dir: &std::path::Path) -> EnvGuard {
     let dir = config_dir.join("codex");
     std::fs::create_dir_all(&dir).unwrap();
@@ -85,7 +75,6 @@ impl Drop for EnvGuard {
     }
 }
 
-/// Send a minimal `POST /v1/messages` through the in-process app.
 async fn call_messages(model: &str) -> Response {
     call_messages_body(json!({
         "model": model,
@@ -168,9 +157,6 @@ fn traffic_json(files: &[PathBuf], suffix: &str) -> Value {
     serde_json::from_slice(&std::fs::read(traffic_file(files, suffix)).unwrap()).unwrap()
 }
 
-/// Spawn a mock axum HTTP server that accepts requests at any path, calls
-/// `handler(request_json)` and returns the handler's response body as a 200
-/// with `content-type: text/event-stream`.
 async fn spawn_http_upstream<F>(handler: F) -> String
 where
     F: Fn(Value) -> Vec<u8> + Send + Sync + 'static,
@@ -402,9 +388,6 @@ async fn assert_codex_http_presemantic_retry(first_response: Vec<u8>) {
     assert_eq!(text.matches("event: message_stop").count(), 1);
 }
 
-/// Spawn a mock WebSocket server that accepts one connection, captures the
-/// first text message, and responds with Codex WebSocket events that
-/// accumulate to `"codex websocket ok"`.
 async fn spawn_websocket_upstream(captured: Arc<Mutex<Option<Value>>>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -416,14 +399,12 @@ async fn spawn_websocket_upstream(captured: Arc<Mutex<Option<Value>>>) -> String
         {
             let (mut sender, mut receiver) = ws.split();
 
-            // Read the incoming response.create message
             if let Some(Ok(Message::Text(text))) = receiver.next().await
                 && let Ok(json) = serde_json::from_str::<Value>(&text)
             {
                 let _ = captured.lock().map(|mut g| *g = Some(json));
             }
 
-            // Send Codex Responses events as WebSocket text messages
             let events = [
                 r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_up"}}"#,
                 r#"{"type":"response.output_text.delta","output_index":0,"delta":"codex websocket ok"}"#,
@@ -456,9 +437,6 @@ async fn spawn_websocket_usage_limit_upstream(attempts: Arc<AtomicUsize>) -> Str
     format!("http://{addr}")
 }
 
-/// Reproduce the Codex subscription-credit response observed in production:
-/// the included window is exhausted, but usable credits remain and the model
-/// still completes the response after the rate-limit snapshot.
 async fn spawn_websocket_credited_rate_limit_upstream() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -884,8 +862,6 @@ async fn spawn_websocket_empty_completion_then_retry_upstream(
     addr_str
 }
 
-/// Upstream that answers every request with a terminal-only completion,
-/// so the proxy's bounded retry loop always exhausts.
 async fn spawn_websocket_always_empty_completion_upstream(
     request_count: Arc<std::sync::atomic::AtomicUsize>,
 ) -> String {
@@ -936,10 +912,6 @@ async fn spawn_websocket_always_empty_completion_upstream(
     addr_str
 }
 
-// ---------------------------------------------------------------------------
-// Health and routing smoke tests (no env var mutation needed)
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn smoke_healthz_returns_ok() {
     let app = app(Arc::new(Registry::with_default_alias()));
@@ -983,11 +955,6 @@ async fn smoke_codex_model_routes_to_real_provider() {
             .contains("No Codex credentials")
     );
 }
-
-// ---------------------------------------------------------------------------
-// Codex HTTP smoke: mock upstream verifies request shape and returns
-// Responses SSE events.
-// ---------------------------------------------------------------------------
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
@@ -1063,8 +1030,6 @@ async fn smoke_codex_native_responses_preserves_parallel_tool_calls() {
     assert_eq!(sent["parallel_tool_calls"], false);
 }
 
-/// Resets the retry-delay override even when the test panics, so later tests
-/// in this process keep real backoff behavior.
 struct ZeroRetryDelayGuard;
 
 impl ZeroRetryDelayGuard {
@@ -1464,7 +1429,6 @@ async fn smoke_codex_http_empty_completions_exhaust_to_service_unavailable() {
         body_text.contains("Codex completed without producing output"),
         "unexpected exhaustion body: {body_text}"
     );
-    // Initial attempt plus MAX_EMPTY_COMPLETION_RETRIES retries.
     assert_eq!(
         attempts.load(std::sync::atomic::Ordering::SeqCst),
         11,
@@ -2637,15 +2601,6 @@ async fn smoke_codex_auto_fallback_usage_limit_fast_fails_live_request() {
     clear_codex_websocket_pool_for_tests();
 }
 
-// ---------------------------------------------------------------------------
-// Codex WebSocket smoke: mock upstream verifies request shape and returns
-// Responses events over WebSocket.
-// ---------------------------------------------------------------------------
-
-// Multi-threaded runtime so the spawned accept task runs independently and
-// the listener is registered with the I/O driver before connect_async starts.
-// A single-threaded runtime risks the root task (connect_async) outpacing the
-// spawned accept task, causing connection-refused races.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn smoke_codex_websocket_messages_uses_mock_upstream() {
@@ -3207,7 +3162,6 @@ async fn smoke_codex_websocket_empty_completions_exhaust_to_service_unavailable(
         body_text.contains("Codex completed without producing output"),
         "unexpected exhaustion body: {body_text}"
     );
-    // Initial attempt plus MAX_RETRYABLE_LIVE_STREAM_RETRIES full-context retries.
     assert_eq!(
         request_count.load(std::sync::atomic::Ordering::SeqCst),
         11,

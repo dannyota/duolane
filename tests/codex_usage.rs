@@ -52,7 +52,6 @@ fn codex_usage_extensions_match_across_wire_formats() {
     for usage in all_usage(vec![
         json!({"type":"codex.rate_limits", "rate_limits":{"limit_reached":true}}),
         limits,
-        // Unusable updates must not erase the last usable snapshot.
         json!({"type":"codex.rate_limits", "rate_limits":null}),
         json!({"type":"codex.rate_limits", "rate_limits":{"limit_reached":"false", "primary":{"used_percent":"bad", "window_minutes":-1}}}),
         json!({"type":"codex.rate_limits", "rate_limits":{}}),

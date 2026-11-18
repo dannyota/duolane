@@ -5,9 +5,6 @@ use crate::config;
 use super::model_catalog::{catalog_model, catalog_models};
 use super::request::ServiceTier;
 
-/// Baseline allowlist compiled into the binary. At runtime the Codex CLI's
-/// model cache (`model_catalog`) extends it, so models OpenAI ships to Codex
-/// work before a proxy release lists them.
 pub const ALLOWED_MODELS: &[&str] = &[
     "gpt-5.2",
     "gpt-5.3-codex",
@@ -25,9 +22,6 @@ pub const ALLOWED_MODELS: &[&str] = &[
     "gpt-6.1-terra",
 ];
 
-/// Alias targets in preference order. The first one the account's Codex
-/// catalog lists wins, so an account without `gpt-6-sol` still gets a working
-/// Opus slot. Without a catalog the first entry is used.
 const OPUS_TARGETS: &[&str] = &["gpt-6-sol", "gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-sol"];
 const SONNET_TARGETS: &[&str] = &["gpt-5.6-terra"];
 const HAIKU_TARGETS: &[&str] = &["gpt-6-luna", "gpt-5.6-luna"];
@@ -51,7 +45,6 @@ pub const MODEL_ALIASES: &[(&str, &[&str])] = &[
     ("claude-fable-5-1", OPUS_TARGETS),
 ];
 
-/// Resolve a Claude-style alias to the preferred model the account has.
 pub fn alias_target(model: &str) -> Option<&'static str> {
     alias_target_in(model, listed_catalog_models)
 }
@@ -74,15 +67,11 @@ pub struct ResolvedModel {
     pub service_tier: Option<ServiceTier>,
 }
 
-/// True for baseline models and for API-supported models from the Codex
-/// model cache.
 pub fn is_allowed_model(model: &str) -> bool {
     ALLOWED_MODELS.contains(&model)
         || catalog_model(model).is_some_and(|entry| entry.supported_in_api)
 }
 
-/// Baseline ∪ listed API-supported catalog models, sorted and de-duplicated —
-/// for listings and error messages.
 pub fn allowed_models() -> Vec<String> {
     let mut set: BTreeSet<String> = ALLOWED_MODELS.iter().map(|m| (*m).to_string()).collect();
     for entry in catalog_models() {
@@ -93,9 +82,6 @@ pub fn allowed_models() -> Vec<String> {
     set.into_iter().collect()
 }
 
-/// Catalog models advertised by the Codex picker (`visibility == "list"`)
-/// and usable through the API — what `models` and the unknown-model hint
-/// should show in addition to the baseline.
 pub fn listed_catalog_models() -> Vec<String> {
     catalog_models()
         .into_iter()
@@ -108,7 +94,6 @@ pub fn allowed_models_display() -> String {
     allowed_models().join(", ")
 }
 
-/// Every accepted model plus its tier-suffixed aliases, as listed to clients.
 pub fn listed_models() -> Vec<String> {
     let mut models: Vec<String> = allowed_models()
         .into_iter()
@@ -121,15 +106,11 @@ pub fn listed_models() -> Vec<String> {
     models
 }
 
-/// Models whose Codex catalog entry offers the `ultrafast` service tier.
-/// Every other model offers `priority` at most, so it gets no `-ultrafast` form.
 pub const ULTRAFAST_MODELS: &[&str] = &["gpt-6-astra", "gpt-6.1-sol"];
 
 const FAST_SUFFIX: &str = "-fast";
 const ULTRAFAST_SUFFIX: &str = "-ultrafast";
 
-/// Splits a local service-tier suffix off a registered model: `-fast` on any
-/// registered model, `-ultrafast` only on [`ULTRAFAST_MODELS`].
 pub fn split_tier_suffix(model: &str) -> Option<(&str, ServiceTier)> {
     if let Some(base) = model.strip_suffix(ULTRAFAST_SUFFIX) {
         return ULTRAFAST_MODELS
@@ -140,7 +121,6 @@ pub fn split_tier_suffix(model: &str) -> Option<(&str, ServiceTier)> {
     is_allowed_model(base).then_some((base, ServiceTier::Priority))
 }
 
-/// Local tier-suffixed names advertised next to a registered model.
 pub fn tier_model_variants(model: &str) -> Vec<String> {
     let mut variants = vec![format!("{model}{FAST_SUFFIX}")];
     if ULTRAFAST_MODELS.contains(&model) {
@@ -149,9 +129,6 @@ pub fn tier_model_variants(model: &str) -> Vec<String> {
     variants
 }
 
-/// Narrows a requested tier to one `model` offers. The backend serves an
-/// unlisted tier at standard speed without an error, so ultrafast on a model
-/// outside [`ULTRAFAST_MODELS`] falls back to priority, the fastest tier there.
 pub fn service_tier_for_model(model: &str, tier: ServiceTier) -> ServiceTier {
     match tier {
         ServiceTier::Ultrafast if !ULTRAFAST_MODELS.contains(&model) => ServiceTier::Priority,
@@ -194,8 +171,6 @@ fn resolve_with_model_override(model: &str, override_model: Option<&str>) -> Res
         _ => requested.clone(),
     };
 
-    // A tier suffix on the override wins; otherwise the requested suffix
-    // carries over to the override model, which may not offer that tier.
     let service_tier = resolved
         .service_tier
         .or(requested.service_tier)
@@ -248,8 +223,6 @@ pub fn uses_responses_lite(model: &str) -> bool {
             .is_some_and(|entry| entry.supported_in_api && entry.use_responses_lite))
 }
 
-/// Opt known full-lane models out of Lite without overriding advisory catalog
-/// metadata for models whose full-lane availability is unknown.
 pub fn uses_responses_lite_with_full_lane(model: &str, full_lane: bool) -> bool {
     if full_lane
         && matches!(
@@ -267,10 +240,6 @@ pub fn uses_responses_lite_with_full_lane(model: &str, full_lane: bool) -> bool 
     uses_responses_lite(model)
 }
 
-/// Luna models exist only behind the Responses Lite lane; the full
-/// Responses API resolves them to a `-free` variant and returns 404 (Model not
-/// found gpt-5.6-luna-free-...). Hosted web_search requests must run on the
-/// full lane, so luna is upgraded to its nearest full-lane sibling.
 pub fn full_lane_web_search_model(model: &str) -> &str {
     match model {
         "gpt-5.6-luna" => "gpt-5.6-sol",

@@ -211,31 +211,12 @@ fn redact_traffic_with_depth(value: &Value, depth: u16) -> Value {
             let mut out = Map::new();
             for (key, value) in map {
                 let normalized = key.to_lowercase();
-                if normalized == "image_url" {
-                    // `input_image` parts carry data URLs; never
-                    // persist the payload in traffic captures.
-                    out.insert(key.clone(), redact_traffic_value(value));
-                } else if normalized == "data" && looks_like_image_source(map) {
-                    // Anthropic image blocks carry raw base64 under
-                    // `source.data`; redact it for the same reason.
-                    out.insert(key.clone(), redact_traffic_value(value));
-                } else if normalized == "encrypted_content" {
-                    // Codex `compaction` and `reasoning` items carry an opaque
-                    // blob that replays a whole conversation's context; it is
-                    // bulk payload, not debug signal, so only its size stays.
-                    out.insert(key.clone(), redact_traffic_value(value));
-                } else if normalized == "signature"
-                    && value.as_str().is_some_and(is_proxy_reasoning_signature)
-                {
-                    // The Codex translator replays reasoning as an Anthropic
-                    // thinking signature of the form
-                    // `ccp:codex:v1:<encoded-id>:<encrypted_content>`, which
-                    // carries the same opaque conversation handle as the
-                    // `encrypted_content` key. Only proxy-owned signatures are
-                    // touched; foreign ones (for example, real Anthropic
-                    // signatures) are preserved.
-                    out.insert(key.clone(), redact_traffic_value(value));
-                } else if REDACT_KEYS.contains(&normalized.as_str())
+                let redact = normalized == "image_url"
+                    || (normalized == "data" && looks_like_image_source(map))
+                    || normalized == "encrypted_content"
+                    || (normalized == "signature"
+                        && value.as_str().is_some_and(is_proxy_reasoning_signature))
+                    || REDACT_KEYS.contains(&normalized.as_str())
                     || matches!(
                         normalized.as_str(),
                         "token"
@@ -253,8 +234,8 @@ fn redact_traffic_with_depth(value: &Value, depth: u16) -> Value {
                             | "identity_id"
                             | "subject"
                             | "sub"
-                    )
-                {
+                    );
+                if redact {
                     out.insert(key.clone(), redact_traffic_value(value));
                 } else {
                     out.insert(key.clone(), redact_traffic_with_depth(value, depth + 1));
@@ -280,11 +261,6 @@ fn is_data_url(text: &str) -> bool {
     lower.starts_with("data:image/") && lower.contains(";base64,")
 }
 
-/// An object shaped like an Anthropic image source: `type: "base64"` and
-/// either an image `media_type` or none at all. Used to redact only image
-/// payloads, not arbitrary `data` keys. Missing `media_type` is treated as
-/// an image: the capture is written before translation, so a malformed block
-/// that the translator would reject must still not persist its payload.
 fn looks_like_image_source(map: &Map<String, Value>) -> bool {
     if !map
         .get("type")
@@ -302,8 +278,6 @@ fn looks_like_image_source(map: &Map<String, Value>) -> bool {
 fn redact_traffic_value(value: &Value) -> Value {
     match value {
         Value::String(s) => Value::String(format!("[redacted len={}]", s.len())),
-        // Structured values keep their shape so captures stay
-        // parseable; only the payload leaves.
         Value::Object(_) | Value::Array(_) => redact_traffic(value),
         _ => Value::String("[redacted]".to_string()),
     }
@@ -350,7 +324,6 @@ mod tests {
             !rendered.contains("data:image/png;base64,iVBOR"),
             "data URL payload leaked: {rendered}"
         );
-        // The image part is still structurally visible (redacted marker).
         assert!(rendered.contains("input_image"));
     }
 
@@ -366,8 +339,6 @@ mod tests {
 
     #[test]
     fn redact_traffic_strips_anthropic_image_source_data() {
-        // The incoming Anthropic request body carries raw base64 under
-        // `source.data` (no data: URL wrapper) — it must not persist either.
         let value = serde_json::json!({
             "messages": [{
                 "role": "user",
@@ -388,14 +359,11 @@ mod tests {
             "source.data base64 leaked: {rendered}"
         );
         assert!(rendered.contains("redacted"));
-        // Structure is preserved.
         assert!(rendered.contains("image/png"));
     }
 
     #[test]
     fn redact_traffic_strips_compaction_encrypted_content() {
-        // Server-side compaction replays the transcript as an opaque blob in
-        // the upstream request; it must not persist, but its size should.
         let value = serde_json::json!({
             "model": "gpt-5",
             "input": [
@@ -422,7 +390,6 @@ mod tests {
 
     #[test]
     fn redact_traffic_strips_reasoning_encrypted_content_in_events() {
-        // Upstream response items carry the same blob under `reasoning`.
         let value = serde_json::json!({
             "type": "response.output_item.done",
             "item": {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "gAAAAAopaque"}
@@ -434,8 +401,6 @@ mod tests {
 
     #[test]
     fn redact_traffic_strips_proxy_signature_delta_in_downstream_event() {
-        // The Codex translator emits a 050 downstream `signature_delta` whose
-        // signature is `ccp:codex:v1:<encoded-id>:<encrypted_content>`.
         let signature = "ccp:codex:v1:cnNfMQ:gAAAAABopaque-reasoning-replay";
         let value = serde_json::json!({
             "event": "content_block_delta",
@@ -459,15 +424,12 @@ mod tests {
             redacted["data"]["delta"]["signature"],
             format!("[redacted len={}]", signature.len())
         );
-        // Neighboring structure survives.
         assert_eq!(redacted["data"]["delta"]["type"], "signature_delta");
         assert_eq!(redacted["data"]["index"], 0);
     }
 
     #[test]
     fn redact_traffic_strips_proxy_signature_in_thinking_blocks() {
-        // Buffered downstream content and the replayed incoming Anthropic
-        // request both carry the signature on a `thinking` block.
         let signature = "ccp:codex:v1:cnNfMQ:gAAAAABopaque-reasoning-replay";
         let value = serde_json::json!({
             "content": [
@@ -491,8 +453,6 @@ mod tests {
 
     #[test]
     fn redact_traffic_keeps_foreign_signatures() {
-        // Real Anthropic signatures and other opaque values are not
-        // proxy-owned and must survive capture redaction unchanged.
         let value = serde_json::json!({
             "delta": {"type": "signature_delta", "signature": "ErUBCkYIBRgCIkA-real"},
             "content": [{"type": "thinking", "signature": "another-opaque-signature"}]
@@ -507,8 +467,6 @@ mod tests {
 
     #[test]
     fn traffic_capture_redacts_proxy_signatures_at_json_boundary() {
-        // Exercise write_json_event (050 downstream) and write_json (010
-        // incoming request) end to end, where redaction is actually applied.
         let temp = tempfile::TempDir::new().unwrap();
         let capture = test_capture(temp.path().join("traffic"));
         let signature = "ccp:codex:v1:cnNfMQ:gAAAAABopaque-reasoning-replay";
@@ -572,8 +530,6 @@ mod tests {
 
     #[test]
     fn redact_traffic_strips_data_urls_in_array_shaped_tool_output() {
-        // L2b inline mode: function_call_output.output is an array of content
-        // parts — the image_url inside must be redacted just like message parts.
         let value = serde_json::json!({
             "input": [
                 {"type": "function_call_output", "call_id": "call_1", "output": [
@@ -592,7 +548,6 @@ mod tests {
             !rendered.contains("data:image/png;base64,iVBOR"),
             "data URL payload leaked: {rendered}"
         );
-        // Structure and text survive.
         assert!(rendered.contains("input_image"));
         assert!(rendered.contains("screenshot"));
         assert!(rendered.contains("redacted"));
@@ -600,8 +555,6 @@ mod tests {
 
     #[test]
     fn redact_traffic_strips_uppercase_media_type_image_source() {
-        // Captures are written before translation validates anything, so a
-        // non-standard casing must still not persist its payload.
         let value = serde_json::json!({
             "source": {"type": "base64", "media_type": "IMAGE/PNG", "data": "QUJDREVGRw=="}
         });
@@ -634,8 +587,6 @@ mod tests {
 
     #[test]
     fn redact_traffic_strips_image_source_without_media_type() {
-        // A malformed block the translator would reject must still be redacted
-        // in the pre-translation capture.
         let value = serde_json::json!({
             "source": {"type": "base64", "data": "QUJDREVGRw=="}
         });
@@ -662,8 +613,6 @@ mod tests {
 
     #[test]
     fn redact_traffic_keeps_structured_image_url_shape() {
-        // Object-shaped image_url: redact the payload but keep the object
-        // structure so captures stay parseable.
         let value = serde_json::json!({
             "image_url": {"url": "DATA:IMAGE/PNG;BASE64,iVBORw0KGgoAAAANSUhEUg"}
         });

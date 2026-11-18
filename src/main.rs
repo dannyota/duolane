@@ -29,26 +29,26 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Print version information
+    #[command(about = "Print version information")]
     Version,
-    /// Start the proxy server and monitor
+    #[command(about = "Start the proxy server and monitor")]
     Serve {
         #[arg(long)]
         port: Option<u16>,
         #[arg(long = "no-monitor", action = ArgAction::SetTrue)]
         no_monitor: bool,
     },
-    /// Attach a read-only dashboard to a running proxy
+    #[command(about = "Attach a read-only dashboard to a running proxy")]
     Monitor {
         #[arg(long)]
         url: Option<reqwest::Url>,
     },
-    /// Open the monitor TUI with mock data and no proxy server
+    #[command(about = "Open the monitor TUI with mock data and no proxy server")]
     #[command(hide = true)]
     Demo,
-    /// List supported provider models
+    #[command(about = "List supported provider models")]
     Models,
-    /// Manage Codex authentication
+    #[command(about = "Manage Codex authentication")]
     Codex {
         #[command(subcommand)]
         command: ProviderGroup,

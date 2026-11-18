@@ -41,7 +41,6 @@ fn extract_web_search_results_from_text(text: &str) -> Vec<WebSearchResult> {
     let mut results: Vec<WebSearchResult> = Vec::new();
     let mut seen_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Match markdown links [title](url)
     let re = regex_lite::Regex::new(r#"\[([^\]\n]+)\]\((https?://[^)\s]+)\)"#).unwrap();
     for cap in re.captures_iter(text) {
         let title = clean_title(cap.get(1).map(|m| m.as_str()).unwrap_or(""));
@@ -61,7 +60,6 @@ fn extract_web_search_results_from_text(text: &str) -> Vec<WebSearchResult> {
         });
     }
 
-    // Match bare URLs
     let re2 = regex_lite::Regex::new(r"https?://[^\s<>()|]+").unwrap();
     for cap in re2.captures_iter(text) {
         let raw_url = cap.get(0).map(|m| m.as_str()).unwrap_or("");
@@ -138,7 +136,6 @@ fn clean_title(value: &str) -> String {
         .replace('`', "")
         .trim()
         .to_string();
-    // Take text before dash or em-dash
     if let Some(pos) = no_markers.find(" - ") {
         no_markers[..pos].trim().to_string()
     } else if let Some(find_pos) = no_markers.find(" \u{2013} ") {

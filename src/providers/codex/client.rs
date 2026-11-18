@@ -16,10 +16,6 @@ pub use super::events::{CodexLimitWindow, CodexUsageLimit};
 use super::search::{SearchRequest, SearchResponse};
 use super::translate::request::ResponsesRequest;
 
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
-
 #[derive(Debug)]
 pub struct CodexError {
     pub status: u16,
@@ -85,10 +81,6 @@ impl std::fmt::Display for CodexTransportError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Header builder
-// ---------------------------------------------------------------------------
-
 fn default_user_agent(use_responses_lite: bool) -> String {
     if use_responses_lite {
         RESPONSES_LITE_ORIGINATOR.to_string()
@@ -143,7 +135,6 @@ pub fn build_codex_headers(
         );
     }
     if let Some(ref session_id) = ctx.session_id {
-        // Match the official Codex Responses session header.
         headers.insert("session-id", header_value("session-id", session_id)?);
         headers.insert(
             "x-client-request-id",
@@ -305,10 +296,6 @@ fn search_endpoint(base_url: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// WebSocket request shaping
-// ---------------------------------------------------------------------------
-
 pub fn build_websocket_request(
     body: &ResponsesRequest,
     continuation: Option<&super::continuation::ContinuationCandidate>,
@@ -316,11 +303,9 @@ pub fn build_websocket_request(
     let mut payload = serde_json::to_value(body).unwrap_or_default();
     let obj = payload.as_object_mut().expect("request must be an object");
 
-    // Omit the stream field for WebSocket transport
     obj.remove("stream");
     obj.insert("type".to_string(), serde_json::json!("response.create"));
 
-    // Apply continuation if available
     if let Some(candidate) = continuation {
         if let Some(ref prev_id) = candidate.previous_response_id {
             obj.insert(
@@ -338,10 +323,6 @@ pub fn build_websocket_request(
 
     payload
 }
-
-// ---------------------------------------------------------------------------
-// Response
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActualTransport {
@@ -513,16 +494,10 @@ impl std::ops::Deref for OwnerAwareCodexResponse {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Client
-// ---------------------------------------------------------------------------
-
 const MAX_BUFFERED_TRANSPORT_RETRIES: u32 = 3;
 const MAX_BUFFERED_TRANSPORT_ATTEMPTS: u32 = MAX_BUFFERED_TRANSPORT_RETRIES + 1;
 const HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS: u64 = 300_000;
 const IMAGE_HEADER_TIMEOUT_MS: u64 = 300_000;
-/// Marks the error raised when the wait for the Codex response headers runs
-/// out, so the retry classifiers can tell it apart from a transport failure.
 const HTTP_RESPONSE_HEADERS_DETAIL: &str = "http_response_headers";
 
 #[derive(Clone)]
@@ -1707,7 +1682,6 @@ impl CodexHttpClient {
                             .map(super::continuation::ContinuationReservation::candidate),
                     );
 
-                    // Try WebSocket first
                     let ws_result = super::websocket::codex_websocket_request(
                         &self.websocket_client,
                         &self.websocket_proxy_config,
@@ -1730,14 +1704,11 @@ impl CodexHttpClient {
                                 active_continuation.as_ref(),
                             ) =>
                         {
-                            // Drop stale continuation state before considering a
-                            // replacement transport or connection.
                             Err(err)
                         }
                         Err(err)
                             if self.auto_http_fallback_enabled && should_fallback_to_http(&err) =>
                         {
-                            // Fall back to HTTP only if WebSocket failed before sending
                             let body_json =
                                 serde_json::to_string(body).map_err(|e| CodexError {
                                     status: 500,
@@ -1964,7 +1935,6 @@ impl CodexHttpClient {
                     continue;
                 }
                 Err(err) => {
-                    // Determine if retryable
                     let retryable = is_retryable_transport_error(&err);
                     if retryable && transport_failures < MAX_BUFFERED_TRANSPORT_RETRIES {
                         let delay =
@@ -2362,13 +2332,11 @@ impl CodexHttpClient {
             write_codex_http_request_capture(traffic, url, &headers, body_json);
         }
 
-        // Build headers
         let mut req_builder = self.client.post(url);
         for (key, value) in headers.iter() {
             req_builder = req_builder.header(key.as_str(), value.as_bytes());
         }
 
-        // Apply header timeout
         let started_at = Instant::now();
         let send_fut = req_builder.body(body_json.to_string()).send();
         let header_timeout_dur = Duration::from_millis(self.header_timeout_ms);
@@ -2953,11 +2921,6 @@ fn log_buffered_retry_exhausted(
 }
 
 fn is_retryable_transport_error(err: &CodexError) -> bool {
-    // Running out of patience for the response headers is not a transport
-    // failure. The request reached Codex, which is holding the head while the
-    // model reasons, so re-sending it starts that reasoning again from scratch
-    // and the new attempt runs out of time exactly like the last one. Wait
-    // longer with DUOLANE_CODEX_HEADER_TIMEOUT_MS instead.
     if err.detail.as_deref() == Some(HTTP_RESPONSE_HEADERS_DETAIL) {
         return false;
     }
@@ -3679,8 +3642,6 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let mut attempts = 0_u32;
-            // Hold every accepted connection open. Closing one would look like
-            // a transport failure and mask the header timeout under test.
             let mut held = Vec::new();
             while let Ok(Ok((mut stream, _))) =
                 tokio::time::timeout(Duration::from_millis(400), listener.accept()).await

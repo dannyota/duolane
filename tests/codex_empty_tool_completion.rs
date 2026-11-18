@@ -1,4 +1,3 @@
-//! Exercise the real proxy process with synthetic auth and loopback HTTP/WebSocket upstreams.
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

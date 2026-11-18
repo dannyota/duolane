@@ -10,17 +10,16 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum AuthCommand {
-    /// Sign in using browser-based authentication
+    #[command(about = "Sign in using browser-based authentication")]
     Login,
-    /// Sign in using a device code
+    #[command(about = "Sign in using a device code")]
     Device,
-    /// Show the current authentication status
+    #[command(about = "Show the current authentication status")]
     Status,
-    /// Delete stored authentication credentials
+    #[command(about = "Delete stored authentication credentials")]
     Logout,
 }
 
-// async_trait adds #[must_use] to methods returning already-must-use futures.
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -28,8 +27,6 @@ pub trait Provider: Send + Sync {
     fn supported_models(&self) -> Vec<String>;
     fn cli(&self) -> &'static dyn CliHandlers;
 
-    /// How to sign in while this backend has no login. Listings and the unknown-model
-    /// error use it. Routing ignores it, so a later login needs no restart.
     fn missing_login_hint(&self) -> Option<&'static str> {
         None
     }
@@ -62,19 +59,12 @@ pub struct RequestContext {
     pub session_id: Option<String>,
     pub traffic: Option<Arc<TrafficCapture>>,
     pub monitor: Option<MonitorHandle>,
-    /// Raw request material for byte-passthrough providers (the Anthropic backend).
-    /// Present on real HTTP requests; None in unit tests. Forwarding these verbatim
-    /// keeps the prompt-cache prefix byte-identical.
     pub passthrough: Option<Passthrough>,
 }
 
-/// Untranslated request material needed to relay a request to an upstream verbatim.
 #[derive(Debug, Clone)]
 pub struct Passthrough {
-    /// Original request body bytes, forwarded without reserialization.
     pub raw_body: axum::body::Bytes,
-    /// Original client request headers (carry Authorization + anthropic-beta).
     pub headers: axum::http::HeaderMap,
-    /// Original path and query, e.g. `/v1/messages?beta=true`.
     pub path_and_query: String,
 }

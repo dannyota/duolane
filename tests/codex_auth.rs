@@ -1,15 +1,11 @@
 use assert_cmd::Command;
 use tempfile::TempDir;
 
-// Access-token JWTs carrying only an `exp` claim ({"alg":"none"} header, unsigned).
-const ACCESS_EXP_2100: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxMDI0NDQ4MDB9.sig"; // 2100-01-01
-const ACCESS_EXP_2000: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjk0NjY4NDgwMH0.sig"; // 2000-01-01
-// id_token carrying {"chatgpt_account_id":"acct_idtok"}.
+const ACCESS_EXP_2100: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxMDI0NDQ4MDB9.sig";
+const ACCESS_EXP_2000: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjk0NjY4NDgwMH0.sig";
 const ID_TOKEN_ACCT: &str =
     "eyJhbGciOiJub25lIn0.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0X2lkdG9rIn0.sig";
 
-/// Build a `codex auth status` command whose credential source is an isolated temp
-/// `auth.json` (via DUOLANE_CODEX_AUTH_FILE, which takes precedence over $CODEX_HOME/$HOME).
 fn codex_cmd() -> (Command, TempDir, std::path::PathBuf) {
     let temp = TempDir::new().unwrap();
     let auth_path = temp.path().join(".codex").join("auth.json");
@@ -20,7 +16,6 @@ fn codex_cmd() -> (Command, TempDir, std::path::PathBuf) {
     (cmd, temp, auth_path)
 }
 
-/// Write a Codex-CLI-shaped auth.json. `id_token`/`account_id` are optional.
 fn write_auth(
     path: &std::path::Path,
     access: &str,
@@ -61,7 +56,6 @@ fn codex_auth_status_reads_stored_auth() -> Result<(), Box<dyn std::error::Error
 
 #[test]
 fn codex_auth_status_falls_back_to_id_token_account_id() -> Result<(), Box<dyn std::error::Error>> {
-    // No tokens.account_id: the account id must be recovered from the id_token JWT.
     let (mut cmd, _temp, auth_path) = codex_cmd();
     write_auth(&auth_path, ACCESS_EXP_2100, None, Some(ID_TOKEN_ACCT));
     let output = cmd.assert().success().get_output().stdout.clone();
@@ -73,7 +67,6 @@ fn codex_auth_status_falls_back_to_id_token_account_id() -> Result<(), Box<dyn s
 
 #[test]
 fn codex_auth_status_no_auth() -> Result<(), Box<dyn std::error::Error>> {
-    // No auth.json at the configured path.
     let (mut cmd, _temp, _auth_path) = codex_cmd();
     let output = cmd.output()?;
     assert_eq!(output.status.code(), Some(1));
@@ -96,7 +89,6 @@ fn codex_auth_status_shows_storage_path() -> Result<(), Box<dyn std::error::Erro
 
 #[test]
 fn codex_auth_status_no_account_id_shows_none() -> Result<(), Box<dyn std::error::Error>> {
-    // No tokens.account_id and no id_token: account id is unknown.
     let (mut cmd, _temp, auth_path) = codex_cmd();
     write_auth(&auth_path, ACCESS_EXP_2100, None, None);
     let output = cmd.output()?;

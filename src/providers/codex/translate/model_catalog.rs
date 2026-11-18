@@ -1,12 +1,3 @@
-//! Advisory model metadata from the `models_cache.json` next to the Codex CLI's
-//! `auth.json` (default `~/.codex`). No credentials are read and no network requests
-//! are made. Cache age, client version and provider identity do not establish
-//! authorization: the upstream still decides access. Compiled models remain the
-//! baseline even when this optional cache is absent or invalid.
-//!
-//! Snapshots are checked at most once per second and parsed only on metadata
-//! changes. Invalid or missing files clear the extension, not the baseline.
-
 use std::{
     collections::HashSet,
     fs,
@@ -62,8 +53,6 @@ struct CacheState {
 
 static CACHE: OnceLock<Mutex<CacheState>> = OnceLock::new();
 
-/// Read next to the Codex credentials, so both come from one Codex home. Unit
-/// tests read none, so they never depend on the developer's account.
 fn catalog_path() -> Option<PathBuf> {
     (!cfg!(test)).then(|| {
         crate::providers::codex::auth::token_store::codex_auth_file()
@@ -71,7 +60,6 @@ fn catalog_path() -> Option<PathBuf> {
     })
 }
 
-/// Slugs must not impersonate local aliases, tier suffixes or provider syntax.
 fn valid_slug(slug: &str) -> bool {
     !slug.is_empty()
         && slug.len() <= 128
@@ -84,8 +72,6 @@ fn valid_slug(slug: &str) -> bool {
         && !crate::registry::is_anthropic_alias(slug)
 }
 
-/// Malformed entries are skipped; required metadata must not grant access by
-/// default. The optional Lite field defaults to false, as it does in Codex.
 fn parse_catalog(bytes: &[u8]) -> Option<Vec<CatalogModel>> {
     if bytes.len() as u64 > MAX_CACHE_BYTES {
         return None;
@@ -236,7 +222,6 @@ mod tests {
         let later = now + CHECK_INTERVAL;
         let mut state = CacheState::default();
         assert_eq!(state.load(Some(&a), now)[0].slug, "gpt-a");
-        // Switching paths bypasses the polling interval, even at equal size.
         assert_eq!(state.load(Some(&b), now)[0].slug, "gpt-b");
         fs::write(&b, b"broken").unwrap();
         assert_eq!(state.load(Some(&b), now)[0].slug, "gpt-b");

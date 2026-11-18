@@ -54,13 +54,9 @@ pub struct CodexUsage {
     pub output_tokens: Option<u64>,
     pub input_tokens_details_cached: Option<u64>,
     pub output_tokens_details_reasoning: Option<u64>,
-    /// Latest `codex.rate_limits` snapshot seen on the stream that produced
-    /// this usage. Codex sends it as its own event before any usage exists,
-    /// so the translator carries it here for the mapper.
     pub rate_limits: Option<Box<CodexRateLimits>>,
 }
 
-/// Subscription meter summary from a `codex.rate_limits` stream event.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CodexRateLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,8 +79,6 @@ pub struct CodexRateLimitWindow {
     pub reset_at: Option<u64>,
 }
 
-/// Parse a `codex.rate_limits` event payload. Returns `None` when the event
-/// carries no `rate_limits` object or no recognized, well-typed fields.
 pub fn parse_codex_rate_limits(payload: &serde_json::Value) -> Option<CodexRateLimits> {
     let limits = payload.get("rate_limits")?.as_object()?;
     let window = |name: &str| -> Option<CodexRateLimitWindow> {
@@ -393,9 +387,6 @@ pub(crate) fn reduce_upstream_bytes_with_policy(
         event_count += 1;
         last_event_type = Some(t.clone());
 
-        // OpenCode Go's Responses endpoint may append a billing/keepalive ping
-        // after response.completed. It carries no model output and is safe to
-        // ignore, while all other JSON events after a terminal remain invalid.
         if _saw_terminal && t == "ping" {
             continue;
         }
@@ -813,14 +804,10 @@ pub(crate) fn reduce_upstream_bytes_with_policy(
                     .get("arguments")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
+                    && (args_accum.is_empty() || *emitted_args)
+                    && !*had_delta
                 {
-                    if !args_accum.is_empty() && !*emitted_args {
-                        // Already have accum from deltas - skip
-                    } else if *had_delta {
-                        // Already emitted deltas
-                    } else {
-                        *args_accum = final_args.to_string();
-                    }
+                    *args_accum = final_args.to_string();
                 }
 
                 if !args_accum.is_empty() {
@@ -1124,13 +1111,8 @@ pub struct AnthropicUsage {
     pub cache_read_input_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_tool_use: Option<WebSearchUsage>,
-    /// Reasoning tokens as reported by Codex. `thinking_tokens` mirrors the
-    /// field name Claude Code records for Anthropic models so per-turn
-    /// accounting in transcripts stays comparable across providers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens_details: Option<OutputTokensDetails>,
-    /// Subscription meter as of this response, from the `codex.rate_limits`
-    /// event. This optional proxy extension is not part of Anthropic's schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_rate_limits: Option<CodexRateLimits>,
 }
@@ -1145,10 +1127,6 @@ pub struct OutputTokensDetails {
 pub struct WebSearchUsage {
     pub web_search_requests: usize,
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

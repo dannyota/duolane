@@ -4,33 +4,24 @@ use super::translate::request::{
 };
 use tiktoken_rs::o200k_base_singleton;
 
-/// Approximate token counter for Codex translated requests.
-/// Text uses the OpenAI `o200k_base` tokenizer. Images, encrypted reasoning,
-/// and protocol framing still use local estimates, so the result is not a
-/// provider billing count.
 pub fn count_translated_tokens(translated: &ResponsesRequest) -> u64 {
     let mut total = 0u64;
 
-    // Instructions
     if let Some(ref instructions) = translated.instructions {
         total += approx_token_count(instructions);
     }
 
-    // Input items
     for item in &translated.input {
         total += count_input_item_tokens(item);
     }
 
-    // Tools
     if let Some(ref tools) = translated.tools {
         total += count_tool_tokens(tools);
     }
 
-    // Overhead
     total += translated.input.len() as u64 * 4;
     total += translated.tools.as_ref().map_or(0, |t| t.len() as u64 * 4);
 
-    // Model name
     total += approx_token_count(&translated.model);
 
     total.max(1)
@@ -94,7 +85,7 @@ fn count_content_part_tokens(part: &ResponsesContentPart) -> u64 {
     match part {
         ResponsesContentPart::InputText { text } => approx_token_count(text),
         ResponsesContentPart::OutputText { text } => approx_token_count(text),
-        ResponsesContentPart::InputImage { .. } => 2000, // Image token estimate
+        ResponsesContentPart::InputImage { .. } => 2000,
     }
 }
 
@@ -111,7 +102,7 @@ fn count_tool_tokens(tools: &[ResponsesTool]) -> u64 {
                     approx_token_count(&serde_json::to_string(&f.parameters).unwrap_or_default());
             }
             ResponsesTool::WebSearch(_) => {
-                total += 10; // fixed overhead for web search tool
+                total += 10;
             }
         }
     }
@@ -134,8 +125,6 @@ pub(crate) fn truncate_to_token_budget(text: &str, max_tokens: u64) -> String {
         return text.to_string();
     }
 
-    // A token boundary may split a multi-byte UTF-8 scalar. Back up until the
-    // decoded prefix is valid rather than replacing bytes or splitting text.
     for end in (1..=max_tokens).rev() {
         if let Ok(prefix) = tokenizer.decode(&tokens[..end]) {
             return prefix;

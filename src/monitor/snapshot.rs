@@ -1,5 +1,3 @@
-//! Immutable dashboard read models. Process-local clocks and mutable accounting
-//! stay in the monitor store; viewers receive elapsed durations and computed rates.
 use super::{
     ActiveRequest, CompletedRequest, EndpointKind, MonitorState, RequestStatus, SessionSummary,
     Throughput,

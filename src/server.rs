@@ -355,11 +355,6 @@ struct ModelsQuery {
     limit: Option<usize>,
 }
 
-/// Anthropic-shaped model listing so Claude Code's gateway model discovery
-/// (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) finds the proxy's models.
-/// Claude Code only adds entries whose id starts with `claude` or `anthropic`,
-/// so the Anthropic-style aliases are what surface in its `/model` picker;
-/// raw provider ids are still listed for other Anthropic-compatible clients.
 async fn handler_models(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ModelsQuery>,
@@ -806,9 +801,7 @@ async fn parse_multipart_image_edit(
                     param: Some("image"),
                     code: Some("invalid_image"),
                 })?;
-                input.images.push(UploadedImage {
-                    bytes, // EFFICIENCY: field.bytes() already returns owned Bytes, avoid to_vec() copy
-                });
+                input.images.push(UploadedImage { bytes });
             }
             "prompt" => {
                 input.prompt = Some(multipart_text(field, "prompt").await?);
@@ -1573,8 +1566,6 @@ async fn dispatch_request(
         }
     };
 
-    // Only the Anthropic passthrough speaks message threads natively; the
-    // translating backends accept a new thread and reject continuing one.
     if provider.name() != "anthropic"
         && let Some(thread) = body.extra.remove("thread")
         && thread.get("type").and_then(Value::as_str) != Some("create")
@@ -1767,18 +1758,8 @@ async fn dispatch_request(
     with_request_id(response, &req_id)
 }
 
-/// Header Claude Code reads to populate the `requestId` field it writes into
-/// every transcript record.
 const REQUEST_ID_HEADER: &str = "request-id";
 
-/// Publish the per-request id this proxy mints. Anthropic returns `request-id`,
-/// and Claude Code records it as `requestId`; without it every downstream
-/// consumer that de-duplicates transcript records by request id (its own
-/// parser, usage dashboards) counts each request twice, because a transcript
-/// legitimately repeats a record and the id is what resolves it.
-///
-/// An upstream-supplied id is preserved: relabelling a real provider id with a
-/// local uuid would lose the more useful value.
 fn stamp_request_id(headers: &mut http::HeaderMap, req_id: &str) {
     if !headers.contains_key(REQUEST_ID_HEADER)
         && let Ok(value) = http::HeaderValue::from_str(req_id)
@@ -1799,8 +1780,6 @@ fn monitor_response_body(response: Response, guard: RequestMonitorGuard) -> Resp
         .get::<NativeResponseOutcome>()
         .cloned();
     let (mut parts, body) = response.into_parts();
-    // Stamped on the parts before the body is streamed, so a streaming SSE
-    // response carries the header too.
     stamp_request_id(&mut parts.headers, &guard.req_id);
     let stream = futures_util::stream::unfold(
         (body, guard, outcome),
@@ -2168,10 +2147,6 @@ mod request_id_header_tests {
         RequestMonitorGuard::new(None, req_id.to_string())
     }
 
-    // Claude Code populates its transcript `requestId` from this header.
-    // Without it, consumers that de-duplicate transcript records by request id
-    // count every request twice, because a transcript legitimately repeats a
-    // record and the id is what resolves the repeat.
     #[test]
     fn stamps_the_request_id_on_a_response() {
         let response = Response::builder()
@@ -2185,9 +2160,6 @@ mod request_id_header_tests {
         );
     }
 
-    // Streaming responses carry it too: the header is applied to the parts
-    // before the body is streamed, which is why the body-level message id is
-    // not a substitute for SSE.
     #[test]
     fn stamps_a_streaming_response_before_the_body() {
         let response = Response::builder()
@@ -2202,8 +2174,6 @@ mod request_id_header_tests {
         );
     }
 
-    // An upstream that already supplied one owns it; overwriting would relabel
-    // a real provider id with a local uuid.
     #[test]
     fn does_not_clobber_an_upstream_supplied_id() {
         let response = Response::builder()

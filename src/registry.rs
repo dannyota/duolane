@@ -110,7 +110,6 @@ impl Registry {
         models
     }
 
-    /// Backends without a login, with how to sign in.
     pub fn signed_out(&self) -> BTreeMap<&str, &'static str> {
         self.handlers
             .iter()
@@ -142,11 +141,6 @@ impl Registry {
         session_affinity: Option<&AliasProvider>,
     ) -> Option<Arc<dyn Provider>> {
         let normalized = normalize_incoming_model(raw_model);
-        // Claude-shaped models always resolve to the configured alias target (the
-        // Anthropic passthrough by default). Session affinity is deliberately NOT
-        // consulted here: a codex request earlier in the same session must never drag
-        // the opus/haiku slots off the Anthropic backend. This is what lets the opus
-        // slot stay on Max while the sonnet slot runs on codex within one session.
         let _ = session_affinity;
         if is_anthropic_alias(&normalized) || normalized.starts_with("claude-") {
             return self.handlers.get(self.alias_provider.as_str()).cloned();
@@ -159,7 +153,6 @@ impl Registry {
             }
         }
 
-        // Hidden catalog models are accepted explicitly without being advertised.
         if self.dynamic_codex
             && crate::providers::codex::translate::model_allowlist::is_valid_model_for_codex(
                 &normalized,
@@ -448,7 +441,6 @@ mod tests {
 
     #[test]
     fn session_affinity_cannot_hijack_claude_slot() {
-        // Even if a prior codex request set Codex affinity, claude aliases stay on anthropic.
         let registry = Registry::new(AliasProvider::Anthropic);
         let p = registry.provider_for_model("claude-opus-4-8", Some(&AliasProvider::Codex));
         assert_eq!(p.expect("provider").name(), "anthropic");

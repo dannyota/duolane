@@ -6,4 +6,5 @@ These documents describe the intended product. Where the code differs, the
 | Design                          | Owns                                                 |
 | ------------------------------- | ---------------------------------------------------- |
 | [Architecture](architecture.md) | Routing, request flow, and invariants                |
+| [Codex route](codex.md)         | Translation, lanes, retries, and Codex errors        |
 | [Security](security.md)         | Trust boundaries, inbound rules, credentials, limits |
