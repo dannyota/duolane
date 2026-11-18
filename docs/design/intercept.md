@@ -7,9 +7,9 @@ This design describes intended behavior; none of it is built.
 
 ## Flow
 
-1. `duolane claude [args]` checks that `duolane serve` is running, then starts
-   `claude` with the [environment](#environment) below. Nothing persistent
-   changes, so there is nothing to clean up afterward.
+1. `duolane claude [args]` checks that the proxy listener presents duolane's own
+   leaf certificate, then starts `claude` with the [environment](#environment)
+   below. Nothing persistent changes, so there is nothing to clean up afterward.
 2. Claude Code sends `CONNECT host:port` to duolane's proxy listener for each
    host, with the proxy password.
 3. For `api.anthropic.com:443`, duolane answers the TLS handshake with its own
@@ -26,6 +26,7 @@ This design describes intended behavior; none of it is built.
 | `NO_PROXY` and `no_proxy`             | Loopback names and addresses                 |
 | `CLAUDE_CODE_GZIP_REQUEST_BODIES`     | `0`                                          |
 | `CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS` | Above the Codex response header wait         |
+| `CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS`  | The stream idle limit of the security design |
 
 - `ANTHROPIC_BASE_URL` is removed from the environment.
 - The wrapper refuses to start when a proxy variable already names another
@@ -48,9 +49,12 @@ It is opt-in, because every Claude Code surface then depends on duolane running.
 - duolane reads a request body only on the two message paths, and refuses a body
   there that carries a `Content-Encoding`, because duolane never decompresses
   and an unread body could carry Codex reasoning to Anthropic.
-- The relay keeps the method, path, query, and body bytes, and every header
-  except `Proxy-Authorization`, including `Upgrade`. The Claude route's header
-  stripping does not apply to it.
+- The relay keeps the method, path, query, and body bytes. In both directions it
+  removes `Proxy-Authorization` and the hop-by-hop and framing headers
+  (`Connection` and the fields it names, `Keep-Alive`, `TE`,
+  `Transfer-Encoding`, `Content-Length`), and keeps every other header,
+  including `Accept-Encoding` and `Content-Encoding`. On a protocol upgrade it
+  forwards `Connection: upgrade` and `Upgrade`, then copies bytes both ways.
 - Architecture [invariant 3](architecture.md#invariants) holds for traffic that
   reaches duolane. A session that bypasses the proxy is outside it.
 
@@ -61,8 +65,9 @@ It is opt-in, because every Claude Code surface then depends on duolane running.
   leaf for `api.anthropic.com` with a subject alternative name, key identifiers,
   and the server authentication usage.
 - The CA private key exists only in memory while the pair is created.
-- The pair lasts 90 days. `duolane serve` replaces it when fewer than 14 days
-  remain and says that running Claude Code sessions must restart.
+- The pair lasts 90 days. When fewer than 14 days remain, `duolane serve` adds a
+  new CA certificate to `ca.pem` beside the old one, and serves the new leaf
+  only once the old one expires, so sessions started in between keep working.
 - duolane verifies the real `api.anthropic.com` certificate as in every other
   mode.
 
@@ -82,9 +87,11 @@ only by the owner:
 ## Setup and cleanup
 
 - `duolane intercept setup` edits the user settings file, honoring
-  `CLAUDE_CONFIG_DIR`. It creates the file if needed, follows no symlink, writes
-  atomically with the same mode, records each key and value in the manifest, and
-  can run again safely. It refuses when a variable it sets is already set to
+  `CLAUDE_CONFIG_DIR`. It creates the file if needed, refuses a symlink, refuses
+  a file that changed while it worked, writes atomically, sets the file to
+  owner-only because it now holds the proxy password, records each key and value
+  in the manifest, and can run again safely. It tells the owner to restart
+  running sessions. It refuses when a variable it sets is already set to
   something else in the shell or in user, project, or managed settings.
 - `duolane intercept cleanup` removes each setting whose value still matches the
   manifest, reports any that changed, deletes the files, and reminds the owner
@@ -98,8 +105,8 @@ only by the owner:
 2. Every `CONNECT` needs the proxy password, compared like the inbound token.
    Without it, another local user could spend the Codex login through the proxy.
 3. Only `api.anthropic.com:443` is intercepted. The list is not configurable.
-4. `CONNECT` to a loopback address is refused. Other targets and ports are
-   tunneled.
+4. `CONNECT` is refused when the target resolves to a loopback or unspecified
+   address, including IPv4-mapped forms. Other targets and ports are tunneled.
 5. Inside the intercepted connection, duolane checks that `Host` is
    `api.anthropic.com` and applies the request limits. The `Origin` and content
    type rules do not apply there, because no browser can reach it.
