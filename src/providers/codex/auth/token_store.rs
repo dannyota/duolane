@@ -264,7 +264,7 @@ fn remove_stale_temp_files(path: &Path) {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
         return;
     };
-    let prefix = format!(".{}.tmp.", name.to_string_lossy());
+    let prefix = format!(".{}.duolane-tmp.", name.to_string_lossy());
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -286,7 +286,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), anyhow::Error> {
     };
     std::fs::create_dir_all(dir).ok();
     let tmp = dir.join(format!(
-        ".{name}.tmp.{}.{}",
+        ".{name}.duolane-tmp.{}.{}",
         std::process::id(),
         TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));

@@ -85,7 +85,7 @@ Rejections use the Anthropic error shape and never echo request values:
 - duolane writes rotated tokens only if the file still holds the refresh token
   it spent, so a login the Codex CLI changed during the exchange wins. The
   exchange and the write finish even if the request that started them is
-  cancelled. A failed write is retried three times.
+  cancelled. A failed write is tried up to three times.
 - If the lock cannot be taken, duolane keeps using an unexpired token. After a
   rejected refresh, duolane re-reads the file and uses a token that changed.
   Otherwise it reports that a new `codex login` is needed.
