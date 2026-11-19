@@ -3,7 +3,8 @@
 Intercept mode lets a Claude Code session use Codex models while Claude Code
 still talks to `api.anthropic.com`, so first-party features such as Remote
 Control stay on. [ADR 0004](../adr/0004-intercept-mode.md) records the decision.
-This design describes intended behavior; none of it is built.
+A [spike](#spike-results) confirmed the behavior this design depends on. The
+[foundation plan](../plans/foundation.md) tracks what is built.
 
 ## Flow
 
@@ -16,6 +17,21 @@ This design describes intended behavior; none of it is built.
    leaf certificate, offering HTTP/1.1 only, and reads the requests.
 4. For any other target, duolane opens a TCP connection and copies bytes both
    ways without reading them.
+
+## Listener
+
+- `duolane serve` opens the proxy listener only when intercept mode is on:
+  `intercept` in the config file, `DUOLANE_INTERCEPT`, or `serve --intercept`.
+  It creates the [files](#files) on first start.
+- The listener binds to `127.0.0.1` on `interceptPort` or
+  `DUOLANE_INTERCEPT_PORT`, by default 18766. The bind address setting does not
+  apply to it.
+- It accepts only `CONNECT`. Any other method gets 405, and a `CONNECT` without
+  the proxy password gets 407.
+- At shutdown it stops accepting, gives open connections 5 seconds, then closes
+  them, because tunnels and long polls would otherwise never end.
+- `duolane serve` raises its soft open-file limit to the hard limit, up to 4096,
+  because the default of 256 on macOS is below what the listener may hold.
 
 ## Environment
 
@@ -40,23 +56,41 @@ It is opt-in, because every Claude Code surface then depends on duolane running.
 
 ## Requests on the intercepted host
 
-| Request                                                                 | Handling                                 |
-| ----------------------------------------------------------------------- | ---------------------------------------- |
-| `POST /v1/messages` or `/v1/messages/count_tokens` naming a Codex model | The Codex route                          |
-| The same paths naming any other model                                   | The Claude route, with its conversions   |
-| Any other method or path, and any protocol upgrade                      | Relayed to `api.anthropic.com` unchanged |
+| Request                                                                 | Handling                                       |
+| ----------------------------------------------------------------------- | ---------------------------------------------- |
+| `POST /v1/messages` or `/v1/messages/count_tokens` naming a Codex model | The Codex route                                |
+| The same paths naming any other model                                   | The Claude route, with its conversions         |
+| A protocol upgrade, or `CONNECT` inside the connection                  | Refused with 501                               |
+| Any other method or path                                                | Relayed to the Anthropic upstream URL, as sent |
 
+- The two message paths match exactly, whatever the query string is, because
+  Claude Code sends `?beta=true`. A request is refused with 400 when its target
+  is not in origin form, or when its path is not a message path but becomes one
+  after percent-decoding, removing repeated slashes, dot segments, and a
+  trailing slash, and ignoring case. No spelling of a message path reaches the
+  relay.
 - duolane reads a request body only on the two message paths, and refuses a body
   there that carries a `Content-Encoding`, because duolane never decompresses
   and an unread body could carry Codex reasoning to Anthropic.
 - The relay keeps the method, path, query, and body bytes. In both directions it
   removes `Proxy-Authorization` and the hop-by-hop and framing headers
   (`Connection` and the fields it names, `Keep-Alive`, `TE`,
-  `Transfer-Encoding`, `Content-Length`), and keeps every other header,
-  including `Accept-Encoding` and `Content-Encoding`. On a protocol upgrade it
-  forwards `Connection: upgrade` and `Upgrade`, then copies bytes both ways.
-- Architecture [invariant 3](architecture.md#invariants) holds for traffic that
-  reaches duolane. A session that bypasses the proxy is outside it.
+  `Transfer-Encoding`, `Content-Length`, `Upgrade`), removes `x-duolane-key`
+  from requests, and keeps every other header, including `Accept-Encoding` and
+  `Content-Encoding`.
+- The relay streams bodies in both directions as they arrive, follows no
+  redirect, and applies no response or idle timeout. Remote Control holds long
+  polls and an event stream open on this host, and it stops receiving messages
+  when a proxy buffers them. TCP keepalive on both sides of a relay or tunnel
+  ends one whose peer vanished, for example after the laptop slept.
+- Protocol upgrades are refused because the spike saw none on this host. Relay
+  them once Claude Code is seen to need one.
+- Architecture [invariant 3](architecture.md#invariants) holds on the message
+  paths. Remote Control mirrors the session transcript to Anthropic through
+  relayed requests, including each thinking block and its signature, so a Codex
+  signature travels there unread. The owner accepted this on 2026-11-19: the
+  transcript is what Remote Control exists to send, and the encrypted reasoning
+  in the signature is readable only by OpenAI.
 
 ## Certificates
 
@@ -71,6 +105,8 @@ It is opt-in, because every Claude Code surface then depends on duolane running.
   The pending pair is stored beside the current one until then.
 - duolane verifies the real `api.anthropic.com` certificate as in every other
   mode.
+- The certificates are created with `rcgen`, which the rustls project maintains
+  and which signs with `ring`, the provider duolane already uses.
 
 ## Files
 
@@ -110,29 +146,55 @@ only by the owner:
    address, including IPv4-mapped forms. duolane connects to the address it
    checked, never to a second lookup. Other targets and ports are tunneled.
 5. Inside the intercepted connection, duolane checks that `Host` is
-   `api.anthropic.com` and applies the request limits. The `Origin` and content
-   type rules do not apply there, because no browser can reach it.
-6. In this mode duolane ignores proxy variables for its own upstream connections
-   and for tunnels, and uses only an explicitly configured upstream proxy. This
-   prevents a loop through its own listener.
+   `api.anthropic.com` and applies the request limits. The inbound token and the
+   `Origin` and content type rules do not apply there, because the proxy
+   password already authenticated the connection and no browser can reach it.
+6. `duolane serve` refuses to start in this mode when `HTTPS_PROXY`,
+   `ALL_PROXY`, or their lowercase forms in its own environment name `localhost`
+   or a loopback or unspecified address on the proxy port, because its upstream
+   connections would loop through the listener. Tunnels always connect directly.
 7. `leaf.key` and `proxy-password` are protected like the Codex login: owner
    only, never logged, captured, or printed. Whoever reads `leaf.key` and takes
    the proxy port can read the Claude login and forge model replies until the
    certificate expires.
-8. Tunneled and relayed bytes are never logged or captured. Tunnels have their
-   own connection limit and no idle timeout.
+8. Tunneled and relayed bytes are never logged or captured. Tunnels have no idle
+   timeout.
+9. The listener holds at most 64 connections that have not yet sent the
+   password, 256 intercepted connections, and 256 tunnels. A connection counts
+   as intercepted or tunneled only after the password check, and gets 503 when
+   its pool is full. A connection that sends no complete `CONNECT` or TLS
+   handshake within 30 seconds is closed.
+
+## Spike results
+
+Checked on 2026-11-19 with Claude Code 2.1.327 behind an existing intercepting
+proxy, before any duolane code:
+
+- Claude Code loads `NODE_EXTRA_CA_CERTS`, accepts a leaf from the
+  name-constrained CA, rejects a leaf from a CA constrained to another name, and
+  sends the password in the `HTTPS_PROXY` URL on `CONNECT`.
+- Remote Control works through a proxy that intercepts `api.anthropic.com` and
+  tunnels other hosts, both for `claude --remote-control` and for the
+  `claude remote-control` server: the phone sees the session, sends messages,
+  gets replies, and changes the model. It uses long polls and one event stream
+  under `/v1/environments/`, `/v1/code/sessions/`, and `/v2/ccr-sessions/`,
+  without a protocol upgrade.
+- `--model`, `ANTHROPIC_MODEL`, and `/model <id>`, typed locally or sent from
+  the phone, send a Codex model id unchanged in `POST /v1/messages?beta=true`.
+  Claude Code warns that it does not recognize the id and assumes a window of
+  1,000,000 tokens. The phone's model list offers only Claude models.
+- `/model <id>` also saves the id as the default for new sessions, so a session
+  started later without duolane fails until the owner picks a Claude model.
+- Claude Code speaks HTTP/1.1 when offered only that, sends request bodies
+  uncompressed, and authenticates with `Authorization`. `api.anthropic.com` is
+  the only host it needs intercepted.
 
 ## Unverified behavior
 
-A spike with an existing intercepting proxy, before any duolane code, must
-confirm:
+[Live verification](../plans/foundation.md) checks these with the built mode:
 
-- Remote Control works through a proxy that intercepts `api.anthropic.com` and
-  tunnels other hosts, including model changes made from the remote device.
-- Claude Code's runtime loads `NODE_EXTRA_CA_CERTS`, accepts the leaf, and
-  rejects a leaf signed by a CA constrained to another name.
-- `/model`, `--model`, and `ANTHROPIC_MODEL` accept a Codex model id without a
-  gateway, and what the request for it contains.
-- Which protocol Claude Code negotiates, whether it compresses request bodies
-  behind a proxy, and which paths it calls on `api.anthropic.com`.
+- No first-party feature needs a protocol upgrade on the intercepted host.
 - The first-byte timeout variable exists and behaves as documented.
+- Whether the wrapper must set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to correct the
+  window Claude Code assumes for a Codex model
+  ([model configuration](https://code.claude.com/docs/en/model-config)).
