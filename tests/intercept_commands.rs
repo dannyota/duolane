@@ -292,13 +292,19 @@ async fn claude_starts_with_the_intercept_environment_and_the_lineup_before_the_
 async fn claude_adds_no_lineup_over_the_owner_settings() {
     let (port, _) = listen().await;
     let sandbox = Sandbox::new(hermetic_config());
-    let arguments = ["--settings={}", "-p", "hi"];
-    let mut command = sandbox.command(port);
-    command.arg("claude").args(arguments);
-    let flagged = output(command).await;
-    assert!(flagged.status.success());
-    assert_eq!(received(&flagged), arguments);
-    assert!(text(&flagged.stderr).contains("--settings"));
+    let cases: [(&[&str], &str); 3] = [
+        (&["--settings={}", "-p", "hi"], "--settings"),
+        (&["-p", "hi", "--settings", "{}"], "--settings"),
+        (&["remote-control", "--name", "x"], "not an option"),
+    ];
+    for (arguments, reason) in cases {
+        let mut command = sandbox.command(port);
+        command.arg("claude").args(arguments);
+        let unchanged = output(command).await;
+        assert!(unchanged.status.success());
+        assert_eq!(received(&unchanged), arguments);
+        assert!(text(&unchanged.stderr).contains(reason), "{arguments:?}");
+    }
 
     let owner = json!({"modelPicker": {"options": [{"model": "opus"}]}}).to_string();
     std::fs::write(sandbox.settings(), &owner).unwrap();

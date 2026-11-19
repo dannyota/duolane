@@ -47,6 +47,7 @@ fn build(catalog: &[CatalogModel]) -> Option<Lineup> {
     let mut options: Vec<Row> = if catalog.is_empty() {
         ALLOWED_MODELS
             .iter()
+            .rev()
             .filter(|id| valid_slug(id))
             .map(|id| row(id, None))
             .collect()
@@ -75,8 +76,10 @@ fn row(id: &str, display_name: Option<&str>) -> Row {
     let name = display_name
         .filter(|name| {
             !name.trim().is_empty()
-                && name.chars().nth(MAX_LABEL_CHARS).is_none()
-                && !name.chars().any(char::is_control)
+                && name.len() <= MAX_LABEL_CHARS
+                && name
+                    .bytes()
+                    .all(|byte| byte == b' ' || byte.is_ascii_graphic())
         })
         .unwrap_or(id);
     Row {
@@ -89,7 +92,7 @@ pub(super) fn arguments(owner: &[OsString]) -> Vec<OsString> {
     match offered(owner) {
         Ok(settings) => vec![OsString::from(SETTINGS_FLAG), OsString::from(settings)],
         Err(reason) => {
-            eprintln!("note: /model lists no Codex models: {reason}");
+            eprintln!("note: not adding the Codex model lineup: {reason}");
             Vec::new()
         }
     }
@@ -160,7 +163,7 @@ mod tests {
         let long = "x".repeat(MAX_LABEL_CHARS + 1);
         let mut catalog = vec![
             model("gpt-c", 3, true, Some("Gamma")),
-            model("gpt-a", 1, true, Some("Alpha\u{7}")),
+            model("gpt-a", 1, true, Some("Alpha\u{202E}\u{200B}")),
             model("gpt-hidden", 0, false, Some("Hidden")),
             model("gpt-a-fast", 0, true, Some("Fast")),
             model("gpt-b", 2, true, Some(&long)),
@@ -189,7 +192,8 @@ mod tests {
 
         let fallback = build(&[]).unwrap().options;
         assert_eq!(fallback.len(), ALLOWED_MODELS.len());
-        assert_eq!(fallback[0].model, ALLOWED_MODELS[0]);
-        assert_eq!(fallback[0].label, format!("{} (Codex)", ALLOWED_MODELS[0]));
+        let newest = ALLOWED_MODELS[ALLOWED_MODELS.len() - 1];
+        assert_eq!(fallback[0].model, newest);
+        assert_eq!(fallback[0].label, format!("{newest} (Codex)"));
     }
 }
