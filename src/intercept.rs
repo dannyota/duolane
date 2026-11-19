@@ -1,11 +1,12 @@
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod certs;
 mod dispatch;
 mod files;
 mod listener;
+mod lock;
 mod manifest;
 mod relay;
 mod rotation;
@@ -55,9 +56,14 @@ pub fn ca_path() -> PathBuf {
 
 fn prepare(now: time::OffsetDateTime) -> anyhow::Result<(String, certs::Pair)> {
     let dir = intercept_dir();
-    files::ensure_dir(&dir)?;
-    let password = files::load_or_create_password(&dir)?;
-    let pair = rotation::refresh(&dir, now)?;
+    let _lock = lock::acquire(&dir, lock::WAIT)?;
+    prepare_locked(&dir, now)
+}
+
+fn prepare_locked(dir: &Path, now: time::OffsetDateTime) -> anyhow::Result<(String, certs::Pair)> {
+    files::ensure_dir(dir)?;
+    let password = files::load_or_create_password(dir)?;
+    let pair = rotation::refresh(dir, now)?;
     Ok((password, pair))
 }
 

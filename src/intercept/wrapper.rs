@@ -28,6 +28,8 @@ const FIRST_BYTE_MARGIN_MS: u64 = 30_000;
 const LISTENER_CHECK: Duration = Duration::from_secs(5);
 const MAX_RESPONSE_HEAD: usize = 8 * 1024;
 const START_FIRST: &str = "start `duolane serve --intercept` first";
+const PASSWORD_SENT: &str =
+    "the proxy password was sent to that process; run `duolane intercept cleanup` to replace it";
 
 pub(super) struct Install {
     pub(super) password: String,
@@ -193,7 +195,7 @@ fn check_listener(
     let down = || anyhow::anyhow!("the intercept listener on {address} is down; {START_FIRST}");
     let other = || {
         anyhow::anyhow!(
-            "the listener on {address} presented another certificate than duolane's; check what holds that port"
+            "the listener on {address} presented another certificate than duolane's; check what holds that port; {PASSWORD_SENT}"
         )
     };
     let remaining = remaining(deadline).ok_or_else(down)?;
@@ -238,7 +240,9 @@ fn check_listener(
             if rejected {
                 return Err(other());
             }
-            anyhow::bail!("the intercept listener on {address} did not finish the TLS handshake");
+            anyhow::bail!(
+                "the intercept listener on {address} did not finish the TLS handshake; {PASSWORD_SENT}"
+            );
         }
     }
     let presented = tls.peer_certificates().and_then(|chain| chain.first());

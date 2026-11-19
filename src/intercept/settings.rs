@@ -9,16 +9,17 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 use time::OffsetDateTime;
 
-use super::PROXY_USER;
 use super::files::{self, MANIFEST_FILE, OWNED_FILES};
 use super::manifest::{self, Entry, Manifest};
 use super::wrapper::{
     BASE_URL_VARIABLE, CA_VARIABLE, GZIP_VARIABLE, HTTPS_PROXY, Install, LOOPBACK_NO_PROXY,
     NO_PROXY, same_file, timeouts, variable,
 };
+use super::{PROXY_USER, lock};
 
 const ENV: &str = "env";
 const SETTINGS_FILE: &str = "settings.json";
+const DEFAULT_INDENT: &[u8] = b"  ";
 const PROJECT_FILES: [&str; 2] = [".claude/settings.json", ".claude/settings.local.json"];
 #[cfg(target_os = "macos")]
 const MANAGED_SETTINGS: Option<&str> =
@@ -83,6 +84,7 @@ impl Serialize for Slot {
 struct Document {
     entries: Ordered<Slot>,
     newline: bool,
+    indent: Vec<u8>,
 }
 
 impl Document {
@@ -91,6 +93,7 @@ impl Document {
             return Ok(Self {
                 entries: Ordered(Vec::new()),
                 newline: true,
+                indent: DEFAULT_INDENT.to_vec(),
             });
         };
         let top: Ordered<Box<RawValue>> = serde_json::from_slice(bytes).map_err(|error| {
@@ -115,6 +118,7 @@ impl Document {
         Ok(Self {
             entries: Ordered(entries),
             newline: bytes.ends_with(b"\n"),
+            indent: indentation(bytes),
         })
     }
 
@@ -173,7 +177,7 @@ impl Document {
 
     fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
         let mut bytes = Vec::new();
-        let formatter = serde_json::ser::PrettyFormatter::with_indent(b"  ");
+        let formatter = serde_json::ser::PrettyFormatter::with_indent(&self.indent);
         let mut serializer = serde_json::Serializer::with_formatter(&mut bytes, formatter);
         self.entries.serialize(&mut serializer)?;
         if self.newline {
@@ -181,6 +185,22 @@ impl Document {
         }
         Ok(bytes)
     }
+}
+
+fn indentation(bytes: &[u8]) -> Vec<u8> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .find_map(|line| {
+            let width = line
+                .iter()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            let content = line.get(width..)?;
+            let indented = width > 0 && !content.iter().all(u8::is_ascii_whitespace);
+            line.get(..width).filter(|_| indented)
+        })
+        .unwrap_or(DEFAULT_INDENT)
+        .to_vec()
 }
 
 fn text(value: &RawValue) -> String {
@@ -326,8 +346,19 @@ fn finish(report: &[String], reminders: &[&str]) {
 
 pub fn setup() -> anyhow::Result<()> {
     let dir = super::intercept_dir();
+    let _lock = lock::acquire(&dir, lock::WAIT)?;
+    let path = settings_path()?;
+    let previous = manifest::load(&dir).ok().flatten();
+    if let Some(previous) = &previous
+        && previous.settings_file != path
+    {
+        anyhow::bail!(
+            "refusing setup: {MANIFEST_FILE} records intercept settings in {}; run `duolane intercept cleanup` with the same CLAUDE_CONFIG_DIR first",
+            previous.settings_file.display()
+        );
+    }
     let before = manifest::file_entries(&dir)?;
-    let (password, _) = super::prepare(OffsetDateTime::now_utc())?;
+    let (password, _) = super::prepare_locked(&dir, OffsetDateTime::now_utc())?;
     let mut report = Vec::new();
     for entry in manifest::file_entries(&dir)? {
         match before.iter().find(|old| old.name == entry.name) {
@@ -339,46 +370,42 @@ pub fn setup() -> anyhow::Result<()> {
         }
     }
     let install = Install::new(password)?;
-    let path = settings_path()?;
     let original = read_settings(&path)?;
     let mut document = Document::parse(original.as_deref(), &path)?;
-    let previous = manifest::load(&dir).ok().flatten();
+    let recorded_before = |entry: &Entry| {
+        previous
+            .as_ref()
+            .is_some_and(|previous| previous.settings.contains(entry))
+    };
     let mut wanted = install.fixed();
     wanted.extend(NO_PROXY.map(|name| (name, LOOPBACK_NO_PROXY.to_string())));
     let mut kept = Vec::new();
     for (name, value) in timeouts() {
         match document.get(name).filter(|existing| !existing.is_empty()) {
             None => wanted.push((name, value)),
-            Some(existing) => {
-                let entry = Entry::new(name, existing.as_bytes());
-                if previous
-                    .as_ref()
-                    .is_some_and(|previous| previous.settings.contains(&entry))
-                {
-                    kept.push(entry);
-                }
-            }
+            Some(existing) => kept.push(Entry::new(name, existing.as_bytes())),
         }
     }
     let names: Vec<&str> = wanted.iter().map(|(name, _)| *name).collect();
     check_conflicts(&wanted, &places(&document, &path, &names)?)?;
+    let mut settings = Vec::new();
     let mut changed = false;
     for (name, value) in &wanted {
+        let entry = Entry::new(name, value.as_bytes());
         if document.get(name).as_deref() != Some(value.as_str()) {
             document.set(name, value)?;
             changed = true;
             report.push(format!("set {name}"));
+            settings.push(entry);
+        } else if recorded_before(&entry) || HTTPS_PROXY.contains(name) || *name == CA_VARIABLE {
+            settings.push(entry);
         }
     }
     if changed {
         replace(&path, original.as_deref(), &document.to_bytes()?)?;
         report.push(format!("wrote {}", path.display()));
     }
-    let settings = wanted
-        .iter()
-        .map(|(name, value)| Entry::new(name, value.as_bytes()))
-        .chain(kept)
-        .collect();
+    settings.extend(kept.into_iter().filter(|entry| recorded_before(entry)));
     let record = Manifest::new(path, settings, manifest::file_entries(&dir)?);
     if manifest::save(&dir, &record)? {
         report.push(format!("wrote {MANIFEST_FILE}"));
@@ -395,28 +422,20 @@ pub fn setup() -> anyhow::Result<()> {
 
 pub fn cleanup() -> anyhow::Result<()> {
     let dir = super::intercept_dir();
+    let _lock = lock::acquire(&dir, lock::WAIT)?;
     let mut report = Vec::new();
     let recorded = manifest::load(&dir).unwrap_or_else(|_| {
         report.push(format!("ignored {MANIFEST_FILE}: it is not valid"));
         None
     });
-    let path = match &recorded {
-        Some(recorded) => recorded.settings_file.clone(),
-        None => settings_path()?,
-    };
-    if let Some(original) = read_settings(&path)? {
-        let mut document = Document::parse(Some(&original), &path)?;
-        let removals = match &recorded {
-            Some(recorded) => recorded_settings(&document, recorded, &mut report),
-            None => duolane_settings(&document, &dir),
-        };
-        if !removals.is_empty() {
-            document.remove(&removals);
-            replace(&path, Some(&original), &document.to_bytes()?)?;
-            report.extend(removals.iter().map(|name| format!("removed {name}")));
-            report.push(format!("wrote {}", path.display()));
-        }
+    let edited = match &recorded {
+        Some(recorded) => Ok(recorded.settings_file.clone()),
+        None => settings_path(),
     }
+    .and_then(|path| {
+        clean_settings(&path, recorded.as_ref(), &dir, &mut report)
+            .map_err(|error| settings_error(&path, &error))
+    });
     for name in OWNED_FILES.into_iter().chain([MANIFEST_FILE]) {
         if files::remove(&dir.join(name))? {
             report.push(format!("removed {name}"));
@@ -431,6 +450,39 @@ pub fn cleanup() -> anyhow::Result<()> {
         &report,
         &["Restart running Claude Code sessions so they stop using the intercept proxy."],
     );
+    edited
+}
+
+fn settings_error(path: &Path, error: &anyhow::Error) -> anyhow::Error {
+    let reason = format!("{error:#}");
+    let shown = path.display().to_string();
+    if reason.contains(&shown) {
+        anyhow::anyhow!("could not remove the intercept settings: {reason}")
+    } else {
+        anyhow::anyhow!("could not remove the intercept settings from {shown}: {reason}")
+    }
+}
+
+fn clean_settings(
+    path: &Path,
+    recorded: Option<&Manifest>,
+    dir: &Path,
+    report: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    let Some(original) = read_settings(path)? else {
+        return Ok(());
+    };
+    let mut document = Document::parse(Some(&original), path)?;
+    let removals = match recorded {
+        Some(recorded) => recorded_settings(&document, recorded, report),
+        None => duolane_settings(&document, dir),
+    };
+    if !removals.is_empty() {
+        document.remove(&removals);
+        replace(path, Some(&original), &document.to_bytes()?)?;
+        report.extend(removals.iter().map(|name| format!("removed {name}")));
+        report.push(format!("wrote {}", path.display()));
+    }
     Ok(())
 }
 

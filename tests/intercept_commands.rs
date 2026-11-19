@@ -7,13 +7,18 @@ use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
 
 use duolane::intercept::{InterceptListener, intercept_dir};
+use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+use rustls::pki_types::PrivatePkcs8KeyDer;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const SETUP_PORT: u16 = 40123;
 const ORIGINAL: &str = "{\n  \"model\": \"opus\",\n  \"env\": {\n    \"FOO\": \"bar\"\n  },\n  \"permissions\": {\n    \"allow\": [\n      \"Bash(ls)\"\n    ]\n  }\n}\n";
+const INDENTED: &str = "{\n    \"env\": {\n        \"CLAUDE_CODE_GZIP_REQUEST_BODIES\": \"0\"\n    },\n    \"permissions\": {\n        \"allow\": [\n            \"Bash(ls)\"\n        ]\n    }\n}\n";
 const FAKE_CLAUDE: &str = "#!/bin/sh\nfor argument in \"$@\"; do printf 'arg:%s\\n' \"$argument\"; done\necho env:\nenv\n";
 const VARIABLES: [&str; 8] = [
     "HTTPS_PROXY",
@@ -117,6 +122,49 @@ fn hermetic_config() -> Option<PathBuf> {
     std::env::var_os("DUOLANE_CONFIG_DIR").map(PathBuf::from)
 }
 
+fn foreign_acceptor() -> tokio_rustls::TlsAcceptor {
+    let ca_key = KeyPair::generate().unwrap();
+    let mut ca = CertificateParams::new(Vec::new()).unwrap();
+    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let issuer = Issuer::new(ca, ca_key);
+    let leaf_key = KeyPair::generate().unwrap();
+    let leaf = CertificateParams::new(vec!["api.anthropic.com".to_string()])
+        .unwrap()
+        .signed_by(&leaf_key, &issuer)
+        .unwrap();
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![leaf.der().clone()],
+        PrivatePkcs8KeyDer::from(leaf_key.serialize_der()).into(),
+    )
+    .unwrap();
+    tokio_rustls::TlsAcceptor::from(Arc::new(config))
+}
+
+async fn impostor() -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let acceptor = foreign_acceptor();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            head.push(stream.read_u8().await.unwrap());
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await
+            .unwrap();
+        let _ = acceptor.accept(stream).await;
+    });
+    port
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn claude_starts_with_the_intercept_environment_and_unchanged_arguments() {
     let (port, password) = listen().await;
@@ -188,6 +236,21 @@ async fn claude_refuses_a_down_listener_and_another_proxy() {
     assert!(!proxied.status.success());
     assert!(text(&proxied.stderr).contains("HTTPS_PROXY"));
     assert!(proxied.stdout.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn claude_refuses_another_certificate_and_says_the_password_was_sent() {
+    drop(InterceptListener::bind(0).await.unwrap());
+    let port = impostor().await;
+    let sandbox = Sandbox::new(hermetic_config());
+    let mut command = sandbox.command(port);
+    command.args(["claude", "-p", "hi"]);
+    let refused = output(command).await;
+    assert!(!refused.status.success());
+    let stderr = text(&refused.stderr);
+    assert!(stderr.contains("another certificate"));
+    assert!(stderr.contains("password was sent"));
+    assert!(refused.stdout.is_empty());
 }
 
 #[test]
@@ -292,5 +355,75 @@ fn cleanup_without_a_manifest_removes_only_duolane_values() {
     let env = json!({"FOO": "bar", "HTTPS_PROXY": "http://proxy.example:3128"});
     assert!(document["env"] == env);
     assert_eq!(document["model"], "opus");
+    assert!(!sandbox.intercept().exists());
+}
+
+#[test]
+fn setup_keeps_the_indentation_and_cleanup_leaves_a_value_the_owner_set() {
+    let sandbox = Sandbox::new(None);
+    std::fs::write(sandbox.settings(), INDENTED).unwrap();
+    assert!(sandbox.run(&["intercept", "setup"]).status.success());
+    let written = std::fs::read_to_string(sandbox.settings()).unwrap();
+    assert!(written.contains("\n        \"HTTPS_PROXY\": "));
+    assert!(
+        written
+            .lines()
+            .all(|line| (line.len() - line.trim_start_matches(' ').len()) % 4 == 0)
+    );
+    assert!(sandbox.run(&["intercept", "cleanup"]).status.success());
+    assert!(std::fs::read_to_string(sandbox.settings()).unwrap() == INDENTED);
+
+    assert!(sandbox.run(&["intercept", "setup"]).status.success());
+    std::fs::remove_file(sandbox.intercept().join("manifest.json")).unwrap();
+    assert!(sandbox.run(&["intercept", "setup"]).status.success());
+    assert!(sandbox.run(&["intercept", "cleanup"]).status.success());
+    let env = &sandbox.document()["env"];
+    for name in ["HTTPS_PROXY", "https_proxy", "NODE_EXTRA_CA_CERTS"] {
+        assert!(env.get(name).is_none(), "{name}");
+    }
+    assert_eq!(env["CLAUDE_CODE_GZIP_REQUEST_BODIES"], "0");
+}
+
+#[test]
+fn setup_refuses_another_settings_file_until_cleanup() {
+    let sandbox = Sandbox::new(None);
+    std::fs::write(sandbox.settings(), ORIGINAL).unwrap();
+    assert!(sandbox.run(&["intercept", "setup"]).status.success());
+    let first = std::fs::read(sandbox.settings()).unwrap();
+    let other = sandbox.path("other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("settings.json"), ORIGINAL).unwrap();
+    let refused = sandbox
+        .command(SETUP_PORT)
+        .args(["intercept", "setup"])
+        .env("CLAUDE_CONFIG_DIR", &other)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    let stderr = text(&refused.stderr);
+    assert!(stderr.contains(&sandbox.settings().display().to_string()));
+    assert!(stderr.contains("duolane intercept cleanup"));
+    assert!(std::fs::read(sandbox.settings()).unwrap() == first);
+    assert_eq!(
+        std::fs::read_to_string(other.join("settings.json")).unwrap(),
+        ORIGINAL
+    );
+}
+
+#[test]
+fn cleanup_removes_the_files_and_fails_on_a_symlinked_settings_file() {
+    let sandbox = Sandbox::new(None);
+    std::fs::write(sandbox.settings(), ORIGINAL).unwrap();
+    assert!(sandbox.run(&["intercept", "setup"]).status.success());
+    let target = sandbox.path("elsewhere.json");
+    std::fs::rename(sandbox.settings(), &target).unwrap();
+    std::os::unix::fs::symlink(&target, sandbox.settings()).unwrap();
+    let cleaned = sandbox.run(&["intercept", "cleanup"]);
+    assert!(!cleaned.status.success());
+    let stderr = text(&cleaned.stderr);
+    let settings = sandbox.settings().display().to_string();
+    assert_eq!(stderr.matches(&settings).count(), 1);
+    assert!(stderr.contains("symlink"));
+    assert!(text(&cleaned.stdout).contains("removed proxy-password"));
     assert!(!sandbox.intercept().exists());
 }

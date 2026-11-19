@@ -18,10 +18,12 @@ const CA_NAME: &str = "duolane intercept CA";
 const BACKDATE: Duration = Duration::hours(1);
 const VALIDITY: Duration = Duration::days(90);
 const PEM_LINE: usize = 64;
+const FAR_FUTURE: std::time::Duration = std::time::Duration::from_secs(253_402_300_799);
 
 pub(super) struct Pair {
     pub(super) leaf: CertificateDer<'static>,
     pub(super) key: PrivateKeyDer<'static>,
+    pub(super) expiry: Option<OffsetDateTime>,
 }
 
 pub(super) struct Created {
@@ -54,7 +56,25 @@ pub(super) fn usable(
         &rustls::crypto::ring::default_provider(),
     )
     .ok()?;
-    Some((Pair { leaf, key }, ca))
+    let expiry = expiry(&ca, &leaf);
+    Some((Pair { leaf, key, expiry }, ca))
+}
+
+pub(super) fn expiry(ca: &CertificateDer<'_>, leaf: &CertificateDer<'_>) -> Option<OffsetDateTime> {
+    let error = verify_at(
+        ca,
+        leaf,
+        INTERCEPTED_HOST,
+        UnixTime::since_unix_epoch(FAR_FUTURE),
+    )
+    .err()?;
+    match error.downcast_ref::<rustls::Error>()? {
+        rustls::Error::InvalidCertificate(rustls::CertificateError::ExpiredContext {
+            not_after,
+            ..
+        }) => OffsetDateTime::from_unix_timestamp(i64::try_from(not_after.as_secs()).ok()?).ok(),
+        _ => None,
+    }
 }
 
 pub(super) fn verify(
@@ -62,6 +82,21 @@ pub(super) fn verify(
     leaf: &CertificateDer<'_>,
     name: &str,
     at: OffsetDateTime,
+) -> anyhow::Result<()> {
+    let seconds = u64::try_from(at.unix_timestamp()).unwrap_or(0);
+    verify_at(
+        ca,
+        leaf,
+        name,
+        UnixTime::since_unix_epoch(std::time::Duration::from_secs(seconds)),
+    )
+}
+
+fn verify_at(
+    ca: &CertificateDer<'_>,
+    leaf: &CertificateDer<'_>,
+    name: &str,
+    at: UnixTime,
 ) -> anyhow::Result<()> {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(ca.clone().into_owned())?;
@@ -71,8 +106,6 @@ pub(super) fn verify(
     )
     .build()?;
     let name = ServerName::try_from(name.to_string())?;
-    let seconds = u64::try_from(at.unix_timestamp()).unwrap_or(0);
-    let at = UnixTime::since_unix_epoch(std::time::Duration::from_secs(seconds));
     verifier.verify_server_cert(leaf, &[], &name, &[], at)?;
     Ok(())
 }
@@ -155,6 +188,8 @@ mod tests {
         let ca = CertificateDer::from_pem_slice(created.ca_pem.as_bytes()).unwrap();
         let leaf = CertificateDer::from_pem_slice(created.leaf_pem.as_bytes()).unwrap();
         verify(&ca, &leaf, INTERCEPTED_HOST, now).unwrap();
+        let expires = expiry(&ca, &leaf).unwrap();
+        assert!((expires - (now + VALIDITY)).abs() < Duration::SECOND);
 
         let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let params = ca_params(now);

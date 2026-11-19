@@ -46,7 +46,7 @@ jiff = { version = "0.2", default-features = false, features = ["std", "tz-syste
 tiktoken-rs = { version = "0.12", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", default-features = false, features = ["process"] }
+rustix = { version = "1", default-features = false, features = ["fs", "process"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

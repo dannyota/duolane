@@ -151,9 +151,11 @@ interleave.
   running sessions. It refuses when a variable it sets is already set to
   something else in the shell or in user, project, or managed settings, and when
   the manifest names another settings file.
-- Setup records a setting in the manifest only when it wrote the value, or when
-  an earlier setup recorded it, so cleanup never removes an equal value the
-  owner set first. It keeps the file's indentation.
+- Setup records a setting in the manifest when it wrote the value, when an
+  earlier setup recorded it, or when it already holds this install's proxy URL
+  or `ca.pem` path. Cleanup therefore never removes another equal value the
+  owner set first, and never leaves the proxy password behind. Setup keeps the
+  file's indentation.
 - `duolane intercept cleanup` removes each setting whose value still matches the
   manifest, reports any that changed, deletes the files, and reminds the owner
   to restart Claude Code. Without a manifest it finds the files by their fixed
