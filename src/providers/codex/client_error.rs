@@ -157,22 +157,49 @@ pub(super) fn codex_status_error(response: CodexResponse) -> CodexError {
 }
 
 fn codex_status_error_message(body: &[u8]) -> Option<String> {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| {
+    let (text, code) = match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(value) => (
             value
                 .pointer("/error/message")
                 .or_else(|| value.get("message"))
                 .or_else(|| value.get("detail"))
                 .and_then(|value| value.as_str())
-                .map(str::to_string)
-        })
-        .or_else(|| {
-            parse_sse_events(body).into_iter().find_map(|event| {
+                .map(str::to_string),
+            value
+                .pointer("/error/code")
+                .or_else(|| value.get("code"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        ),
+        Err(_) => (None, None),
+    };
+    let (text, code) = if text.is_some() {
+        (text, code)
+    } else {
+        parse_sse_events(body)
+            .into_iter()
+            .find_map(|event| {
                 let payload = serde_json::from_str::<serde_json::Value>(&event.data).ok()?;
-                super::events::classify_event_failure(&payload).map(|failure| failure.message)
+                let failure = super::events::classify_event_failure(&payload)?;
+                let code = super::events::event_error(&payload)
+                    .and_then(|error| error.get("code"))
+                    .and_then(|code| code.as_str())
+                    .map(str::to_string);
+                Some((Some(failure.message), code))
             })
-        })
+            .unwrap_or((None, code))
+    };
+    if code.as_deref() == Some("context_length_exceeded")
+        && !text
+            .as_deref()
+            .is_some_and(|text| super::events::is_context_overflow(None, text))
+    {
+        return Some(match text {
+            Some(text) if !text.trim().is_empty() => format!("{text} (context_length_exceeded)"),
+            _ => "context_length_exceeded".to_string(),
+        });
+    }
+    text
 }
 
 pub(super) fn should_retry_codex_status(status: u16) -> bool {
@@ -301,6 +328,46 @@ mod tests {
         assert_eq!(error.status, 400);
         assert_eq!(error.detail.as_deref(), Some("bad request"));
         assert_eq!(error.origin, CodexErrorOrigin::BufferedWebSocket);
+    }
+
+    #[test]
+    fn status_error_keeps_overflow_code() {
+        let json = |code: &str| {
+            format!("{{\"error\":{{\"code\":\"{code}\",\"message\":\"request rejected\"}}}}")
+                .into_bytes()
+        };
+        let sse = |code: &str| {
+            format!(
+                "data: {{\"type\":\"error\",\"error\":{{\"code\":\"{code}\",\"message\":\"request rejected\"}}}}\n\n"
+            )
+            .into_bytes()
+        };
+        let map = |body: Vec<u8>, transport| {
+            let error = codex_status_error(CodexResponse {
+                body,
+                status: 500,
+                headers: Vec::new(),
+                transport,
+            });
+            let status = super::super::error_response::map_codex_error_to_response(&error).status();
+            (status, error.message.contains("context_length_exceeded"))
+        };
+        for (body, transport) in [
+            (json("context_length_exceeded"), ActualTransport::Http),
+            (sse("context_length_exceeded"), ActualTransport::WebSocket),
+        ] {
+            let (status, has_code) = map(body, transport);
+            assert_eq!(status, http::StatusCode::BAD_REQUEST);
+            assert!(has_code);
+        }
+        for (body, transport) in [
+            (json("other"), ActualTransport::Http),
+            (sse("other"), ActualTransport::WebSocket),
+        ] {
+            let (status, has_code) = map(body, transport);
+            assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(!has_code);
+        }
     }
 
     #[test]
