@@ -7,6 +7,7 @@ use clap::{ArgAction, Parser, Subcommand};
 use duolane::{
     config,
     inbound_auth::{InboundPolicy, PLAIN_HTTP_WARNING, PROXY_KEY_HEADER},
+    intercept::InterceptListener,
     logging,
     monitor::MonitorHandle,
     paths,
@@ -45,6 +46,12 @@ enum Commands {
         port: Option<u16>,
         #[arg(long = "no-monitor", action = ArgAction::SetTrue)]
         no_monitor: bool,
+        #[arg(
+            long,
+            action = ArgAction::SetTrue,
+            help = "Also open the intercept proxy listener"
+        )]
+        intercept: bool,
     },
     #[command(about = "Attach a read-only dashboard to a running proxy")]
     Monitor {
@@ -82,6 +89,7 @@ fn main() -> Result<()> {
     let commands = cli.command.unwrap_or(Commands::Serve {
         port: None,
         no_monitor: false,
+        intercept: false,
     });
 
     match commands {
@@ -89,9 +97,19 @@ fn main() -> Result<()> {
             println!("duolane {}", VERSION);
             Ok(())
         }
-        Commands::Serve { port, no_monitor } => {
+        Commands::Serve {
+            port,
+            no_monitor,
+            intercept,
+        } => {
             let bind_address = config::bind_address();
             let effective_port = port.unwrap_or_else(config::port);
+            let intercept_port =
+                (intercept || duolane::intercept::enabled()).then(duolane::intercept::port);
+            if let Some(port) = intercept_port {
+                duolane::intercept::check_proxy_environment(port)?;
+                duolane::intercept::raise_open_file_limit();
+            }
             let exposed = match bind_address.parse::<std::net::IpAddr>() {
                 Ok(ip) => !InboundPolicy::from_config(ip)?.is_loopback(),
                 Err(_) => false,
@@ -108,12 +126,13 @@ fn main() -> Result<()> {
                 .build()?;
             match select_serve_mode(std::io::stdout().is_terminal(), no_monitor) {
                 ServeMode::Plain => {
-                    print_server_banner(&bind_address, effective_port, &registry);
+                    print_server_banner(&bind_address, effective_port, intercept_port, &registry);
                     runtime
                         .block_on(run_service(ServerConfig {
                             bind_address,
                             port: effective_port,
                             monitor: Some(MonitorHandle::default()),
+                            intercept_port,
                         }))
                         .map_err(|err| anyhow::anyhow!(err))
                 }
@@ -124,9 +143,16 @@ fn main() -> Result<()> {
                     let (shutdown_complete_tx, shutdown_complete_rx) = std::sync::mpsc::channel();
                     let listener = runtime
                         .block_on(server::bind_proxy_listener(&bind_address, effective_port))?;
+                    let intercept = intercept_port
+                        .map(|port| runtime.block_on(InterceptListener::bind(port)))
+                        .transpose()?;
                     let local_addr = listener.local_addr()?;
                     let mut monitor_listen_url =
                         listen_url(&local_addr.ip().to_string(), local_addr.port());
+                    if let Some(intercept) = &intercept {
+                        let address = intercept.local_addr()?;
+                        monitor_listen_url.push_str(&format!("  intercept proxy {address}"));
+                    }
                     if exposed {
                         monitor_listen_url.push_str("  plain HTTP: use an encrypted path");
                     }
@@ -136,11 +162,15 @@ fn main() -> Result<()> {
                     }
                     let server_monitor = monitor.clone();
                     let server_task = runtime.spawn(async move {
-                        let result =
-                            server::serve_listener(listener, Some(server_monitor), async move {
+                        let result = server::serve_listeners(
+                            listener,
+                            intercept,
+                            Some(server_monitor),
+                            async move {
                                 let _ = shutdown_rx.await;
-                            })
-                            .await;
+                            },
+                        )
+                        .await;
                         let _ = shutdown_complete_tx.send(());
                         result
                     });
@@ -363,8 +393,20 @@ fn listen_url(bind_address: &str, port: u16) -> String {
     }
 }
 
-fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
+fn print_server_banner(
+    bind_address: &str,
+    port: u16,
+    intercept_port: Option<u16>,
+    registry: &Registry,
+) {
     println!("duolane listening on {}", listen_url(bind_address, port));
+    if let Some(intercept_port) = intercept_port {
+        println!(
+            "Intercept proxy on {}",
+            listen_url("127.0.0.1", intercept_port)
+        );
+        println!("Intercept CA: {}", duolane::intercept::ca_path().display());
+    }
     println!("Logs: {}", paths::log_file().display());
     let cfg = paths::config_dir();
     if cfg.exists() {

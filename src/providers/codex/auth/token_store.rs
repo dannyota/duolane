@@ -275,7 +275,7 @@ fn remove_stale_temp_files(path: &Path) {
     }
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), anyhow::Error> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), anyhow::Error> {
     let name = path
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("auth path has no file name"))?

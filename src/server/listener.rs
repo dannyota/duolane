@@ -1,6 +1,10 @@
 use super::app_with_monitor;
-use crate::{logging::create_logger, monitor::MonitorHandle, registry::Registry};
+use crate::{
+    intercept::InterceptListener, logging::create_logger, monitor::MonitorHandle,
+    registry::Registry,
+};
 use axum::{Router, http::Request};
+use futures_util::FutureExt;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo, TokioTimer},
     server::{conn::auto::Builder, graceful::GracefulShutdown},
@@ -22,6 +26,7 @@ pub struct ServerConfig {
     pub bind_address: String,
     pub port: u16,
     pub monitor: Option<MonitorHandle>,
+    pub intercept_port: Option<u16>,
 }
 
 pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
@@ -40,7 +45,11 @@ async fn serve_inner(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let listener = bind_proxy_listener(&config.bind_address, config.port).await?;
-    serve_listener(listener, config.monitor, shutdown).await
+    let intercept = match config.intercept_port {
+        Some(port) => Some(InterceptListener::bind(port).await?),
+        None => None,
+    };
+    serve_listeners(listener, intercept, config.monitor, shutdown).await
 }
 
 pub async fn bind_proxy_listener(bind_address: &str, port: u16) -> anyhow::Result<TcpListener> {
@@ -55,6 +64,15 @@ pub async fn bind_proxy_listener(bind_address: &str, port: u16) -> anyhow::Resul
 
 pub async fn serve_listener(
     listener: TcpListener,
+    monitor: Option<MonitorHandle>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    serve_listeners(listener, None, monitor, shutdown).await
+}
+
+pub async fn serve_listeners(
+    listener: TcpListener,
+    intercept: Option<InterceptListener>,
     monitor: Option<MonitorHandle>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
@@ -79,11 +97,24 @@ pub async fn serve_listener(
             ),
         ])),
     );
-    let app = crate::inbound_auth::guard(
-        app_with_monitor(Arc::new(Registry::with_default_alias()), monitor),
-        policy,
+    let app = app_with_monitor(Arc::new(Registry::with_default_alias()), monitor);
+    let guarded = crate::inbound_auth::guard(app.clone(), policy);
+    let Some(intercept) = intercept else {
+        serve_connections(listener, guarded, shutdown, HEADER_READ_TIMEOUT).await;
+        return Ok(());
+    };
+    create_logger("server").info(
+        "intercept proxy listening",
+        Some(serde_json::Map::from_iter([(
+            "port".to_string(),
+            json!(intercept.local_addr()?.port()),
+        )])),
     );
-    serve_connections(listener, app, shutdown, HEADER_READ_TIMEOUT).await;
+    let shutdown = Box::pin(shutdown).shared();
+    tokio::join!(
+        serve_connections(listener, guarded, shutdown.clone(), HEADER_READ_TIMEOUT),
+        intercept.serve(app, shutdown),
+    );
     Ok(())
 }
 
