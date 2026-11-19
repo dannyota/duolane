@@ -57,16 +57,26 @@ It is opt-in, because every Claude Code surface then depends on duolane running.
 ## Model picker
 
 - `duolane claude` passes the Codex
-  [model picker lineup](architecture.md#routing) to Claude Code as an inline
-  `--settings` value, so nothing persistent changes. It adds none when the
-  arguments already carry `--settings`, when the user or managed settings file
-  sets `modelPicker`, or when there is no Codex catalog, and says why on stderr.
+  [model picker lineup](architecture.md#routing) to Claude Code as
+  `--settings '{"modelPicker":…}'` ahead of the owner's arguments, so nothing
+  persistent changes. The value holds only `modelPicker`, because other local
+  users can read process arguments.
+- It adds none, and says why on stderr, when the first owner argument is not an
+  option (it may be a subcommand such as `remote-control`, which refuses global
+  flags before it); when an argument before `--` is `--settings` or starts with
+  `--settings=`; when the user or managed settings file sets `modelPicker` or
+  cannot be read; when the lineup is empty or too large; and on platforms other
+  than Unix.
 - `duolane intercept setup` writes the same lineup as the top-level
-  `modelPicker` key of the user settings file when that key is absent, records
-  its hash in the manifest like the `env` entries, and replaces it on a later
-  run only while it still matches the recorded hash. It leaves an owner's own
-  `modelPicker` alone and says so. `duolane intercept cleanup` removes the key
-  under the same rule as the `env` entries.
+  `modelPicker` key of the user settings file when that key is absent. The
+  manifest records it in an optional list of top-level keys beside the `env`
+  entries, keeping version 1, with the SHA-256 of the value as compact JSON with
+  sorted keys, so a rewrite of the file by Claude Code keeps the match. A later
+  setup replaces the key only while it matches the recorded hash, and leaves an
+  owner's own `modelPicker` alone and says so.
+- `duolane intercept cleanup` removes the key while it matches the manifest, and
+  reports it otherwise. Without a manifest it leaves `modelPicker` and reports
+  it.
 
 ## Requests on the intercepted host
 

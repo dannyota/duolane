@@ -57,8 +57,15 @@ other model.
   [`modelPicker`](https://code.claude.com/docs/en/settings-reference#modelpicker)
   lineup, which takes any model id and was seen listing `gpt-6.2-sol` on
   2026-11-19. The lineup has one row per Codex catalog entry with `visibility`
-  `list` that duolane advertises, in catalog `priority` order, labeled with the
-  catalog display name followed by `(Codex)`. Intercept mode supplies it, as the
+  `list` that duolane advertises, in catalog `priority` order, without tier
+  variants such as `-fast`. A row is `model` and `label` only: the catalog
+  display name followed by `(Codex)`, or the id when the display name holds a
+  control character or is longer than 64 characters. The catalog is untrusted:
+  ids must pass the catalog's slug check, the lineup holds at most 20 rows, and
+  duolane drops it when its JSON exceeds 16 KiB. Without a catalog, the rows
+  come from the built-in Codex list, labeled with the id. duolane never writes
+  an empty lineup, never sets `behavesAs`, and never edits `availableModels`,
+  which can still hide these rows. Intercept mode supplies the lineup, as the
   [intercept design](intercept.md#model-picker) describes. With
   `ANTHROPIC_BASE_URL`, the owner adds it to the user settings.
 - Every response a `POST` handler produces carries a `request-id` header, which
