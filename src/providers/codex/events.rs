@@ -58,6 +58,7 @@ pub(crate) fn is_context_overflow(code: Option<&str>, text: &str) -> bool {
     code == Some("context_length_exceeded")
         || lower.contains("context window")
         || lower.contains("context length exceeded")
+        || lower.contains("context_length_exceeded")
 }
 
 pub(crate) fn context_window_message(context_window: bool, message: &str) -> String {
