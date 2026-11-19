@@ -153,6 +153,14 @@ account may still have credits, and the model then completes the response.
   subagent counter moves, and the backend's count replaces it at the end.
 - A `ping` event after the terminal event is ignored. Any other event after the
   terminal event is invalid.
+- A context window overflow from Codex becomes HTTP 400 `invalid_request_error`.
+  On the Messages route its message starts with `prompt is too long`, the
+  wording the Anthropic API uses
+  ([context windows](https://platform.claude.com/docs/en/build-with-claude/context-windows))
+  and the one Claude Code compacts on
+  ([errors](https://code.claude.com/docs/en/errors#prompt-is-too-long)),
+  followed by the backend's text. HTTP 413 `request_too_large` stays for request
+  bodies over duolane's size limits, as on the Anthropic API.
 
 ## Token counting
 
@@ -174,6 +182,12 @@ first-party source confirms them, so recheck them during live verification.
 - Claude Code: the compaction markers, `DeferredToolPlaceholder`, repeating a
   `thinking_tokens`, the subagent counter, the `anthropic-ratelimit-unified-*`
   headers it reads, and sleeping for the full `Retry-After` value.
+- Claude Code compacting on duolane's `prompt is too long` error.
+- The context window the backend accepts for each model. Codex documents a
+  default of 500,000 tokens for `gpt-6.2-sol` and 272,000 for `gpt-6.2-astra`,
+  both raisable to 1 million
+  ([Codex models](https://learn.chatgpt.com/docs/models)), and the Codex CLI
+  catalog lists an 872,000-token maximum for both.
 - The tolerated `ping` event was observed from another Responses provider.
 - How often the WebSocket closes after a completed tool call but before the
   terminal event. duolane reports that as an error; if Claude Code runs a tool

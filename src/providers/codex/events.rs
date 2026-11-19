@@ -24,9 +24,14 @@ pub(crate) struct CodexEventFailure {
     pub status: u16,
     pub message: String,
     pub retry_after: Option<String>,
+    pub context_window: bool,
 }
 
 impl CodexEventFailure {
+    pub fn anthropic_message(&self) -> String {
+        context_window_message(self.context_window, &self.message)
+    }
+
     pub fn retryable(&self) -> bool {
         !matches!(self.kind, CodexFailureKind::Permanent)
     }
@@ -45,6 +50,23 @@ impl CodexEventFailure {
             529 => "overloaded_error",
             _ => "api_error",
         }
+    }
+}
+
+pub(crate) fn is_context_overflow(code: Option<&str>, text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    code == Some("context_length_exceeded")
+        || lower.contains("context window")
+        || lower.contains("context length exceeded")
+}
+
+pub(crate) fn context_window_message(context_window: bool, message: &str) -> String {
+    if !context_window {
+        message.to_string()
+    } else if message.trim().is_empty() {
+        "prompt is too long".to_string()
+    } else {
+        format!("prompt is too long: {message}")
     }
 }
 
@@ -151,6 +173,7 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
             status: 503,
             message: format!("Incomplete response returned, reason: {reason}"),
             retry_after: None,
+            context_window: false,
         });
     }
     let error = event_error(payload);
@@ -189,9 +212,7 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
         _ => "Upstream error".to_string(),
     };
     let lower = message.to_ascii_lowercase();
-    let context_window = code == Some("context_length_exceeded")
-        || lower.contains("context window")
-        || lower.contains("context length exceeded");
+    let context_window = is_context_overflow(code, &message);
 
     let kind = if context_window
         || matches!(
@@ -234,7 +255,7 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
         CodexFailureKind::Transient
     };
     let status = if context_window {
-        413
+        400
     } else {
         explicit_status.unwrap_or(match code {
             Some("cyber_policy" | "invalid_prompt" | "bio_policy") => 400,
@@ -266,6 +287,7 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
         status,
         message,
         retry_after,
+        context_window,
     })
 }
 
@@ -893,7 +915,7 @@ data: {"type":"response.completed","response":{"status":"completed"}}
     #[test]
     fn native_fatal_codes_are_not_retried_without_numeric_status() {
         for (code, status, error_type) in [
-            ("context_length_exceeded", 413, "request_too_large"),
+            ("context_length_exceeded", 400, "invalid_request_error"),
             ("cyber_policy", 400, "invalid_request_error"),
             ("invalid_prompt", 400, "invalid_request_error"),
             ("bio_policy", 400, "invalid_request_error"),
@@ -935,8 +957,13 @@ data: {"type":"response.completed","response":{"status":"completed"}}
         .unwrap();
         assert!(!failure.retryable());
         assert_eq!(failure.explicit_status, Some(400));
-        assert_eq!(failure.client_status(), 413);
-        assert_eq!(failure.client_error_type(), "request_too_large");
+        assert_eq!(failure.client_status(), 400);
+        assert_eq!(failure.client_error_type(), "invalid_request_error");
+        assert_eq!(
+            failure.anthropic_message(),
+            "prompt is too long: input exceeds context window"
+        );
+        assert_eq!(context_window_message(true, ""), "prompt is too long");
     }
 
     #[test]

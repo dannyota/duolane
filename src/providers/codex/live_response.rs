@@ -503,11 +503,12 @@ fn remaining_live_stream_response(
                             let error_type = failure
                                 .as_ref()
                                 .map_or("api_error", events::CodexEventFailure::client_error_type);
-                            let error_message = failure
-                                .as_ref()
-                                .map_or(message.as_str(), |failure| failure.message.as_str());
+                            let error_message = failure.as_ref().map_or_else(
+                                || message.clone(),
+                                events::CodexEventFailure::anthropic_message,
+                            );
                             let chunk = translator.error_chunk(
-                                error_message,
+                                &error_message,
                                 error_type,
                                 ctx.traffic.as_deref(),
                             );
