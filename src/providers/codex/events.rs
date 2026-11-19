@@ -53,6 +53,13 @@ impl CodexEventFailure {
     }
 }
 
+pub(crate) fn is_context_overflow(code: Option<&str>, text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    code == Some("context_length_exceeded")
+        || lower.contains("context window")
+        || lower.contains("context length exceeded")
+}
+
 pub(crate) fn context_window_message(context_window: bool, message: &str) -> String {
     if !context_window {
         message.to_string()
@@ -205,9 +212,7 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
         _ => "Upstream error".to_string(),
     };
     let lower = message.to_ascii_lowercase();
-    let context_window = code == Some("context_length_exceeded")
-        || lower.contains("context window")
-        || lower.contains("context length exceeded");
+    let context_window = is_context_overflow(code, &message);
 
     let kind = if context_window
         || matches!(

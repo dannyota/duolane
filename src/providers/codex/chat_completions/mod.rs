@@ -167,8 +167,13 @@ async fn upstream_error_response(upstream: reqwest::Response, idle_timeout_ms: u
         Ok(bytes) => bytes,
         Err(error) => return error.response(),
     };
-    let message = serde_json::from_slice::<Value>(&bytes)
-        .ok()
+    let body = serde_json::from_slice::<Value>(&bytes).ok();
+    let code = body
+        .as_ref()
+        .and_then(|value| value.pointer("/error/code"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let message = body
         .and_then(|value| {
             value
                 .pointer("/error/message")
@@ -179,11 +184,16 @@ async fn upstream_error_response(upstream: reqwest::Response, idle_timeout_ms: u
         })
         .filter(|message| !message.is_empty())
         .unwrap_or_else(|| format!("Codex request failed with status {}", status.as_u16()));
-    let kind = match status {
-        StatusCode::UNAUTHORIZED => "authentication_error",
-        StatusCode::FORBIDDEN => "permission_error",
-        StatusCode::TOO_MANY_REQUESTS => "rate_limit_error",
-        _ => "api_error",
+    let (status, kind) = if super::events::is_context_overflow(code.as_deref(), &message) {
+        (StatusCode::BAD_REQUEST, "invalid_request_error")
+    } else {
+        let kind = match status {
+            StatusCode::UNAUTHORIZED => "authentication_error",
+            StatusCode::FORBIDDEN => "permission_error",
+            StatusCode::TOO_MANY_REQUESTS => "rate_limit_error",
+            _ => "api_error",
+        };
+        (status, kind)
     };
     let response = ChatError::new(status, kind, message, None, None).response();
     if let Some(retry_after) = retry_after {

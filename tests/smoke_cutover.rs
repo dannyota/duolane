@@ -1756,12 +1756,9 @@ async fn smoke_codex_http_context_window_error_requests_compaction() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["type"], "error");
     assert_eq!(value["error"]["type"], "invalid_request_error");
-    assert!(
-        value["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("input exceeds context window")),
-        "response body: {}",
-        String::from_utf8_lossy(&body)
+    assert_eq!(
+        value["error"]["message"],
+        "prompt is too long: input exceeds context window"
     );
 }
 

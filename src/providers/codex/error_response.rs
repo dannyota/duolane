@@ -173,7 +173,7 @@ pub(super) fn map_codex_event_failure_to_response(failure: &events::CodexEventFa
 }
 
 fn is_context_window_overflow(message: &str) -> bool {
-    message.to_ascii_lowercase().contains("context window")
+    events::is_context_overflow(None, message)
 }
 
 pub(super) fn codex_error_message(err: &client::CodexError) -> &str {
@@ -187,6 +187,19 @@ pub(super) fn codex_error_message(err: &client::CodexError) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_overflow_maps_to_prompt_too_long() {
+        for text in ["input exceeds context window", "Context length exceeded"] {
+            let response = map_codex_failure_to_response(text);
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        assert!(events::is_context_overflow(
+            Some("context_length_exceeded"),
+            "rejected"
+        ));
+        assert!(!events::is_context_overflow(None, "rejected"));
+    }
 
     #[tokio::test]
     async fn live_upstream_status_and_retry_after_are_preserved() {
