@@ -48,9 +48,26 @@ other model.
 - `GET /v1/models` answers in Anthropic's format for Claude Code's gateway model
   discovery, which `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` turns on
   ([gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol)).
-  Claude Code adds only ids that start with `claude` or `anthropic`, so the
-  Claude aliases are what reach its `/model` picker. Codex ids are still listed
-  for other clients.
+  Claude Code adds only ids that contain `claude` or `anthropic`, so the Claude
+  aliases are what reach its `/model` picker. Codex ids are still listed for
+  other clients. Discovery needs a gateway credential, so with a claude.ai login
+  it does not run: Claude Code 2.1.328 logged
+  `[gatewayDiscovery] skipped: no credential` on 2026-11-19.
+- Codex models reach the `/model` picker through a
+  [`modelPicker`](https://code.claude.com/docs/en/settings-reference#modelpicker)
+  lineup, which takes any model id and was seen listing `gpt-6.2-sol` on
+  2026-11-19. The lineup has one row per Codex catalog entry with `visibility`
+  `list` that duolane advertises, in catalog `priority` order, without tier
+  variants such as `-fast`. A row is `model` and `label` only: the catalog
+  display name followed by `(Codex)`, or the id when the display name holds a
+  control character or is longer than 64 characters. The catalog is untrusted:
+  ids must pass the catalog's slug check, the lineup holds at most 20 rows, and
+  duolane drops it when its JSON exceeds 16 KiB. Without a catalog, the rows
+  come from the built-in Codex list, labeled with the id. duolane never writes
+  an empty lineup, never sets `behavesAs`, and never edits `availableModels`,
+  which can still hide these rows. Intercept mode supplies the lineup, as the
+  [intercept design](intercept.md#model-picker) describes. With
+  `ANTHROPIC_BASE_URL`, the owner adds it to the user settings.
 - Every response a `POST` handler produces carries a `request-id` header, which
   Claude Code records as the transcript `requestId`. duolane keeps an upstream
   value and otherwise sets its own, before the body streams.
@@ -146,9 +163,9 @@ with empty text, so the conversation stays valid.
 These inherited assumptions need a live check:
 
 - Switching backends while a tool call is pending.
-- Claude Code using `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` and adding only
-  discovered ids that start with `claude` or `anthropic`, and recording
-  `request-id` as `requestId`.
+- Claude Code recording `request-id` as `requestId`.
+- Whether the Remote Control model control on a phone shows `modelPicker` rows,
+  and whether Claude Code sends effort for a Codex row.
 - Claude Code running web search through a client-side `WebSearch` tool and an
   isolated inner request, which would keep hosted search blocks out of the outer
   transcript. The Claude route logs `hosted_web_search_in_history` if such

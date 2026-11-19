@@ -8,6 +8,7 @@ mod files;
 mod listener;
 mod lock;
 mod manifest;
+mod picker;
 mod relay;
 mod renewal;
 mod settings;

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::files::{self, MANIFEST_FILE, OWNED_FILES};
 
@@ -12,6 +13,8 @@ pub(super) struct Manifest {
     #[serde(rename = "settingsFile")]
     pub(super) settings_file: PathBuf,
     pub(super) settings: Vec<Entry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) keys: Vec<Entry>,
     pub(super) files: Vec<Entry>,
 }
 
@@ -31,13 +34,26 @@ impl Entry {
 }
 
 impl Manifest {
-    pub(super) fn new(settings_file: PathBuf, settings: Vec<Entry>, files: Vec<Entry>) -> Self {
+    pub(super) fn new(
+        settings_file: PathBuf,
+        settings: Vec<Entry>,
+        keys: Vec<Entry>,
+        files: Vec<Entry>,
+    ) -> Self {
         Self {
             version: VERSION,
             settings_file,
             settings,
+            keys,
             files,
         }
+    }
+
+    pub(super) fn key(&self, name: &str) -> Option<&str> {
+        self.keys
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.sha256.as_str())
     }
 }
 
@@ -47,6 +63,29 @@ pub(super) fn sha256(value: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+pub(super) fn value_hash(value: &impl Serialize) -> anyhow::Result<String> {
+    Ok(sha256(&serde_json::to_vec(&sorted(serde_json::to_value(
+        value,
+    )?))?))
+}
+
+fn sorted(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, sorted(value)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(sorted).collect()),
+        other => other,
+    }
 }
 
 pub(super) fn load(dir: &Path) -> anyhow::Result<Option<Manifest>> {
