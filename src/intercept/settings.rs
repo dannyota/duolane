@@ -11,6 +11,7 @@ use time::OffsetDateTime;
 
 use super::files::{self, MANIFEST_FILE, OWNED_FILES};
 use super::manifest::{self, Entry, Manifest};
+use super::picker::{self, KEY as PICKER, Lineup};
 use super::wrapper::{
     BASE_URL_VARIABLE, CA_VARIABLE, GZIP_VARIABLE, HTTPS_PROXY, Install, LOOPBACK_NO_PROXY,
     NO_PROXY, same_file, timeouts, variable,
@@ -22,12 +23,12 @@ const SETTINGS_FILE: &str = "settings.json";
 const DEFAULT_INDENT: &[u8] = b"  ";
 const PROJECT_FILES: [&str; 2] = [".claude/settings.json", ".claude/settings.local.json"];
 #[cfg(target_os = "macos")]
-const MANAGED_SETTINGS: Option<&str> =
+pub(super) const MANAGED_SETTINGS: Option<&str> =
     Some("/Library/Application Support/ClaudeCode/managed-settings.json");
 #[cfg(target_os = "linux")]
-const MANAGED_SETTINGS: Option<&str> = Some("/etc/claude-code/managed-settings.json");
+pub(super) const MANAGED_SETTINGS: Option<&str> = Some("/etc/claude-code/managed-settings.json");
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-const MANAGED_SETTINGS: Option<&str> = None;
+pub(super) const MANAGED_SETTINGS: Option<&str> = None;
 
 struct Ordered<V>(Vec<(String, V)>);
 
@@ -70,6 +71,7 @@ impl<V: Serialize> Serialize for Ordered<V> {
 enum Slot {
     Raw(Box<RawValue>),
     Env(Ordered<Box<RawValue>>),
+    Picker(Lineup),
 }
 
 impl Serialize for Slot {
@@ -77,6 +79,7 @@ impl Serialize for Slot {
         match self {
             Self::Raw(value) => value.serialize(serializer),
             Self::Env(env) => env.serialize(serializer),
+            Self::Picker(lineup) => lineup.serialize(serializer),
         }
     }
 }
@@ -175,6 +178,25 @@ impl Document {
         });
     }
 
+    fn top(&self, key: &str) -> Option<&Slot> {
+        self.entries
+            .0
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, slot)| slot)
+    }
+
+    fn put(&mut self, key: &str, slot: Slot) {
+        match self.entries.0.iter_mut().find(|(name, _)| name == key) {
+            Some((_, existing)) => *existing = slot,
+            None => self.entries.0.push((key.to_string(), slot)),
+        }
+    }
+
+    fn remove_key(&mut self, key: &str) {
+        self.entries.0.retain(|(name, _)| name != key);
+    }
+
     fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
         let mut bytes = Vec::new();
         let formatter = serde_json::ser::PrettyFormatter::with_indent(&self.indent);
@@ -207,7 +229,7 @@ fn text(value: &RawValue) -> String {
     serde_json::from_str::<String>(value.get()).unwrap_or_else(|_| value.get().to_string())
 }
 
-fn settings_path() -> anyhow::Result<PathBuf> {
+pub(super) fn settings_path() -> anyhow::Result<PathBuf> {
     let dir = match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
         Some(dir) => PathBuf::from(dir),
         None => std::env::var_os("HOME")
@@ -402,12 +424,14 @@ pub fn setup() -> anyhow::Result<()> {
             settings.push(entry);
         }
     }
+    let (placed, keys) = place_picker(&mut document, previous.as_ref(), &mut report)?;
+    changed |= placed;
     if changed {
         replace(&path, original.as_deref(), &document.to_bytes()?)?;
         report.push(format!("wrote {}", path.display()));
     }
     settings.extend(kept.into_iter().filter(|entry| recorded_before(entry)));
-    let record = Manifest::new(path, settings, manifest::file_entries(&dir)?);
+    let record = Manifest::new(path, settings, keys, manifest::file_entries(&dir)?);
     if manifest::save(&dir, &record)? {
         report.push(format!("wrote {MANIFEST_FILE}"));
     }
@@ -422,6 +446,38 @@ pub fn setup() -> anyhow::Result<()> {
     }
     finish(&report, &reminders);
     Ok(())
+}
+
+fn place_picker(
+    document: &mut Document,
+    previous: Option<&Manifest>,
+    report: &mut Vec<String>,
+) -> anyhow::Result<(bool, Vec<Entry>)> {
+    let current = document.top(PICKER).map(manifest::value_hash).transpose()?;
+    let ours = current.is_some() && current.as_deref() == previous.and_then(|p| p.key(PICKER));
+    let record = |sha256: String| {
+        vec![Entry {
+            name: PICKER.to_string(),
+            sha256,
+        }]
+    };
+    let Some(lineup) = picker::lineup() else {
+        return Ok((
+            false,
+            current.filter(|_| ours).map(record).unwrap_or_default(),
+        ));
+    };
+    if current.is_some() && !ours {
+        report.push(format!("left {PICKER}: set by the owner"));
+        return Ok((false, Vec::new()));
+    }
+    let hash = manifest::value_hash(&lineup)?;
+    let changed = current.as_ref() != Some(&hash);
+    if changed {
+        document.put(PICKER, Slot::Picker(lineup));
+        report.push(format!("set {PICKER}"));
+    }
+    Ok((changed, record(hash)))
 }
 
 pub fn cleanup() -> anyhow::Result<()> {
@@ -477,17 +533,46 @@ fn clean_settings(
         return Ok(());
     };
     let mut document = Document::parse(Some(&original), path)?;
-    let removals = match recorded {
+    let mut removals = match recorded {
         Some(recorded) => recorded_settings(&document, recorded, report),
         None => duolane_settings(&document, dir),
     };
-    if !removals.is_empty() {
+    let picker = recorded_picker(&document, recorded, report)?;
+    if !removals.is_empty() || picker {
         document.remove(&removals);
+        if picker {
+            document.remove_key(PICKER);
+            removals.push(PICKER.to_string());
+        }
         replace(path, Some(&original), &document.to_bytes()?)?;
         report.extend(removals.iter().map(|name| format!("removed {name}")));
         report.push(format!("wrote {}", path.display()));
     }
     Ok(())
+}
+
+fn recorded_picker(
+    document: &Document,
+    recorded: Option<&Manifest>,
+    report: &mut Vec<String>,
+) -> anyhow::Result<bool> {
+    let Some(slot) = document.top(PICKER) else {
+        return Ok(false);
+    };
+    let Some(recorded) = recorded else {
+        report.push(format!(
+            "left {PICKER}: no manifest shows that setup wrote it"
+        ));
+        return Ok(false);
+    };
+    let Some(expected) = recorded.key(PICKER) else {
+        return Ok(false);
+    };
+    if manifest::value_hash(slot)? == expected {
+        return Ok(true);
+    }
+    report.push(format!("left {PICKER}: it changed since setup"));
+    Ok(false)
 }
 
 fn recorded_settings(

@@ -13,6 +13,7 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use time::OffsetDateTime;
 
 use super::files::{self, CA_FILE, LEAF_FILE, PASSWORD_FILE};
+use super::picker;
 use super::renewal::{self, Due};
 use super::{INTERCEPTED_HOST, INTERCEPTED_PORT, PROXY_USER, certs, proxy_names_listener};
 
@@ -119,6 +120,7 @@ pub fn run(arguments: Vec<OsString>) -> anyhow::Result<()> {
     check_listener(&install, &authorities, &leaf)?;
     let mut command = Command::new("claude");
     command
+        .args(picker::arguments(&arguments))
         .args(arguments)
         .env_remove(BASE_URL_VARIABLE)
         .envs(child_variables(&install));

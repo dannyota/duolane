@@ -40,7 +40,7 @@ struct Sandbox {
 impl Sandbox {
     fn new(config: Option<PathBuf>) -> Self {
         let root = TempDir::new().unwrap();
-        for dir in ["home", "state", "claude", "project", "bin"] {
+        for dir in ["home", "state", "claude", "project", "bin", "codex"] {
             std::fs::create_dir_all(root.path().join(dir)).unwrap();
         }
         let script = root.path().join("bin/claude");
@@ -74,6 +74,7 @@ impl Sandbox {
             .env("DUOLANE_CONFIG_DIR", &self.config)
             .env("DUOLANE_STATE_DIR", self.path("state"))
             .env("CLAUDE_CONFIG_DIR", self.path("claude"))
+            .env("CODEX_HOME", self.path("codex"))
             .env("DUOLANE_INTERCEPT_PORT", port.to_string())
             .current_dir(self.path("project"))
             .stdin(Stdio::null());
@@ -103,6 +104,14 @@ impl Sandbox {
 
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn received(output: &Output) -> Vec<String> {
+    text(&output.stdout)
+        .lines()
+        .take_while(|line| *line != "env:")
+        .filter_map(|line| line.strip_prefix("arg:").map(str::to_string))
+        .collect()
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -219,9 +228,14 @@ async fn impostor() -> u16 {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn claude_starts_with_the_intercept_environment_and_unchanged_arguments() {
+async fn claude_starts_with_the_intercept_environment_and_the_lineup_before_the_owner_arguments() {
     let (port, password) = listen().await;
     let sandbox = Sandbox::new(hermetic_config());
+    let catalog = json!({"models": [
+        {"slug": "gpt-toy-late", "supported_in_api": true, "visibility": "list", "priority": 2, "display_name": "Toy Late"},
+        {"slug": "gpt-toy-early", "supported_in_api": true, "visibility": "list", "priority": 1, "display_name": "Toy Early"}
+    ]});
+    std::fs::write(sandbox.path("codex/models_cache.json"), catalog.to_string()).unwrap();
     let arguments = [
         "--",
         "--model",
@@ -240,12 +254,16 @@ async fn claude_starts_with_the_intercept_environment_and_unchanged_arguments() 
     let started = output(command).await;
     assert!(started.status.success());
     assert!(!text(&started.stderr).contains(&password));
+    let received = received(&started);
+    assert_eq!(received[0], "--settings");
+    let lineup: Value = serde_json::from_str(&received[1]).unwrap();
+    let expected = json!({"modelPicker": {"options": [
+        {"model": "gpt-toy-early", "label": "Toy Early (Codex)"},
+        {"model": "gpt-toy-late", "label": "Toy Late (Codex)"}
+    ]}});
+    assert_eq!(lineup, expected);
+    assert_eq!(received[2..], arguments);
     let stdout = text(&started.stdout);
-    let received: Vec<&str> = stdout
-        .lines()
-        .filter_map(|line| line.strip_prefix("arg:"))
-        .collect();
-    assert_eq!(received, arguments);
     let env: HashMap<&str, &str> = stdout
         .lines()
         .skip_while(|line| *line != "env:")
@@ -268,6 +286,29 @@ async fn claude_starts_with_the_intercept_environment_and_unchanged_arguments() 
     );
     assert_eq!(env.get("CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS"), Some(&"1234"));
     assert!(!env.contains_key("ANTHROPIC_BASE_URL"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn claude_adds_no_lineup_over_the_owner_settings() {
+    let (port, _) = listen().await;
+    let sandbox = Sandbox::new(hermetic_config());
+    let arguments = ["--settings={}", "-p", "hi"];
+    let mut command = sandbox.command(port);
+    command.arg("claude").args(arguments);
+    let flagged = output(command).await;
+    assert!(flagged.status.success());
+    assert_eq!(received(&flagged), arguments);
+    assert!(text(&flagged.stderr).contains("--settings"));
+
+    let owner = json!({"modelPicker": {"options": [{"model": "opus"}]}}).to_string();
+    std::fs::write(sandbox.settings(), &owner).unwrap();
+    let mut command = sandbox.command(port);
+    command.args(["claude", "-p", "hi"]);
+    let owned = output(command).await;
+    assert!(owned.status.success());
+    assert_eq!(received(&owned), ["-p", "hi"]);
+    assert!(text(&owned.stderr).contains("sets modelPicker"));
+    assert_eq!(std::fs::read_to_string(sandbox.settings()).unwrap(), owner);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -501,6 +542,44 @@ fn cleanup_restores_the_settings_file_and_leaves_a_changed_setting() {
     let env = json!({"FOO": "bar", "CLAUDE_CODE_GZIP_REQUEST_BODIES": "1"});
     assert!(sandbox.document()["env"] == env);
     assert!(!sandbox.intercept().exists());
+}
+
+#[test]
+fn setup_records_the_lineup_and_cleanup_removes_it_after_a_reformat() {
+    let sandbox = Sandbox::new(None);
+    std::fs::write(sandbox.settings(), ORIGINAL).unwrap();
+    let setup = sandbox.run(&["intercept", "setup"]);
+    assert!(setup.status.success());
+    assert!(text(&setup.stdout).contains("set modelPicker"));
+    let layout = std::fs::read_to_string(sandbox.settings()).unwrap();
+    assert!(layout.find("\"permissions\"") < layout.find("\"modelPicker\""));
+    let options = &sandbox.document()["modelPicker"]["options"];
+    assert!(options[0]["label"].as_str().unwrap().ends_with(" (Codex)"));
+    let manifest: Value = serde_json::from_slice(&sandbox.read("manifest.json")).unwrap();
+    assert_eq!(manifest["keys"][0]["name"], "modelPicker");
+
+    let reformatted = serde_json::to_vec(&sandbox.document()).unwrap();
+    std::fs::write(sandbox.settings(), reformatted).unwrap();
+    let cleaned = sandbox.run(&["intercept", "cleanup"]);
+    assert!(cleaned.status.success());
+    assert!(text(&cleaned.stdout).contains("removed modelPicker"));
+    let document = sandbox.document();
+    assert!(document.get("modelPicker").is_none());
+    assert!(document["env"] == json!({"FOO": "bar"}));
+}
+
+#[test]
+fn setup_and_cleanup_leave_the_owner_lineup() {
+    let sandbox = Sandbox::new(None);
+    let owner = json!({"modelPicker": {"options": [{"model": "opus", "label": "Mine"}]}});
+    std::fs::write(sandbox.settings(), owner.to_string()).unwrap();
+    let setup = sandbox.run(&["intercept", "setup"]);
+    assert!(setup.status.success());
+    assert!(text(&setup.stdout).contains("left modelPicker: set by the owner"));
+    assert_eq!(sandbox.document()["modelPicker"], owner["modelPicker"]);
+    let cleaned = sandbox.run(&["intercept", "cleanup"]);
+    assert!(cleaned.status.success());
+    assert_eq!(sandbox.document()["modelPicker"], owner["modelPicker"]);
 }
 
 #[test]

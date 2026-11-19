@@ -19,6 +19,8 @@ pub struct CatalogModel {
     pub use_responses_lite: bool,
     pub supported_in_api: bool,
     pub listed: bool,
+    pub priority: Option<i64>,
+    pub display_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -33,6 +35,10 @@ struct CacheModel {
     use_responses_lite: bool,
     supported_in_api: bool,
     visibility: Visibility,
+    #[serde(default)]
+    priority: Option<serde_json::Value>,
+    #[serde(default)]
+    display_name: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -60,7 +66,7 @@ fn catalog_path() -> Option<PathBuf> {
     })
 }
 
-fn valid_slug(slug: &str) -> bool {
+pub fn valid_slug(slug: &str) -> bool {
     !slug.is_empty()
         && slug.len() <= 128
         && slug.as_bytes()[0].is_ascii_alphanumeric()
@@ -91,6 +97,11 @@ fn parse_catalog(bytes: &[u8]) -> Option<Vec<CatalogModel>> {
                 slug: model.slug,
                 use_responses_lite: model.use_responses_lite,
                 supported_in_api: model.supported_in_api,
+                priority: model.priority.as_ref().and_then(serde_json::Value::as_i64),
+                display_name: match model.display_name {
+                    Some(serde_json::Value::String(name)) => Some(name),
+                    _ => None,
+                },
             })
             .collect(),
     )
@@ -166,8 +177,8 @@ mod tests {
     #[test]
     fn parses_metadata_without_trusting_incomplete_entries() {
         let models = parse_catalog(br#"{"models":[
-            {"slug":"gpt-future","supported_in_api":true,"visibility":"list","use_responses_lite":true},
-            {"slug":"gpt-hidden","supported_in_api":true,"visibility":"hide"},
+            {"slug":"gpt-future","supported_in_api":true,"visibility":"list","use_responses_lite":true,"priority":3,"display_name":"Future"},
+            {"slug":"gpt-hidden","supported_in_api":true,"visibility":"hide","priority":"high","display_name":7},
             {"slug":"gpt-denied","supported_in_api":false,"visibility":"list"},
             {"slug":"gpt-incomplete"},
             {"slug":"gpt-bad","supported_in_api":"true","visibility":"list"},
@@ -176,7 +187,13 @@ mod tests {
         ]}"#).unwrap();
         assert_eq!(models.len(), 3);
         assert!(models[0].use_responses_lite);
+        assert_eq!(models[0].priority, Some(3));
+        assert_eq!(models[0].display_name.as_deref(), Some("Future"));
         assert!(!models[1].listed);
+        assert_eq!(
+            (models[1].priority, models[1].display_name.as_deref()),
+            (None, None)
+        );
         assert!(!models[1].use_responses_lite);
         assert!(!models[2].supported_in_api);
     }
