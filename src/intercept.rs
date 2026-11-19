@@ -15,6 +15,8 @@ const INTERCEPTED_HOST: &str = "api.anthropic.com";
 const INTERCEPTED_PORT: u16 = 443;
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
+const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const TCP_KEEPALIVE_RETRIES: u32 = 4;
 const OPEN_FILE_TARGET: u64 = 4096;
 const PROXY_VARIABLES: [&str; 4] = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"];
 
@@ -68,7 +70,14 @@ fn proxy_names_listener(raw: &str, port: u16) -> bool {
         return false;
     };
     let local = match url.host() {
-        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Domain(host)) => {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse()
+                    .is_ok_and(is_local)
+        }
         Some(url::Host::Ipv4(ip)) => is_local(IpAddr::V4(ip)),
         Some(url::Host::Ipv6(ip)) => is_local(IpAddr::V6(ip)),
         None => false,
@@ -83,6 +92,17 @@ fn is_local(ip: IpAddr) -> bool {
 
 fn set_keepalive(socket: &tokio::net::TcpStream) {
     let keepalive = socket2::TcpKeepalive::new().with_time(TCP_KEEPALIVE);
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows"
+    ))]
+    let keepalive = keepalive
+        .with_interval(TCP_KEEPALIVE_INTERVAL)
+        .with_retries(TCP_KEEPALIVE_RETRIES);
     let _ = socket2::SockRef::from(socket).set_tcp_keepalive(&keepalive);
 }
 

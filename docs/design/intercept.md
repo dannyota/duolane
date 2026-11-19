@@ -60,19 +60,22 @@ It is opt-in, because every Claude Code surface then depends on duolane running.
 | ----------------------------------------------------------------------- | ---------------------------------------------- |
 | `POST /v1/messages` or `/v1/messages/count_tokens` naming a Codex model | The Codex route                                |
 | The same paths naming any other model                                   | The Claude route, with its conversions         |
-| A protocol upgrade, or `CONNECT` inside the connection                  | Refused with 501                               |
+| A request that asks for a protocol upgrade                              | Refused with 501                               |
 | Any other method or path                                                | Relayed to the Anthropic upstream URL, as sent |
 
 - The two message paths match exactly, whatever the query string is, because
   Claude Code sends `?beta=true`. A request is refused with 400 when its target
   is not in origin form, or when its path is not a message path but becomes one
   after percent-decoding, removing repeated slashes, dot segments, and a
-  trailing slash, and ignoring case. No spelling of a message path reaches the
-  relay.
+  trailing slash, treating a backslash as a slash, and ignoring case. No
+  spelling of a message path reaches the relay, and a `CONNECT` inside the
+  connection is refused because its target is not in origin form.
 - duolane reads a request body only on the two message paths, and refuses a body
   there that carries a `Content-Encoding`, because duolane never decompresses
   and an unread body could carry Codex reasoning to Anthropic.
-- The relay keeps the method, path, query, and body bytes. In both directions it
+- The relay keeps the method, query, and body bytes, and the path as the URL
+  parser normalizes it: dot segments resolved, a backslash turned into a slash,
+  and characters a URL may not carry percent-encoded. In both directions it
   removes `Proxy-Authorization` and the hop-by-hop and framing headers
   (`Connection` and the fields it names, `Keep-Alive`, `TE`,
   `Transfer-Encoding`, `Content-Length`, `Upgrade`), removes `x-duolane-key`
@@ -107,6 +110,10 @@ It is opt-in, because every Claude Code surface then depends on duolane running.
   mode.
 - The certificates are created with `rcgen`, which the rustls project maintains
   and which signs with `ring`, the provider duolane already uses.
+
+The mode adds three more direct dependencies, all of which other crates already
+brought into the lockfile: `hyper` serves the `CONNECT` upgrade, `socket2` sets
+TCP keepalive, and `rustix` raises the open-file limit without unsafe code.
 
 ## Files
 

@@ -140,7 +140,11 @@ async fn start() -> (Proxy, Upstream) {
     (proxy, upstream)
 }
 
-async fn connect(proxy: &Proxy, target: &str, credentials: Option<&str>) -> (u16, TcpStream) {
+async fn connect(
+    proxy: &Proxy,
+    target: &str,
+    credentials: Option<&str>,
+) -> (u16, String, TcpStream) {
     let mut stream = TcpStream::connect(proxy.address).await.unwrap();
     let mut head = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
     if let Some(credentials) = credentials {
@@ -167,12 +171,12 @@ async fn connect(proxy: &Proxy, target: &str, credentials: Option<&str>) -> (u16
                 .contains("proxy-authenticate: basic")
         );
     }
-    (status, stream)
+    (status, head, stream)
 }
 
 async fn open(proxy: &Proxy) -> SendRequest<Full<Bytes>> {
     let credentials = format!("duolane:{}", proxy.password);
-    let (status, stream) = connect(proxy, &format!("{HOST}:443"), Some(&credentials)).await;
+    let (status, _, stream) = connect(proxy, &format!("{HOST}:443"), Some(&credentials)).await;
     assert_eq!(status, 200);
     let mut roots = rustls::RootCertStore::empty();
     for certificate in CertificateDer::pem_slice_iter(&proxy.ca) {
@@ -216,14 +220,22 @@ fn request(
 }
 
 async fn send(proxy: &Proxy, request: Request<Full<Bytes>>) -> StatusCode {
+    send_reading_body(proxy, request).await.0
+}
+
+async fn send_reading_body(proxy: &Proxy, request: Request<Full<Bytes>>) -> (StatusCode, Value) {
     let mut sender = open(proxy).await;
     let response = tokio::time::timeout(WAIT, sender.send_request(request))
         .await
         .unwrap()
         .unwrap();
     let status = response.status();
-    let _ = tokio::time::timeout(WAIT, response.into_body().collect()).await;
-    status
+    let body = tokio::time::timeout(WAIT, response.into_body().collect())
+        .await
+        .unwrap()
+        .unwrap()
+        .to_bytes();
+    (status, serde_json::from_slice(&body).unwrap_or_default())
 }
 
 #[tokio::test]
@@ -234,6 +246,19 @@ async fn connect_requires_the_proxy_password() {
     assert_eq!(connect(&proxy, &target, Some("duolane:wrong")).await.0, 407);
     let credentials = format!("duolane:{}", proxy.password);
     assert_eq!(connect(&proxy, &target, Some(&credentials)).await.0, 200);
+}
+
+#[tokio::test]
+async fn connect_refusal_closes_the_connection() {
+    let (proxy, _) = start().await;
+    let (status, head, mut stream) = connect(&proxy, &format!("{HOST}:443"), None).await;
+    assert_eq!(status, 407);
+    assert!(head.to_ascii_lowercase().contains("connection: close"));
+    let mut rest = Vec::new();
+    tokio::time::timeout(WAIT, stream.read_to_end(&mut rest))
+        .await
+        .expect("the proxy must close a refused connection")
+        .unwrap();
 }
 
 #[tokio::test]
@@ -331,7 +356,7 @@ async fn message_requests_take_the_model_route_without_the_inbound_token() {
         "max_tokens": 8,
         "messages": [{"role": "user", "content": "hi"}]
     });
-    send(
+    let (status, reply) = send_reading_body(
         &proxy,
         request(
             "POST",
@@ -341,6 +366,8 @@ async fn message_requests_take_the_model_route_without_the_inbound_token() {
         ),
     )
     .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(reply["error"]["type"], "authentication_error");
     assert_eq!(upstream.count(), 1);
 }
 

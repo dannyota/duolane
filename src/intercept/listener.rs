@@ -176,9 +176,14 @@ async fn connection(
             let unauthenticated = unauthenticated.clone();
             let sender = sender.clone();
             async move {
-                Ok::<_, Infallible>(
-                    handle_connect(request, &shared, &unauthenticated, &sender).await,
-                )
+                let mut response =
+                    handle_connect(request, &shared, &unauthenticated, &sender).await;
+                if !response.status().is_success() {
+                    response
+                        .headers_mut()
+                        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+                }
+                Ok::<_, Infallible>(response)
             }
         })
     };
@@ -260,6 +265,7 @@ async fn handle_connect(
             "The intercept proxy has too many open connections",
         );
     };
+    drop(take(unauthenticated));
     let route = if intercept {
         Route::Intercept
     } else {
@@ -300,7 +306,6 @@ async fn handle_connect(
             "The intercept proxy is shutting down",
         );
     }
-    drop(take(unauthenticated));
     Response::new(Body::empty())
 }
 

@@ -4,7 +4,9 @@ use axum::response::Response;
 use hyper::body::{Body as _, Incoming};
 use serde_json::json;
 
-use super::{TCP_KEEPALIVE, UPSTREAM_CONNECT_TIMEOUT};
+use super::{
+    TCP_KEEPALIVE, TCP_KEEPALIVE_INTERVAL, TCP_KEEPALIVE_RETRIES, UPSTREAM_CONNECT_TIMEOUT,
+};
 use crate::anthropic::json_error;
 use crate::inbound_auth::PROXY_KEY_HEADER;
 use crate::logging::create_logger;
@@ -22,7 +24,9 @@ impl Relay {
         let mut builder = crate::tls::client_builder()
             .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
-            .tcp_keepalive(TCP_KEEPALIVE);
+            .tcp_keepalive(TCP_KEEPALIVE)
+            .tcp_keepalive_interval(TCP_KEEPALIVE_INTERVAL)
+            .tcp_keepalive_retries(TCP_KEEPALIVE_RETRIES);
         if url::Url::parse(&base_url).is_ok_and(|url| crate::upstream_url::is_loopback_host(&url)) {
             builder = builder.no_proxy();
         }
@@ -52,7 +56,12 @@ impl Relay {
         };
         let status = upstream.status();
         log(&method, status);
-        let headers = forwarded_headers(upstream.headers(), false);
+        let mut headers = forwarded_headers(upstream.headers(), false);
+        if method == Method::HEAD
+            && let Some(length) = upstream.headers().get(header::CONTENT_LENGTH)
+        {
+            headers.insert(header::CONTENT_LENGTH, length.clone());
+        }
         let mut response = Response::new(Body::new(reqwest::Body::from(upstream)));
         *response.status_mut() = status;
         *response.headers_mut() = headers;

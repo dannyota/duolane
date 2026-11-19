@@ -1,10 +1,13 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
 use super::{UPSTREAM_CONNECT_TIMEOUT, is_local, set_keepalive};
+
+const ADDRESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 use crate::logging::create_logger;
 
 pub(super) enum Refusal {
@@ -26,7 +29,9 @@ pub(super) async fn connect(host: &str, port: u16) -> Result<TcpStream, Refusal>
             return Err(Refusal::Local);
         }
         for address in addresses {
-            if let Ok(stream) = TcpStream::connect(address).await {
+            if let Ok(Ok(stream)) =
+                tokio::time::timeout(ADDRESS_CONNECT_TIMEOUT, TcpStream::connect(address)).await
+            {
                 set_keepalive(&stream);
                 return Ok(stream);
             }
