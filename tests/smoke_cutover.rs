@@ -1752,10 +1752,10 @@ async fn smoke_codex_http_context_window_error_requests_compaction() {
         .await
         .unwrap();
 
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["type"], "error");
-    assert_eq!(value["error"]["type"], "request_too_large");
+    assert_eq!(value["error"]["type"], "invalid_request_error");
     assert!(
         value["error"]["message"]
             .as_str()
@@ -2823,14 +2823,17 @@ async fn smoke_codex_websocket_context_window_error_requests_compaction() {
 
     assert_eq!(
         status,
-        StatusCode::PAYLOAD_TOO_LARGE,
+        StatusCode::BAD_REQUEST,
         "response body: {}",
         String::from_utf8_lossy(&body)
     );
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["type"], "error");
-    assert_eq!(value["error"]["type"], "request_too_large");
-    assert_eq!(value["error"]["message"], "input exceeds context window");
+    assert_eq!(value["error"]["type"], "invalid_request_error");
+    assert_eq!(
+        value["error"]["message"],
+        "prompt is too long: input exceeds context window"
+    );
 }
 
 #[allow(clippy::await_holding_lock)]

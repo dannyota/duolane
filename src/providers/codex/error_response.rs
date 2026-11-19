@@ -148,7 +148,11 @@ pub(super) fn map_codex_error_to_response(err: &client::CodexError) -> Response 
 
 pub(super) fn map_codex_failure_to_response(message: &str) -> Response {
     if is_context_window_overflow(message) {
-        json_error(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large", message)
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            events::context_window_message(true, message),
+        )
     } else {
         json_error(StatusCode::BAD_GATEWAY, "api_error", message)
     }
@@ -156,7 +160,11 @@ pub(super) fn map_codex_failure_to_response(message: &str) -> Response {
 
 pub(super) fn map_codex_event_failure_to_response(failure: &events::CodexEventFailure) -> Response {
     let status = StatusCode::from_u16(failure.client_status()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let response = json_error(status, failure.client_error_type(), &failure.message);
+    let response = json_error(
+        status,
+        failure.client_error_type(),
+        failure.anthropic_message(),
+    );
     if let Some(retry_after) = failure.retry_after.as_deref() {
         ([(http::header::RETRY_AFTER, retry_after)], response).into_response()
     } else {

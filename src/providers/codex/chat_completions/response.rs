@@ -229,8 +229,8 @@ mod tests {
     fn buffered_chat_preserves_typed_terminal_failure() {
         let body = b"data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"input exceeds context window\"}}}\n\n";
         let error = aggregate_sse(body, "model").unwrap_err();
-        assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(error.kind, "request_too_large");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.kind, "invalid_request_error");
         assert_eq!(error.message, "input exceeds context window");
     }
 
