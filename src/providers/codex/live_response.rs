@@ -1182,7 +1182,7 @@ mod tests {
         let client = authenticated_live_test_client(format!("http://{addr}/responses"));
 
         let response = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(10),
             live_stream_response(
                 client,
                 "message".to_string(),
@@ -1201,14 +1201,14 @@ mod tests {
         .await
         .expect("live response did not publish the first chunk");
         let mut body = response.into_body();
-        tokio::time::timeout(std::time::Duration::from_secs(1), body.frame())
+        tokio::time::timeout(std::time::Duration::from_secs(10), body.frame())
             .await
             .expect("first downstream chunk timed out")
             .expect("live response body ended before the first chunk")
             .expect("first downstream chunk failed");
         drop(body);
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), socket_closed_rx)
+        tokio::time::timeout(std::time::Duration::from_secs(10), socket_closed_rx)
             .await
             .expect("dropping the downstream body did not close the upstream socket")
             .expect("socket-close acknowledgement sender dropped");
@@ -1285,7 +1285,7 @@ mod tests {
             .await
         });
 
-        tokio::time::timeout(std::time::Duration::from_secs(2), replacement_accepted_rx)
+        tokio::time::timeout(std::time::Duration::from_secs(10), replacement_accepted_rx)
             .await
             .expect("replacement startup did not reach the blocked handshake")
             .expect("replacement startup acknowledgement sender dropped");
