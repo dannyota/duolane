@@ -342,27 +342,32 @@ mod tests {
             )
             .into_bytes()
         };
-        let overflow = |body: Vec<u8>, transport| {
+        let map = |body: Vec<u8>, transport| {
             let error = codex_status_error(CodexResponse {
                 body,
-                status: 400,
+                status: 500,
                 headers: Vec::new(),
                 transport,
             });
-            super::super::error_response::map_codex_error_to_response(&error).status()
-                == http::StatusCode::BAD_REQUEST
-                && error.message.contains("context_length_exceeded")
+            let status = super::super::error_response::map_codex_error_to_response(&error).status();
+            (status, error.message.contains("context_length_exceeded"))
         };
-        assert!(overflow(
-            json("context_length_exceeded"),
-            ActualTransport::Http
-        ));
-        assert!(overflow(
-            sse("context_length_exceeded"),
-            ActualTransport::WebSocket
-        ));
-        assert!(!overflow(json("other"), ActualTransport::Http));
-        assert!(!overflow(sse("other"), ActualTransport::WebSocket));
+        for (body, transport) in [
+            (json("context_length_exceeded"), ActualTransport::Http),
+            (sse("context_length_exceeded"), ActualTransport::WebSocket),
+        ] {
+            let (status, has_code) = map(body, transport);
+            assert_eq!(status, http::StatusCode::BAD_REQUEST);
+            assert!(has_code);
+        }
+        for (body, transport) in [
+            (json("other"), ActualTransport::Http),
+            (sse("other"), ActualTransport::WebSocket),
+        ] {
+            let (status, has_code) = map(body, transport);
+            assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(!has_code);
+        }
     }
 
     #[test]
