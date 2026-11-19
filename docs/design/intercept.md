@@ -102,16 +102,28 @@ It is opt-in, because every Claude Code surface then depends on duolane running.
   leaf for `api.anthropic.com` with a subject alternative name, key identifiers,
   and the server authentication usage.
 - The CA private key exists only in memory while the pair is created.
-- The pair lasts 90 days. When fewer than 14 days remain, `duolane serve` adds a
-  new CA certificate to `ca.pem` beside the old one, and serves the new leaf
-  only once the old one expires, so sessions started in between keep working.
-  The pending pair is stored beside the current one until then.
-- `duolane serve` checks the pair at start, every hour, and when the current
-  leaf expires. Promotion copies the pending pair over the current one, rewrites
-  `ca.pem`, and only then deletes the pending pair, so a crash at any step
-  leaves a pair the next check can promote.
-- A session started before the pending pair existed trusts only the old CA and
-  fails once the new leaf is served. Restarting it fixes that.
+- The pair lasts 90 days. duolane never replaces a pair while `duolane serve`
+  runs, because each running Claude Code session trusts only the CA it read at
+  start.
+- When fewer than 14 days remain, `duolane serve` warns at start and every 24
+  hours while it runs, and `duolane claude` warns at each launch. The warning
+  says to stop `duolane serve`, run `duolane intercept renew`, start
+  `duolane serve --intercept` again, and restart Claude Code sessions.
+- When the pair has expired, `duolane claude` refuses before it connects and
+  says to restart `duolane serve --intercept`. At start, `duolane serve`
+  replaces an expired or unreadable pair as on first start, and says that Claude
+  Code sessions need a restart. A running `duolane serve` keeps serving the
+  expired leaf, so every session fails until it restarts.
+- `duolane intercept renew` replaces the CA and the leaf, keeps the proxy
+  password, updates the manifest when there is one, and never edits a settings
+  file, because the CA path and the password stay the same. It fails when there
+  are no intercept files to renew. It holds the config directory lock from its
+  port check to its last write, and `duolane serve` binds its port before it
+  takes that lock to read the pair, so the two never miss each other. The port
+  check is a plain TCP connect that sends nothing; when something accepts the
+  connection, `renew` refuses and names the port. It checks only the configured
+  port. A crash between its writes leaves a pair that the next `duolane serve`
+  start replaces.
 - duolane verifies the real `api.anthropic.com` certificate as in every other
   mode.
 - The certificates are created with `rcgen`, which the rustls project maintains
@@ -126,20 +138,17 @@ TCP keepalive, and `rustix` raises the open-file limit without unsafe code.
 Everything lives in `intercept/` under the duolane config directory, readable
 only by the owner:
 
-| File               | Contents                                                |
-| ------------------ | ------------------------------------------------------- |
-| `ca.pem`           | CA certificates that Claude Code trusts, two in renewal |
-| `leaf.pem`         | Leaf certificate                                        |
-| `leaf.key`         | Leaf private key                                        |
-| `pending-leaf.pem` | Next leaf certificate during renewal                    |
-| `pending-leaf.key` | Next leaf private key during renewal                    |
-| `proxy-password`   | Random proxy password                                   |
-| `manifest.json`    | Each file and setting duolane created, hashed           |
+| File             | Contents                                      |
+| ---------------- | --------------------------------------------- |
+| `ca.pem`         | CA certificate that Claude Code trusts        |
+| `leaf.pem`       | Leaf certificate                              |
+| `leaf.key`       | Leaf private key                              |
+| `proxy-password` | Random proxy password                         |
+| `manifest.json`  | Each file and setting duolane created, hashed |
 
-On Unix, `duolane serve`, `duolane intercept setup`, and
-`duolane intercept cleanup` hold an exclusive lock on the duolane config
-directory while they create, renew, or delete these files, so two of them never
-interleave.
+On Unix, `duolane serve` and the `duolane intercept` commands hold an exclusive
+lock on the duolane config directory while they create, renew, or delete these
+files, so two of them never interleave.
 
 ## Setup and cleanup
 
@@ -186,7 +195,9 @@ interleave.
 7. `leaf.key` and `proxy-password` are protected like the Codex login: owner
    only, never logged, captured, or printed. Whoever reads `leaf.key` and takes
    the proxy port can read the Claude login and forge model replies until the
-   certificate expires.
+   certificate expires. After a leak, `duolane intercept renew` and a restart of
+   every Claude Code session end that trust; a session that is not restarted
+   trusts the old CA until it expires.
 8. Tunneled and relayed bytes are never logged or captured. Tunnels have no idle
    timeout.
 9. The listener holds at most 64 connections that have not yet sent the
