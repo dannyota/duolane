@@ -32,7 +32,9 @@ mod request_monitor;
 mod transcription;
 
 use images::{handler_image_edit, handler_image_generation};
-pub use listener::{ServerConfig, bind_proxy_listener, serve, serve_listener, serve_with_shutdown};
+pub use listener::{
+    ServerConfig, bind_proxy_listener, serve, serve_listener, serve_listeners, serve_with_shutdown,
+};
 use messages::{handler_count_tokens, handler_messages};
 use openai::{handler_chat_completions, handler_responses};
 use transcription::handler_transcription;

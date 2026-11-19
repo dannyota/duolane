@@ -45,6 +45,9 @@ struct FileConfig {
     pub auth_token: Option<String>,
     #[serde(rename = "allowedHosts")]
     pub allowed_hosts: Option<Vec<String>>,
+    pub intercept: Option<bool>,
+    #[serde(rename = "interceptPort")]
+    pub intercept_port: Option<u16>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -355,6 +358,11 @@ pub fn allowed_hosts() -> Vec<String> {
         .map(|host| host.trim().to_ascii_lowercase())
         .filter(|host| !host.is_empty())
         .collect()
+}
+
+pub fn intercept_file_settings() -> (Option<bool>, Option<u16>) {
+    read_file_config(&paths::config_dir())
+        .map_or((None, None), |file| (file.intercept, file.intercept_port))
 }
 
 pub fn upstream_url_settings() -> Vec<(&'static str, String)> {

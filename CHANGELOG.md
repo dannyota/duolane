@@ -8,6 +8,8 @@
 - `DUOLANE_STATE_DIR` moves logs and captures.
 - `DUOLANE_ALLOWED_HOSTS` and `allowedHosts` accept extra `Host` names when an
   inbound token is set.
+- `duolane serve --intercept` opens a loopback proxy that intercepts
+  `api.anthropic.com` and tunnels other hosts.
 
 ### Changed
 

@@ -275,10 +275,10 @@ fn remove_stale_temp_files(path: &Path) {
     }
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), anyhow::Error> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), anyhow::Error> {
     let name = path
         .file_name()
-        .ok_or_else(|| anyhow::anyhow!("auth path has no file name"))?
+        .ok_or_else(|| anyhow::anyhow!("{} has no file name", path.display()))?
         .to_string_lossy();
     let dir = match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
@@ -296,8 +296,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), anyhow::Error> {
         anyhow::bail!("failed to persist {}: {err}", path.display());
     }
     if let Err(err) = sync_directory(dir) {
-        crate::logging::create_logger("codex").warn(
-            "codex_auth_directory_sync_failed",
+        crate::logging::create_logger("files").warn(
+            "directory_sync_failed",
             Some(serde_json::Map::from_iter([
                 (
                     "dir".to_string(),

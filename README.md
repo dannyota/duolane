@@ -92,6 +92,8 @@ your Claude login, and the Claude route then fails.
 | `DUOLANE_AUTH_TOKEN`             | Proxy token, at least 32 characters       |
 | `DUOLANE_ALLOWED_HOSTS`          | Extra `Host` names, comma-separated       |
 | `DUOLANE_ALIAS_PROVIDER`         | Backend for the Claude aliases            |
+| `DUOLANE_INTERCEPT`              | Set to `true` to open the intercept proxy |
+| `DUOLANE_INTERCEPT_PORT`         | Intercept proxy port, `18766` by default  |
 | `DUOLANE_AUTO_REVIEW_MODEL`      | Model for Claude Code's auto-review       |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL`   | Claude Code's model for the Opus alias    |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | Claude Code's model for the Sonnet alias  |

@@ -35,10 +35,13 @@ command, and trust limited to the Claude Code API host.
 
 ## Consequences
 
-- A session can use Codex models and keep Remote Control, if the unverified
-  behavior in the design holds. A spike checks it before the mode is built.
+- A session can use Codex models and keep Remote Control. A spike confirmed the
+  behavior this depends on before the mode was built.
 - duolane holds a key that can impersonate `api.anthropic.com` to any process
   that trusts its certificate, so that file is as sensitive as a login.
+- Remote Control mirrors the session transcript to Anthropic, so the encrypted
+  Codex reasoning inside a thinking signature reaches Anthropic's servers
+  outside the Messages API. Only OpenAI can read it.
 - Gateway mode stays for clients that cannot use a proxy.
 
 ## Alternatives rejected
@@ -56,3 +59,6 @@ command, and trust limited to the Claude Code API host.
 - 2026-11-19: accepted. The owner first asked for `sudo` setup, then chose
   per-process trust after seeing that Claude Code supports it. Design review
   made the wrapper command the default and settings changes opt-in.
+- 2026-11-19: the spike showed that Remote Control mirrors thinking signatures.
+  The owner accepted that and narrowed architecture invariant 3 to the Messages
+  API.
