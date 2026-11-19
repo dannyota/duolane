@@ -68,6 +68,27 @@ enum Commands {
         #[command(subcommand)]
         command: ProviderGroup,
     },
+    #[command(
+        about = "Start Claude Code through the intercept proxy",
+        disable_help_flag = true
+    )]
+    Claude {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
+    #[command(about = "Set up or remove intercept mode for every Claude Code session")]
+    Intercept {
+        #[command(subcommand)]
+        command: InterceptCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum InterceptCommand {
+    #[command(about = "Write the intercept proxy settings to the Claude Code user settings")]
+    Setup,
+    #[command(about = "Remove the intercept proxy settings and files")]
+    Cleanup,
 }
 
 #[derive(Debug, Subcommand)]
@@ -79,6 +100,10 @@ enum ProviderGroup {
 }
 
 fn main() -> Result<()> {
+    let mut raw = std::env::args_os().skip(1);
+    if raw.next().is_some_and(|command| command == "claude") {
+        return duolane::intercept::run_claude(raw.collect());
+    }
     let cli = Cli::parse();
 
     if cli.version_flag {
@@ -234,6 +259,11 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Codex { command } => run_provider_cli("codex", command),
+        Commands::Claude { args } => duolane::intercept::run_claude(args),
+        Commands::Intercept { command } => match command {
+            InterceptCommand::Setup => duolane::intercept::setup(),
+            InterceptCommand::Cleanup => duolane::intercept::cleanup(),
+        },
     }
 }
 

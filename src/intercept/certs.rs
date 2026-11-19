@@ -1,6 +1,7 @@
-use std::path::Path;
 use std::sync::Arc;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use rcgen::{
     BasicConstraints, CertificateParams, CidrSubnet, DistinguishedName, DnType,
     ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, Issuer, KeyPair, KeyUsagePurpose,
@@ -12,60 +13,91 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use time::{Duration, OffsetDateTime};
 
 use super::INTERCEPTED_HOST;
-use super::files::{self, CA_FILE, KEY_FILE, LEAF_FILE};
 
 const CA_NAME: &str = "duolane intercept CA";
 const BACKDATE: Duration = Duration::hours(1);
 const VALIDITY: Duration = Duration::days(90);
+const PEM_LINE: usize = 64;
+const FAR_FUTURE: std::time::Duration = std::time::Duration::from_secs(253_402_300_799);
 
 pub(super) struct Pair {
     pub(super) leaf: CertificateDer<'static>,
     pub(super) key: PrivateKeyDer<'static>,
+    pub(super) expiry: Option<OffsetDateTime>,
 }
 
-struct Created {
-    ca_pem: String,
-    leaf_pem: String,
-    key_pem: String,
+pub(super) struct Created {
+    pub(super) ca_pem: String,
+    pub(super) leaf_pem: String,
+    pub(super) key_pem: String,
 }
 
-pub(super) fn load_or_create(dir: &Path) -> anyhow::Result<Pair> {
-    if let Some(pair) = load(dir)? {
-        return Ok(pair);
-    }
-    let created = create(OffsetDateTime::now_utc())
-        .map_err(|error| anyhow::anyhow!("cannot create the intercept certificate: {error}"))?;
-    files::write(&dir.join(KEY_FILE), created.key_pem.as_bytes())?;
-    files::write(&dir.join(LEAF_FILE), created.leaf_pem.as_bytes())?;
-    files::write(&dir.join(CA_FILE), created.ca_pem.as_bytes())?;
-    load(dir)?.ok_or_else(|| anyhow::anyhow!("the new intercept certificate does not verify"))
+pub(super) fn authorities(pem: &[u8]) -> Vec<CertificateDer<'static>> {
+    CertificateDer::pem_slice_iter(pem)
+        .filter_map(Result::ok)
+        .collect()
 }
 
-fn load(dir: &Path) -> anyhow::Result<Option<Pair>> {
-    let ca = files::read(&dir.join(CA_FILE))?;
-    let leaf = files::read(&dir.join(LEAF_FILE))?;
-    let key = files::read(&dir.join(KEY_FILE))?;
-    let (Some(ca), Some(leaf), Some(key)) = (ca, leaf, key) else {
-        return Ok(None);
-    };
-    Ok(parse(&ca, &leaf, &key))
-}
-
-fn parse(ca: &[u8], leaf: &[u8], key: &[u8]) -> Option<Pair> {
-    let ca = CertificateDer::from_pem_slice(ca).ok()?;
+pub(super) fn usable(
+    authorities: &[CertificateDer<'static>],
+    leaf: &[u8],
+    key: &[u8],
+    now: OffsetDateTime,
+) -> Option<(Pair, CertificateDer<'static>)> {
     let leaf = CertificateDer::from_pem_slice(leaf).ok()?;
     let key = PrivateKeyDer::from_pem_slice(key).ok()?;
-    verify(&ca, &leaf, INTERCEPTED_HOST).ok()?;
+    let ca = authorities
+        .iter()
+        .find(|ca| verify(ca, &leaf, INTERCEPTED_HOST, now).is_ok())?
+        .clone();
     rustls::sign::CertifiedKey::from_der(
         vec![leaf.clone()],
         key.clone_key(),
         &rustls::crypto::ring::default_provider(),
     )
     .ok()?;
-    Some(Pair { leaf, key })
+    let expiry = expiry(&ca, &leaf);
+    Some((Pair { leaf, key, expiry }, ca))
 }
 
-fn verify(ca: &CertificateDer<'_>, leaf: &CertificateDer<'_>, name: &str) -> anyhow::Result<()> {
+pub(super) fn expiry(ca: &CertificateDer<'_>, leaf: &CertificateDer<'_>) -> Option<OffsetDateTime> {
+    let error = verify_at(
+        ca,
+        leaf,
+        INTERCEPTED_HOST,
+        UnixTime::since_unix_epoch(FAR_FUTURE),
+    )
+    .err()?;
+    match error.downcast_ref::<rustls::Error>()? {
+        rustls::Error::InvalidCertificate(rustls::CertificateError::ExpiredContext {
+            not_after,
+            ..
+        }) => OffsetDateTime::from_unix_timestamp(i64::try_from(not_after.as_secs()).ok()?).ok(),
+        _ => None,
+    }
+}
+
+pub(super) fn verify(
+    ca: &CertificateDer<'_>,
+    leaf: &CertificateDer<'_>,
+    name: &str,
+    at: OffsetDateTime,
+) -> anyhow::Result<()> {
+    let seconds = u64::try_from(at.unix_timestamp()).unwrap_or(0);
+    verify_at(
+        ca,
+        leaf,
+        name,
+        UnixTime::since_unix_epoch(std::time::Duration::from_secs(seconds)),
+    )
+}
+
+fn verify_at(
+    ca: &CertificateDer<'_>,
+    leaf: &CertificateDer<'_>,
+    name: &str,
+    at: UnixTime,
+) -> anyhow::Result<()> {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(ca.clone().into_owned())?;
     let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
@@ -74,11 +106,26 @@ fn verify(ca: &CertificateDer<'_>, leaf: &CertificateDer<'_>, name: &str) -> any
     )
     .build()?;
     let name = ServerName::try_from(name.to_string())?;
-    verifier.verify_server_cert(leaf, &[], &name, &[], UnixTime::now())?;
+    verifier.verify_server_cert(leaf, &[], &name, &[], at)?;
     Ok(())
 }
 
-fn create(now: OffsetDateTime) -> Result<Created, rcgen::Error> {
+pub(super) fn pem(certificate: &CertificateDer<'_>) -> String {
+    let encoded = STANDARD.encode(certificate.as_ref());
+    let mut text = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in encoded.as_bytes().chunks(PEM_LINE) {
+        text.push_str(&String::from_utf8_lossy(line));
+        text.push('\n');
+    }
+    text.push_str("-----END CERTIFICATE-----\n");
+    text
+}
+
+pub(super) fn create(now: OffsetDateTime) -> anyhow::Result<Created> {
+    build(now).map_err(|error| anyhow::anyhow!("cannot create the intercept certificate: {error}"))
+}
+
+fn build(now: OffsetDateTime) -> Result<Created, rcgen::Error> {
     let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
     let (ca_pem, leaf_pem) = {
         let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
@@ -136,12 +183,14 @@ mod tests {
 
     #[test]
     fn leaf_verifies_for_the_intercepted_host_and_the_ca_signs_no_other_name() {
-        let created = create(OffsetDateTime::now_utc()).unwrap();
+        let now = OffsetDateTime::now_utc();
+        let created = create(now).unwrap();
         let ca = CertificateDer::from_pem_slice(created.ca_pem.as_bytes()).unwrap();
         let leaf = CertificateDer::from_pem_slice(created.leaf_pem.as_bytes()).unwrap();
-        verify(&ca, &leaf, INTERCEPTED_HOST).unwrap();
+        verify(&ca, &leaf, INTERCEPTED_HOST, now).unwrap();
+        let expires = expiry(&ca, &leaf).unwrap();
+        assert!((expires - (now + VALIDITY)).abs() < Duration::SECOND);
 
-        let now = OffsetDateTime::now_utc();
         let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let params = ca_params(now);
         let other_ca = params.self_signed(&ca_key).unwrap();
@@ -151,7 +200,7 @@ mod tests {
             .unwrap()
             .signed_by(&other_key, &issuer)
             .unwrap();
-        let refused = verify(other_ca.der(), other_leaf.der(), "other.example").unwrap_err();
+        let refused = verify(other_ca.der(), other_leaf.der(), "other.example", now).unwrap_err();
         assert!(format!("{refused:?}").contains("NameConstraintViolation"));
     }
 }

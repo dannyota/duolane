@@ -59,14 +59,52 @@ Restart Claude Code, then choose a model:
 The `[1m]` suffix turns on Claude Code's larger context mode. duolane removes it
 before calling the backend.
 
+## Intercept mode
+
+Intercept mode keeps Claude Code talking to `api.anthropic.com`, so
+[Remote Control](https://code.claude.com/docs/en/remote-control) stays on.
+Claude Code connects through a local HTTPS proxy instead of
+`ANTHROPIC_BASE_URL`. duolane reads only the requests to `api.anthropic.com`,
+with a certificate authority that can sign for that one name, and tunnels every
+other host unread.
+
+Start the proxy with intercept mode on and leave it running:
+
+```bash
+duolane serve --intercept
+```
+
+Start Claude Code through it, with any `claude` arguments:
+
+```bash
+duolane claude --remote-control
+```
+
+`duolane claude` changes no file. To route every Claude Code session, including
+background agents, write the same settings to the Claude Code user settings
+once. Every session then needs the proxy running:
+
+```bash
+duolane intercept setup
+duolane intercept cleanup
+```
+
+`cleanup` removes the settings and the intercept files.
+
+`/model <codex model>` also saves that model as the default for new sessions.
+Pick a Claude model before you run Claude Code without duolane.
+
 ## Commands
 
-| Command                     | Purpose                                    |
-| --------------------------- | ------------------------------------------ |
-| `duolane serve`             | Start the proxy and its terminal dashboard |
-| `duolane monitor`           | Attach a dashboard to a running proxy      |
-| `duolane models`            | List the models you can use                |
-| `duolane codex auth status` | Check the Codex login                      |
+| Command                     | Purpose                                       |
+| --------------------------- | --------------------------------------------- |
+| `duolane serve`             | Start the proxy and its terminal dashboard    |
+| `duolane monitor`           | Attach a dashboard to a running proxy         |
+| `duolane models`            | List the models you can use                   |
+| `duolane codex auth status` | Check the Codex login                         |
+| `duolane claude [args]`     | Start Claude Code through the intercept proxy |
+| `duolane intercept setup`   | Route every Claude Code session through it    |
+| `duolane intercept cleanup` | Remove the intercept settings and files       |
 
 ## How it works
 
@@ -127,12 +165,10 @@ only:
 
 - Switching backends while a tool call is pending can fail. Start the next step
   fresh if it does.
-- Claude Code turns off
-  [Remote Control](https://code.claude.com/docs/en/remote-control) whenever
-  `ANTHROPIC_BASE_URL` points anywhere other than `api.anthropic.com`. Set the
-  variable for a single launch, such as
-  `ANTHROPIC_BASE_URL=http://localhost:18765 claude`, so other sessions keep
-  Remote Control.
+- Claude Code turns off Remote Control whenever `ANTHROPIC_BASE_URL` points
+  anywhere other than `api.anthropic.com`. Use
+  [intercept mode](#intercept-mode), or set the variable for a single launch,
+  such as `ANTHROPIC_BASE_URL=http://localhost:18765 claude`.
 
 ## Credits
 

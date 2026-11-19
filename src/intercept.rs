@@ -1,16 +1,24 @@
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod certs;
 mod dispatch;
 mod files;
 mod listener;
+mod lock;
+mod manifest;
 mod relay;
+mod rotation;
+mod settings;
 mod tunnel;
+mod wrapper;
 
 pub use listener::InterceptListener;
+pub use settings::{cleanup, setup};
+pub use wrapper::run as run_claude;
 
+const PROXY_USER: &str = "duolane";
 const INTERCEPTED_HOST: &str = "api.anthropic.com";
 const INTERCEPTED_PORT: u16 = 443;
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -44,6 +52,19 @@ pub fn intercept_dir() -> PathBuf {
 
 pub fn ca_path() -> PathBuf {
     intercept_dir().join(files::CA_FILE)
+}
+
+fn prepare(now: time::OffsetDateTime) -> anyhow::Result<(String, certs::Pair)> {
+    let dir = intercept_dir();
+    let _lock = lock::acquire(&dir, lock::WAIT)?;
+    prepare_locked(&dir, now)
+}
+
+fn prepare_locked(dir: &Path, now: time::OffsetDateTime) -> anyhow::Result<(String, certs::Pair)> {
+    files::ensure_dir(dir)?;
+    let password = files::load_or_create_password(dir)?;
+    let pair = rotation::refresh(dir, now)?;
+    Ok((password, pair))
 }
 
 pub fn check_proxy_environment(port: u16) -> anyhow::Result<()> {

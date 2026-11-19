@@ -21,12 +21,12 @@ use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
 use super::relay::Relay;
+use super::rotation::{self, Served};
 use super::tunnel::{self, Refusal};
-use super::{INTERCEPTED_HOST, INTERCEPTED_PORT, certs, dispatch, files, set_keepalive};
+use super::{INTERCEPTED_HOST, INTERCEPTED_PORT, PROXY_USER, dispatch, set_keepalive};
 use crate::anthropic::json_error;
 use crate::auth::constant_time_eq;
 
-const PROXY_USER: &str = "duolane";
 const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
@@ -40,6 +40,7 @@ pub struct InterceptListener {
     credentials: String,
     tls: TlsAcceptor,
     relay: Relay,
+    served: Arc<Served>,
 }
 
 struct Shared {
@@ -70,26 +71,17 @@ impl InterceptListener {
         let listener = TcpListener::bind(address).await.map_err(|error| {
             anyhow::anyhow!("failed to bind the intercept listener on {address}: {error}")
         })?;
-        let (password, pair) = tokio::task::spawn_blocking(|| {
-            let dir = super::intercept_dir();
-            files::ensure_dir(&dir)?;
-            let password = files::load_or_create_password(&dir)?;
-            let pair = certs::load_or_create(&dir)?;
-            anyhow::Ok((password, pair))
-        })
-        .await??;
-        let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()?
-        .with_no_client_auth()
-        .with_single_cert(vec![pair.leaf], pair.key)?;
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let (password, pair) =
+            tokio::task::spawn_blocking(|| super::prepare(time::OffsetDateTime::now_utc()))
+                .await??;
+        let served = Arc::new(Served::new(pair)?);
+        let config = rotation::server_config(served.clone())?;
         Ok(Self {
             listener,
             credentials: format!("{PROXY_USER}:{password}"),
             tls: TlsAcceptor::from(Arc::new(config)),
             relay: Relay::new()?,
+            served,
         })
     }
 
@@ -103,7 +95,9 @@ impl InterceptListener {
             credentials,
             tls,
             relay,
+            served,
         } = self;
+        let rotating = tokio::spawn(rotation::run(served));
         let shared = Arc::new(Shared {
             credentials,
             tls,
@@ -128,6 +122,7 @@ impl InterceptListener {
             }
         }
         drop(listener);
+        rotating.abort();
         let _ = stop.send(true);
         let _ = tokio::time::timeout(SHUTDOWN_GRACE, async {
             while connections.join_next().await.is_some() {}

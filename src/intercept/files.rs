@@ -10,6 +10,17 @@ pub(super) const CA_FILE: &str = "ca.pem";
 pub(super) const LEAF_FILE: &str = "leaf.pem";
 pub(super) const KEY_FILE: &str = "leaf.key";
 pub(super) const PASSWORD_FILE: &str = "proxy-password";
+pub(super) const PENDING_LEAF_FILE: &str = "pending-leaf.pem";
+pub(super) const PENDING_KEY_FILE: &str = "pending-leaf.key";
+pub(super) const MANIFEST_FILE: &str = "manifest.json";
+pub(super) const OWNED_FILES: [&str; 6] = [
+    CA_FILE,
+    LEAF_FILE,
+    KEY_FILE,
+    PASSWORD_FILE,
+    PENDING_LEAF_FILE,
+    PENDING_KEY_FILE,
+];
 
 const PASSWORD_BYTES: usize = 32;
 const PASSWORD_CHARS: usize = 43;
@@ -72,7 +83,15 @@ pub(super) fn load_or_create_password(dir: &Path) -> anyhow::Result<String> {
     Ok(password)
 }
 
-fn valid_password(text: &str) -> bool {
+pub(super) fn remove(path: &Path) -> anyhow::Result<bool> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => anyhow::bail!("cannot remove {}: {error}", path.display()),
+    }
+}
+
+pub(super) fn valid_password(text: &str) -> bool {
     text.len() == PASSWORD_CHARS
         && text
             .bytes()

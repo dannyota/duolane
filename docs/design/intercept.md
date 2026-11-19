@@ -106,6 +106,12 @@ It is opt-in, because every Claude Code surface then depends on duolane running.
   new CA certificate to `ca.pem` beside the old one, and serves the new leaf
   only once the old one expires, so sessions started in between keep working.
   The pending pair is stored beside the current one until then.
+- `duolane serve` checks the pair at start, every hour, and when the current
+  leaf expires. Promotion copies the pending pair over the current one, rewrites
+  `ca.pem`, and only then deletes the pending pair, so a crash at any step
+  leaves a pair the next check can promote.
+- A session started before the pending pair existed trusts only the old CA and
+  fails once the new leaf is served. Restarting it fixes that.
 - duolane verifies the real `api.anthropic.com` certificate as in every other
   mode.
 - The certificates are created with `rcgen`, which the rustls project maintains
@@ -120,13 +126,20 @@ TCP keepalive, and `rustix` raises the open-file limit without unsafe code.
 Everything lives in `intercept/` under the duolane config directory, readable
 only by the owner:
 
-| File             | Contents                                      |
-| ---------------- | --------------------------------------------- |
-| `ca.pem`         | CA certificate that Claude Code trusts        |
-| `leaf.pem`       | Leaf certificate                              |
-| `leaf.key`       | Leaf private key                              |
-| `proxy-password` | Random proxy password                         |
-| `manifest.json`  | Each file and setting duolane created, hashed |
+| File               | Contents                                                |
+| ------------------ | ------------------------------------------------------- |
+| `ca.pem`           | CA certificates that Claude Code trusts, two in renewal |
+| `leaf.pem`         | Leaf certificate                                        |
+| `leaf.key`         | Leaf private key                                        |
+| `pending-leaf.pem` | Next leaf certificate during renewal                    |
+| `pending-leaf.key` | Next leaf private key during renewal                    |
+| `proxy-password`   | Random proxy password                                   |
+| `manifest.json`    | Each file and setting duolane created, hashed           |
+
+On Unix, `duolane serve`, `duolane intercept setup`, and
+`duolane intercept cleanup` hold an exclusive lock on the duolane config
+directory while they create, renew, or delete these files, so two of them never
+interleave.
 
 ## Setup and cleanup
 
@@ -136,11 +149,21 @@ only by the owner:
   owner-only because it now holds the proxy password, records each key and value
   in the manifest, and can run again safely. It tells the owner to restart
   running sessions. It refuses when a variable it sets is already set to
-  something else in the shell or in user, project, or managed settings.
+  something else in the shell or in user, project, or managed settings, and when
+  the manifest names another settings file.
+- Setup records a setting in the manifest when it wrote the value, when an
+  earlier setup recorded it, or when it already holds this install's proxy URL
+  or `ca.pem` path. Cleanup therefore never removes another equal value the
+  owner set first, and never leaves the proxy password behind. Setup keeps the
+  file's indentation.
 - `duolane intercept cleanup` removes each setting whose value still matches the
   manifest, reports any that changed, deletes the files, and reminds the owner
   to restart Claude Code. Without a manifest it finds the files by their fixed
-  paths and the settings by their duolane values.
+  paths, and removes the proxy and CA settings that hold duolane values; when it
+  finds one of those, it also removes the other variables setup writes where
+  they hold exactly setup's values.
+- Cleanup deletes the files even when it cannot edit the settings file, then
+  fails and names that file.
 - Neither command needs `sudo`. Both print what they changed.
 
 ## Security rules
@@ -171,6 +194,12 @@ only by the owner:
    as intercepted or tunneled only after the password check, and gets 503 when
    its pool is full. A connection that sends no complete `CONNECT` or TLS
    handshake within 30 seconds is closed.
+10. A client sends the proxy password in `CONNECT`, before it can check the
+    leaf, because the leaf arrives inside the tunnel. Another local user who
+    takes the proxy port while `duolane serve` is down receives the password.
+    This risk is accepted. When the listener check of `duolane claude` fails
+    after it began sending the password, it says the password was exposed and
+    that `duolane intercept cleanup` replaces it.
 
 ## Spike results
 
