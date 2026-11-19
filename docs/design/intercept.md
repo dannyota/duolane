@@ -106,9 +106,11 @@ It is opt-in, because every Claude Code surface then depends on duolane running.
   runs, because each running Claude Code session trusts only the CA it read at
   start.
 - When fewer than 14 days remain, `duolane serve` warns at start and every 24
-  hours while it runs, and `duolane claude` warns at each launch. The warning
-  says to stop `duolane serve`, run `duolane intercept renew`, start
-  `duolane serve --intercept` again, and restart Claude Code sessions.
+  hours while it runs, and `duolane claude` warns at each launch. With the
+  dashboard, the start warning and a start replacement appear in its header, and
+  the later warnings only in the log. The warning says to stop `duolane serve`,
+  run `duolane intercept renew`, start `duolane serve --intercept` again, and
+  restart Claude Code sessions.
 - When the pair has expired, `duolane claude` refuses before it connects and
   says to restart `duolane serve --intercept`. At start, `duolane serve`
   replaces an expired or unreadable pair as on first start, and says that Claude
@@ -121,9 +123,10 @@ It is opt-in, because every Claude Code surface then depends on duolane running.
   port check to its last write, and `duolane serve` binds its port before it
   takes that lock to read the pair, so the two never miss each other. The port
   check is a plain TCP connect that sends nothing; when something accepts the
-  connection, `renew` refuses and names the port. It checks only the configured
-  port. A crash between its writes leaves a pair that the next `duolane serve`
-  start replaces.
+  connection, `renew` refuses and names the port. `duolane intercept setup`
+  replaces an existing expired or unreadable pair only after the same check. It
+  checks only the configured port. A crash between its writes leaves a pair that
+  the next `duolane serve` start replaces.
 - duolane verifies the real `api.anthropic.com` certificate as in every other
   mode.
 - The certificates are created with `rcgen`, which the rustls project maintains
