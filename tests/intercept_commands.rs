@@ -406,7 +406,9 @@ fn setup_replaces_a_damaged_pair_only_when_the_port_is_free() {
     let settings = std::fs::read(sandbox.settings()).unwrap();
     let refused = setup();
     assert!(!refused.status.success());
-    assert!(text(&refused.stderr).contains(&format!("127.0.0.1:{port}")));
+    let stderr = text(&refused.stderr);
+    assert!(stderr.contains(&format!("127.0.0.1:{port}")));
+    assert!(stderr.contains("run `duolane intercept setup` again"));
     assert!(sandbox.pair() == before);
     assert!(sandbox.read("manifest.json") == manifest);
     assert!(std::fs::read(sandbox.settings()).unwrap() == settings);

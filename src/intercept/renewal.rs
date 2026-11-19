@@ -17,9 +17,8 @@ const PAIR_FILES: [&str; 3] = [KEY_FILE, LEAF_FILE, CA_FILE];
 pub(super) const SOON: &str = "the intercept certificate expires within 14 days; stop `duolane serve`, run `duolane intercept renew`, start `duolane serve --intercept`, then restart Claude Code sessions";
 pub(super) const EXPIRED: &str = "the intercept certificate has expired or is not valid; restart `duolane serve --intercept`, then restart Claude Code sessions";
 const REPLACED: &str = "replaced the intercept certificate because it had expired or could not be read; restart Claude Code sessions so they trust the new one";
-const SOON_NOTICE: &str =
-    "intercept certificate expires within 14 days: run duolane intercept renew";
-const REPLACED_NOTICE: &str = "intercept certificate replaced: restart Claude Code sessions";
+const SOON_NOTICE: &str = "intercept cert expires in <14 days: duolane intercept renew";
+const REPLACED_NOTICE: &str = "intercept cert replaced: restart Claude Code";
 const NOTHING_TO_RENEW: &str = "no intercept certificate to renew; start `duolane serve --intercept` or run `duolane intercept setup` first";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +72,7 @@ pub(super) fn load(
         });
     }
     if existed && let Some(port) = port_check {
-        check_port_free(port)?;
+        check_port_free(port, "setup")?;
     }
     let (pair, ca) = write_pair(dir, now)?;
     Ok(Loaded {
@@ -136,7 +135,7 @@ pub fn renew() -> anyhow::Result<()> {
     if !present {
         anyhow::bail!(NOTHING_TO_RENEW);
     }
-    check_port_free(super::port())?;
+    check_port_free(super::port(), "renew")?;
     files::ensure_dir(&dir)?;
     write_pair(&dir, OffsetDateTime::now_utc())?;
     let manifest = manifest::refresh_files(&dir)?;
@@ -150,11 +149,11 @@ pub fn renew() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn check_port_free(port: u16) -> anyhow::Result<()> {
+fn check_port_free(port: u16, command: &str) -> anyhow::Result<()> {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     if TcpStream::connect_timeout(&address, PORT_CHECK).is_ok() {
         anyhow::bail!(
-            "something accepts connections on {address}; stop `duolane serve --intercept`, or whatever holds that port, then run `duolane intercept renew` again"
+            "something accepts connections on {address}; stop `duolane serve --intercept`, or whatever holds that port, then run `duolane intercept {command}` again"
         );
     }
     Ok(())
