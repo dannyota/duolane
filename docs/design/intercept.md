@@ -54,6 +54,20 @@ For background agents that the wrapper cannot reach, `duolane intercept setup`
 writes the same variables to the `env` block of the user settings file instead.
 It is opt-in, because every Claude Code surface then depends on duolane running.
 
+## Model picker
+
+- `duolane claude` passes the Codex
+  [model picker lineup](architecture.md#routing) to Claude Code as an inline
+  `--settings` value, so nothing persistent changes. It adds none when the
+  arguments already carry `--settings`, when the user or managed settings file
+  sets `modelPicker`, or when there is no Codex catalog, and says why on stderr.
+- `duolane intercept setup` writes the same lineup as the top-level
+  `modelPicker` key of the user settings file when that key is absent, records
+  its hash in the manifest like the `env` entries, and replaces it on a later
+  run only while it still matches the recorded hash. It leaves an owner's own
+  `modelPicker` alone and says so. `duolane intercept cleanup` removes the key
+  under the same rule as the `env` entries.
+
 ## Requests on the intercepted host
 
 | Request                                                                 | Handling                                       |

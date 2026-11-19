@@ -39,9 +39,20 @@ Point Claude Code at the proxy in `~/.claude/settings.json`:
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://localhost:18765"
+  },
+  "modelPicker": {
+    "options": [
+      { "model": "gpt-6.2-sol", "label": "GPT-6.2-Sol (Codex)" },
+      { "model": "gpt-6.2-astra", "label": "GPT-6.2-Astra (Codex)" }
+    ]
   }
 }
 ```
+
+`modelPicker` adds Codex models to the `/model` picker
+([model picker](https://code.claude.com/docs/en/settings-reference#modelpicker)).
+Claude Code's own gateway model discovery needs a gateway credential, which
+would replace your Claude login.
 
 Start the proxy and leave it running:
 
@@ -86,9 +97,10 @@ Start Claude Code through it, with any `claude` arguments:
 duolane claude --remote-control
 ```
 
-`duolane claude` changes no file. To route every Claude Code session, including
-background agents, write the same settings to the Claude Code user settings
-once. Every session then needs the proxy running:
+`duolane claude` changes no file. It adds the Codex models from the Codex
+catalog to the `/model` picker for that launch. To route every Claude Code
+session, including background agents, write the same settings to the Claude Code
+user settings once. Every session then needs the proxy running:
 
 ```bash
 duolane intercept setup
