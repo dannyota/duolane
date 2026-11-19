@@ -358,7 +358,8 @@ pub fn setup() -> anyhow::Result<()> {
         );
     }
     let before = manifest::file_entries(&dir)?;
-    let (password, _) = super::prepare_locked(&dir, OffsetDateTime::now_utc())?;
+    let (password, loaded) =
+        super::prepare_locked(&dir, OffsetDateTime::now_utc(), Some(super::port()))?;
     let mut report = Vec::new();
     for entry in manifest::file_entries(&dir)? {
         match before.iter().find(|old| old.name == entry.name) {
@@ -410,13 +411,16 @@ pub fn setup() -> anyhow::Result<()> {
     if manifest::save(&dir, &record)? {
         report.push(format!("wrote {MANIFEST_FILE}"));
     }
-    finish(
-        &report,
-        &[
-            "Restart running Claude Code sessions so they read the new settings.",
-            "Run `duolane serve --intercept` and keep it running: every Claude Code session now goes through it.",
-        ],
-    );
+    let mut reminders = vec![
+        "Restart running Claude Code sessions so they read the new settings.",
+        "Run `duolane serve --intercept` and keep it running: every Claude Code session now goes through it.",
+    ];
+    if loaded.replaced {
+        reminders.push(
+            "The intercept certificate was replaced: restart `duolane serve --intercept`, then restart Claude Code sessions.",
+        );
+    }
+    finish(&report, &reminders);
     Ok(())
 }
 

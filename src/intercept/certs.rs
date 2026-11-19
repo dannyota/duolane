@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use rcgen::{
     BasicConstraints, CertificateParams, CidrSubnet, DistinguishedName, DnType,
     ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, Issuer, KeyPair, KeyUsagePurpose,
@@ -17,13 +15,10 @@ use super::INTERCEPTED_HOST;
 const CA_NAME: &str = "duolane intercept CA";
 const BACKDATE: Duration = Duration::hours(1);
 const VALIDITY: Duration = Duration::days(90);
-const PEM_LINE: usize = 64;
-const FAR_FUTURE: std::time::Duration = std::time::Duration::from_secs(253_402_300_799);
 
 pub(super) struct Pair {
     pub(super) leaf: CertificateDer<'static>,
     pub(super) key: PrivateKeyDer<'static>,
-    pub(super) expiry: Option<OffsetDateTime>,
 }
 
 pub(super) struct Created {
@@ -56,25 +51,7 @@ pub(super) fn usable(
         &rustls::crypto::ring::default_provider(),
     )
     .ok()?;
-    let expiry = expiry(&ca, &leaf);
-    Some((Pair { leaf, key, expiry }, ca))
-}
-
-pub(super) fn expiry(ca: &CertificateDer<'_>, leaf: &CertificateDer<'_>) -> Option<OffsetDateTime> {
-    let error = verify_at(
-        ca,
-        leaf,
-        INTERCEPTED_HOST,
-        UnixTime::since_unix_epoch(FAR_FUTURE),
-    )
-    .err()?;
-    match error.downcast_ref::<rustls::Error>()? {
-        rustls::Error::InvalidCertificate(rustls::CertificateError::ExpiredContext {
-            not_after,
-            ..
-        }) => OffsetDateTime::from_unix_timestamp(i64::try_from(not_after.as_secs()).ok()?).ok(),
-        _ => None,
-    }
+    Some((Pair { leaf, key }, ca))
 }
 
 pub(super) fn verify(
@@ -84,20 +61,7 @@ pub(super) fn verify(
     at: OffsetDateTime,
 ) -> anyhow::Result<()> {
     let seconds = u64::try_from(at.unix_timestamp()).unwrap_or(0);
-    verify_at(
-        ca,
-        leaf,
-        name,
-        UnixTime::since_unix_epoch(std::time::Duration::from_secs(seconds)),
-    )
-}
-
-fn verify_at(
-    ca: &CertificateDer<'_>,
-    leaf: &CertificateDer<'_>,
-    name: &str,
-    at: UnixTime,
-) -> anyhow::Result<()> {
+    let at = UnixTime::since_unix_epoch(std::time::Duration::from_secs(seconds));
     let mut roots = rustls::RootCertStore::empty();
     roots.add(ca.clone().into_owned())?;
     let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
@@ -108,17 +72,6 @@ fn verify_at(
     let name = ServerName::try_from(name.to_string())?;
     verifier.verify_server_cert(leaf, &[], &name, &[], at)?;
     Ok(())
-}
-
-pub(super) fn pem(certificate: &CertificateDer<'_>) -> String {
-    let encoded = STANDARD.encode(certificate.as_ref());
-    let mut text = String::from("-----BEGIN CERTIFICATE-----\n");
-    for line in encoded.as_bytes().chunks(PEM_LINE) {
-        text.push_str(&String::from_utf8_lossy(line));
-        text.push('\n');
-    }
-    text.push_str("-----END CERTIFICATE-----\n");
-    text
 }
 
 pub(super) fn create(now: OffsetDateTime) -> anyhow::Result<Created> {
@@ -188,8 +141,6 @@ mod tests {
         let ca = CertificateDer::from_pem_slice(created.ca_pem.as_bytes()).unwrap();
         let leaf = CertificateDer::from_pem_slice(created.leaf_pem.as_bytes()).unwrap();
         verify(&ca, &leaf, INTERCEPTED_HOST, now).unwrap();
-        let expires = expiry(&ca, &leaf).unwrap();
-        assert!((expires - (now + VALIDITY)).abs() < Duration::SECOND);
 
         let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let params = ca_params(now);

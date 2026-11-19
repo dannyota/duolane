@@ -10,17 +10,8 @@ pub(super) const CA_FILE: &str = "ca.pem";
 pub(super) const LEAF_FILE: &str = "leaf.pem";
 pub(super) const KEY_FILE: &str = "leaf.key";
 pub(super) const PASSWORD_FILE: &str = "proxy-password";
-pub(super) const PENDING_LEAF_FILE: &str = "pending-leaf.pem";
-pub(super) const PENDING_KEY_FILE: &str = "pending-leaf.key";
 pub(super) const MANIFEST_FILE: &str = "manifest.json";
-pub(super) const OWNED_FILES: [&str; 6] = [
-    CA_FILE,
-    LEAF_FILE,
-    KEY_FILE,
-    PASSWORD_FILE,
-    PENDING_LEAF_FILE,
-    PENDING_KEY_FILE,
-];
+pub(super) const OWNED_FILES: [&str; 4] = [CA_FILE, LEAF_FILE, KEY_FILE, PASSWORD_FILE];
 
 const PASSWORD_BYTES: usize = 32;
 const PASSWORD_CHARS: usize = 43;

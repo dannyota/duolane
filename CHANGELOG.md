@@ -11,7 +11,8 @@
 - `duolane serve --intercept` opens a loopback proxy that intercepts
   `api.anthropic.com` and tunnels other hosts.
 - `duolane claude`, `duolane intercept setup`, and `duolane intercept cleanup`
-  route Claude Code through that proxy, which renews its certificate on time.
+  route Claude Code through that proxy, and `duolane intercept renew` replaces
+  its certificate before it expires.
 
 ### Changed
 

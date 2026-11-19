@@ -15,13 +15,15 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::{TokioIo, TokioTimer};
+use rustls::pki_types::CertificateDer;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
+use super::certs::Pair;
 use super::relay::Relay;
-use super::rotation::{self, Served};
+use super::renewal;
 use super::tunnel::{self, Refusal};
 use super::{INTERCEPTED_HOST, INTERCEPTED_PORT, PROXY_USER, dispatch, set_keepalive};
 use crate::anthropic::json_error;
@@ -40,7 +42,9 @@ pub struct InterceptListener {
     credentials: String,
     tls: TlsAcceptor,
     relay: Relay,
-    served: Arc<Served>,
+    ca: CertificateDer<'static>,
+    leaf: CertificateDer<'static>,
+    notices: Vec<&'static str>,
 }
 
 struct Shared {
@@ -71,22 +75,35 @@ impl InterceptListener {
         let listener = TcpListener::bind(address).await.map_err(|error| {
             anyhow::anyhow!("failed to bind the intercept listener on {address}: {error}")
         })?;
-        let (password, pair) =
+        let (password, loaded) =
             tokio::task::spawn_blocking(|| super::prepare(time::OffsetDateTime::now_utc()))
                 .await??;
-        let served = Arc::new(Served::new(pair)?);
-        let config = rotation::server_config(served.clone())?;
+        renewal::report_replaced(&loaded);
+        let due = renewal::due(
+            std::slice::from_ref(&loaded.ca),
+            &loaded.pair.leaf,
+            time::OffsetDateTime::now_utc(),
+        );
+        let notices = renewal::notices(due, loaded.replaced);
+        let leaf = loaded.pair.leaf.clone();
+        let config = server_config(loaded.pair)?;
         Ok(Self {
             listener,
             credentials: format!("{PROXY_USER}:{password}"),
             tls: TlsAcceptor::from(Arc::new(config)),
             relay: Relay::new()?,
-            served,
+            ca: loaded.ca,
+            leaf,
+            notices,
         })
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.listener.local_addr()
+    }
+
+    pub fn notices(&self) -> &[&'static str] {
+        &self.notices
     }
 
     pub async fn serve(self, app: Router, shutdown: impl Future<Output = ()>) {
@@ -95,9 +112,11 @@ impl InterceptListener {
             credentials,
             tls,
             relay,
-            served,
+            ca,
+            leaf,
+            notices: _,
         } = self;
-        let rotating = tokio::spawn(rotation::run(served));
+        let watching = tokio::spawn(renewal::watch(ca, leaf));
         let shared = Arc::new(Shared {
             credentials,
             tls,
@@ -122,7 +141,7 @@ impl InterceptListener {
             }
         }
         drop(listener);
-        rotating.abort();
+        watching.abort();
         let _ = stop.send(true);
         let _ = tokio::time::timeout(SHUTDOWN_GRACE, async {
             while connections.join_next().await.is_some() {}
@@ -130,6 +149,17 @@ impl InterceptListener {
         .await;
         connections.shutdown().await;
     }
+}
+
+fn server_config(pair: Pair) -> anyhow::Result<rustls::ServerConfig> {
+    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_no_client_auth()
+    .with_single_cert(vec![pair.leaf], pair.key)?;
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(config)
 }
 
 async fn accept(

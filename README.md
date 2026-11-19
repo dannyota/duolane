@@ -91,6 +91,10 @@ duolane intercept cleanup
 
 `cleanup` removes the settings and the intercept files.
 
+The intercept certificate lasts 90 days. When fewer than 14 days remain,
+`duolane serve` and `duolane claude` warn. Stop the proxy, run
+`duolane intercept renew`, start it again, and restart Claude Code sessions.
+
 `/model <codex model>` also saves that model as the default for new sessions.
 Pick a Claude model before you run Claude Code without duolane.
 
@@ -105,6 +109,7 @@ Pick a Claude model before you run Claude Code without duolane.
 | `duolane claude [args]`     | Start Claude Code through the intercept proxy |
 | `duolane intercept setup`   | Route every Claude Code session through it    |
 | `duolane intercept cleanup` | Remove the intercept settings and files       |
+| `duolane intercept renew`   | Replace the intercept certificate             |
 
 ## How it works
 

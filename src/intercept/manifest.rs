@@ -79,14 +79,14 @@ pub(super) fn file_entries(dir: &Path) -> anyhow::Result<Vec<Entry>> {
     Ok(entries)
 }
 
-pub(super) fn refresh_files(dir: &Path) -> anyhow::Result<()> {
+pub(super) fn refresh_files(dir: &Path) -> anyhow::Result<bool> {
     let Ok(Some(mut manifest)) = load(dir) else {
-        return Ok(());
+        return Ok(false);
     };
     let entries = file_entries(dir)?;
-    if manifest.files != entries {
-        manifest.files = entries;
-        save(dir, &manifest)?;
+    if manifest.files == entries {
+        return Ok(false);
     }
-    Ok(())
+    manifest.files = entries;
+    save(dir, &manifest)
 }
