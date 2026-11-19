@@ -183,10 +183,11 @@ first-party source confirms them, so recheck them during live verification.
   `thinking_tokens`, the subagent counter, the `anthropic-ratelimit-unified-*`
   headers it reads, and sleeping for the full `Retry-After` value.
 - Claude Code compacting on duolane's `prompt is too long` error.
-- The context window the backend enforces for each model. For `gpt-6.2-sol` the
-  API allows 1,050,000 tokens
-  ([model page](https://developers.openai.com/api/docs/models/gpt-6.2-sol)),
-  while the Codex CLI catalog lists a 500,000 default and an 872,000 maximum.
+- The context window the backend accepts for each model. Codex documents a
+  default of 500,000 tokens for `gpt-6.2-sol` and 272,000 for `gpt-6.2-astra`,
+  both raisable to 1 million
+  ([Codex models](https://learn.chatgpt.com/docs/models)), and the Codex CLI
+  catalog lists an 872,000-token maximum for both.
 - The tolerated `ping` event was observed from another Responses provider.
 - How often the WebSocket closes after a completed tool call but before the
   terminal event. duolane reports that as an error; if Claude Code runs a tool

@@ -57,9 +57,12 @@ Restart Claude Code, then choose a model:
 ```
 
 Claude Code does not know Codex models and assumes a 1M-token context window.
-While a Codex model is selected, set its compaction point once below the window
-Codex gives it, for example `/autocompact 450k` for a 500k window. Claude Code
-saves the value for that model
+GPT-6.2 Sol and Astra support up to 1M tokens, while Codex itself defaults to
+500k for Sol and 272k for Astra
+([Codex models](https://learn.chatgpt.com/docs/models)). While a Codex model is
+selected, run `/autocompact` once to choose where Claude Code compacts it, for
+example `/autocompact 500k` to match Codex. Claude Code saves the value for that
+model
 ([auto-compact window](https://code.claude.com/docs/en/model-config#set-the-auto-compact-window)).
 
 ## Intercept mode
