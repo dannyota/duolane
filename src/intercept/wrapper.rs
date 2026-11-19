@@ -192,31 +192,6 @@ fn check_listener(
 ) -> anyhow::Result<()> {
     let deadline = Instant::now() + LISTENER_CHECK;
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, install.port));
-    let down = || anyhow::anyhow!("the intercept listener on {address} is down; {START_FIRST}");
-    let other = || {
-        anyhow::anyhow!(
-            "the listener on {address} presented another certificate than duolane's; check what holds that port; {PASSWORD_SENT}"
-        )
-    };
-    let remaining = remaining(deadline).ok_or_else(down)?;
-    let mut stream = TcpStream::connect_timeout(&address, remaining).map_err(|_| down())?;
-    let credentials = STANDARD.encode(format!("{PROXY_USER}:{}", install.password));
-    let target = format!("{INTERCEPTED_HOST}:{INTERCEPTED_PORT}");
-    let head = format!(
-        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: Basic {credentials}\r\n\r\n"
-    );
-    arm(&stream, deadline)
-        .and_then(|()| stream.write_all(head.as_bytes()))
-        .map_err(|_| down())?;
-    match read_status(&mut stream, deadline).ok_or_else(down)? {
-        200 => {}
-        407 => anyhow::bail!(
-            "the intercept listener on {address} refused the proxy password; restart `duolane serve --intercept`"
-        ),
-        status => {
-            anyhow::bail!("the intercept listener on {address} answered CONNECT with {status}")
-        }
-    }
     let mut roots = rustls::RootCertStore::empty();
     for authority in authorities {
         roots.add(authority.clone())?;
@@ -230,19 +205,51 @@ fn check_listener(
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     let name = ServerName::try_from(INTERCEPTED_HOST)?;
     let mut tls = rustls::ClientConnection::new(Arc::new(config), name)?;
+    let down = || anyhow::anyhow!("the intercept listener on {address} is down; {START_FIRST}");
+    let remaining = remaining(deadline).ok_or_else(down)?;
+    let mut stream = TcpStream::connect_timeout(&address, remaining).map_err(|_| down())?;
+    let credentials = STANDARD.encode(format!("{PROXY_USER}:{}", install.password));
+    let target = format!("{INTERCEPTED_HOST}:{INTERCEPTED_PORT}");
+    let head = format!(
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: Basic {credentials}\r\n\r\n"
+    );
+    exchange(&mut stream, &mut tls, head.as_bytes(), deadline, leaves)
+        .map_err(|reason| anyhow::anyhow!("the listener on {address} {reason}; {PASSWORD_SENT}"))
+}
+
+fn exchange(
+    stream: &mut TcpStream,
+    tls: &mut rustls::ClientConnection,
+    head: &[u8],
+    deadline: Instant,
+    leaves: &[CertificateDer<'static>],
+) -> Result<(), String> {
+    let unanswered = || "did not answer CONNECT".to_string();
+    arm(stream, deadline)
+        .and_then(|()| stream.write_all(head))
+        .map_err(|_| unanswered())?;
+    match read_status(stream, deadline).ok_or_else(unanswered)? {
+        200 => {}
+        407 => {
+            return Err(
+                "refused the proxy password; restart `duolane serve --intercept`".to_string(),
+            );
+        }
+        status => return Err(format!("answered CONNECT with {status}")),
+    }
+    let other =
+        || "presented another certificate than duolane's; check what holds that port".to_string();
     while tls.is_handshaking() {
-        let progressed = arm(&stream, deadline).and_then(|()| tls.complete_io(&mut stream));
-        if let Err(error) = progressed {
+        if let Err(error) = arm(stream, deadline).and_then(|()| tls.complete_io(stream)) {
             let rejected = error
                 .get_ref()
                 .and_then(|inner| inner.downcast_ref::<rustls::Error>())
                 .is_some_and(|inner| matches!(inner, rustls::Error::InvalidCertificate(_)));
-            if rejected {
-                return Err(other());
-            }
-            anyhow::bail!(
-                "the intercept listener on {address} did not finish the TLS handshake; {PASSWORD_SENT}"
-            );
+            return Err(if rejected {
+                other()
+            } else {
+                "did not finish the TLS handshake".to_string()
+            });
         }
     }
     let presented = tls.peer_certificates().and_then(|chain| chain.first());

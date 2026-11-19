@@ -192,12 +192,25 @@ fn delay(now: OffsetDateTime, expiry: Option<OffsetDateTime>) -> std::time::Dura
     }
 }
 
+fn next_wait(
+    now: OffsetDateTime,
+    expiry: Option<OffsetDateTime>,
+    failed: bool,
+) -> (std::time::Duration, bool) {
+    if failed {
+        (RETRY_AFTER, false)
+    } else {
+        (delay(now, expiry), true)
+    }
+}
+
 pub(super) async fn run(served: Arc<Served>) {
+    let mut failed = false;
     loop {
-        let wait = delay(OffsetDateTime::now_utc(), served.expiry());
+        let (wait, wakeable) = next_wait(OffsetDateTime::now_utc(), served.expiry(), failed);
         tokio::select! {
             () = tokio::time::sleep(wait) => {}
-            () = served.expired.notified() => {}
+            () = served.expired.notified(), if wakeable => {}
         }
         let checking = served.clone();
         let checked = tokio::task::spawn_blocking(move || {
@@ -208,6 +221,7 @@ pub(super) async fn run(served: Arc<Served>) {
             )
         })
         .await;
+        failed = !matches!(checked, Ok(Ok(_)));
         let logger = create_logger("intercept");
         match checked {
             Ok(Ok(true)) => logger.info("serving the renewed intercept certificate", None),
@@ -307,6 +321,9 @@ mod tests {
         let soon = delay(now, Some(now + Duration::minutes(10)));
         assert_eq!(soon, std::time::Duration::from_secs(601));
         assert_eq!(delay(now, Some(now - Duration::minutes(10))), RETRY_AFTER);
+        let expiry = Some(now - Duration::minutes(10));
+        assert_eq!(next_wait(now, expiry, true), (RETRY_AFTER, false));
+        assert_eq!(next_wait(now, expiry, false), (RETRY_AFTER, true));
     }
 
     #[test]

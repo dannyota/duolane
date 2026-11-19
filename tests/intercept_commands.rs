@@ -146,16 +146,30 @@ fn foreign_acceptor() -> tokio_rustls::TlsAcceptor {
     tokio_rustls::TlsAcceptor::from(Arc::new(config))
 }
 
+async fn read_head(stream: &mut tokio::net::TcpStream) {
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(stream.read_u8().await.unwrap());
+    }
+}
+
+async fn eavesdropper() -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_head(&mut stream).await;
+    });
+    port
+}
+
 async fn impostor() -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let acceptor = foreign_acceptor();
     tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut head = Vec::new();
-        while !head.ends_with(b"\r\n\r\n") {
-            head.push(stream.read_u8().await.unwrap());
-        }
+        read_head(&mut stream).await;
         stream
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await
@@ -226,7 +240,15 @@ async fn claude_refuses_a_down_listener_and_another_proxy() {
     let down = output(command).await;
     assert!(!down.status.success());
     assert!(text(&down.stderr).contains("is down"));
+    assert!(!text(&down.stderr).contains("password was sent"));
     assert!(down.stdout.is_empty());
+
+    let mut command = sandbox.command(eavesdropper().await);
+    command.args(["claude", "-p", "hi"]);
+    let closed = output(command).await;
+    assert!(!closed.status.success());
+    assert!(text(&closed.stderr).contains("password was sent"));
+    assert!(closed.stdout.is_empty());
 
     let mut command = sandbox.command(port);
     command

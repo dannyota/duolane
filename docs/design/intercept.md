@@ -197,8 +197,9 @@ interleave.
 10. A client sends the proxy password in `CONNECT`, before it can check the
     leaf, because the leaf arrives inside the tunnel. Another local user who
     takes the proxy port while `duolane serve` is down receives the password.
-    This risk is accepted. When `duolane claude` finds such a listener, it says
-    the password was exposed and that `duolane intercept cleanup` replaces it.
+    This risk is accepted. When the listener check of `duolane claude` fails
+    after it began sending the password, it says the password was exposed and
+    that `duolane intercept cleanup` replaces it.
 
 ## Spike results
 
