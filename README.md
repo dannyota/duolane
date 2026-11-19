@@ -53,11 +53,14 @@ Restart Claude Code, then choose a model:
 
 ```text
 /model claude-opus-5-5
-/model gpt-6-astra[1m]
+/model gpt-6.2-sol
 ```
 
-The `[1m]` suffix turns on Claude Code's larger context mode. duolane removes it
-before calling the backend.
+Claude Code does not know Codex models and assumes a 1M-token context window.
+While a Codex model is selected, set its compaction point once below the window
+Codex gives it, for example `/autocompact 450k` for a 500k window. Claude Code
+saves the value for that model
+([auto-compact window](https://code.claude.com/docs/en/model-config#set-the-auto-compact-window)).
 
 ## Intercept mode
 
