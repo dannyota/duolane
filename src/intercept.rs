@@ -9,12 +9,13 @@ mod listener;
 mod lock;
 mod manifest;
 mod relay;
-mod rotation;
+mod renewal;
 mod settings;
 mod tunnel;
 mod wrapper;
 
 pub use listener::InterceptListener;
+pub use renewal::renew;
 pub use settings::{cleanup, setup};
 pub use wrapper::run as run_claude;
 
@@ -54,17 +55,21 @@ pub fn ca_path() -> PathBuf {
     intercept_dir().join(files::CA_FILE)
 }
 
-fn prepare(now: time::OffsetDateTime) -> anyhow::Result<(String, certs::Pair)> {
+fn prepare(now: time::OffsetDateTime) -> anyhow::Result<(String, renewal::Loaded)> {
     let dir = intercept_dir();
     let _lock = lock::acquire(&dir, lock::WAIT)?;
     prepare_locked(&dir, now)
 }
 
-fn prepare_locked(dir: &Path, now: time::OffsetDateTime) -> anyhow::Result<(String, certs::Pair)> {
+fn prepare_locked(
+    dir: &Path,
+    now: time::OffsetDateTime,
+) -> anyhow::Result<(String, renewal::Loaded)> {
     files::ensure_dir(dir)?;
     let password = files::load_or_create_password(dir)?;
-    let pair = rotation::refresh(dir, now)?;
-    Ok((password, pair))
+    let loaded = renewal::load(dir, now)?;
+    manifest::refresh_files(dir)?;
+    Ok((password, loaded))
 }
 
 pub fn check_proxy_environment(port: u16) -> anyhow::Result<()> {

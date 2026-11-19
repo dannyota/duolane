@@ -10,8 +10,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
+use time::OffsetDateTime;
 
-use super::files::{self, CA_FILE, LEAF_FILE, PASSWORD_FILE, PENDING_LEAF_FILE};
+use super::files::{self, CA_FILE, LEAF_FILE, PASSWORD_FILE};
+use super::renewal::{self, Due};
 use super::{INTERCEPTED_HOST, INTERCEPTED_PORT, PROXY_USER, certs, proxy_names_listener};
 
 pub(super) const HTTPS_PROXY: [&str; 2] = ["HTTPS_PROXY", "https_proxy"];
@@ -105,15 +107,16 @@ pub fn run(arguments: Vec<OsString>) -> anyhow::Result<()> {
         .ok()
         .filter(|text| files::valid_password(text))
         .ok_or_else(|| anyhow::anyhow!("{PASSWORD_FILE} is not valid; {START_FIRST}"))?;
-    let mut leaves = vec![CertificateDer::from_pem_slice(&leaf)?];
-    if let Some(pending) = files::read(&dir.join(PENDING_LEAF_FILE))?
-        && let Ok(pending) = CertificateDer::from_pem_slice(&pending)
-    {
-        leaves.push(pending);
+    let leaf = CertificateDer::from_pem_slice(&leaf)?;
+    let authorities = certs::authorities(&ca);
+    match renewal::due(&authorities, &leaf, OffsetDateTime::now_utc()) {
+        Due::Expired => anyhow::bail!(renewal::EXPIRED),
+        Due::Soon => eprintln!("warning: {}", renewal::SOON),
+        Due::Fine => {}
     }
     let install = Install::new(password)?;
     check_environment(&install)?;
-    check_listener(&install, &certs::authorities(&ca), &leaves)?;
+    check_listener(&install, &authorities, &leaf)?;
     let mut command = Command::new("claude");
     command
         .args(arguments)
@@ -188,7 +191,7 @@ fn bypasses_intercept(no_proxy: &str) -> bool {
 fn check_listener(
     install: &Install,
     authorities: &[CertificateDer<'static>],
-    leaves: &[CertificateDer<'static>],
+    leaf: &CertificateDer<'static>,
 ) -> anyhow::Result<()> {
     let deadline = Instant::now() + LISTENER_CHECK;
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, install.port));
@@ -213,7 +216,7 @@ fn check_listener(
     let head = format!(
         "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: Basic {credentials}\r\n\r\n"
     );
-    exchange(&mut stream, &mut tls, head.as_bytes(), deadline, leaves)
+    exchange(&mut stream, &mut tls, head.as_bytes(), deadline, leaf)
         .map_err(|reason| anyhow::anyhow!("the listener on {address} {reason}; {PASSWORD_SENT}"))
 }
 
@@ -222,7 +225,7 @@ fn exchange(
     tls: &mut rustls::ClientConnection,
     head: &[u8],
     deadline: Instant,
-    leaves: &[CertificateDer<'static>],
+    leaf: &CertificateDer<'static>,
 ) -> Result<(), String> {
     let unanswered = || "did not answer CONNECT".to_string();
     arm(stream, deadline)
@@ -253,7 +256,7 @@ fn exchange(
         }
     }
     let presented = tls.peer_certificates().and_then(|chain| chain.first());
-    if !presented.is_some_and(|leaf| leaves.contains(leaf)) {
+    if presented != Some(leaf) {
         return Err(other());
     }
     Ok(())

@@ -76,7 +76,7 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<std::ffi::OsString>,
     },
-    #[command(about = "Set up or remove intercept mode for every Claude Code session")]
+    #[command(about = "Set up, renew, or remove intercept mode for Claude Code")]
     Intercept {
         #[command(subcommand)]
         command: InterceptCommand,
@@ -89,6 +89,8 @@ enum InterceptCommand {
     Setup,
     #[command(about = "Remove the intercept proxy settings and files")]
     Cleanup,
+    #[command(about = "Replace the intercept certificate while the intercept proxy is stopped")]
+    Renew,
 }
 
 #[derive(Debug, Subcommand)]
@@ -263,6 +265,7 @@ fn main() -> Result<()> {
         Commands::Intercept { command } => match command {
             InterceptCommand::Setup => duolane::intercept::setup(),
             InterceptCommand::Cleanup => duolane::intercept::cleanup(),
+            InterceptCommand::Renew => duolane::intercept::renew(),
         },
     }
 }

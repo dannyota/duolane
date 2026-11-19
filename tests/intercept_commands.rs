@@ -5,7 +5,7 @@ mod hermetic;
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
 
@@ -20,6 +20,7 @@ const SETUP_PORT: u16 = 40123;
 const ORIGINAL: &str = "{\n  \"model\": \"opus\",\n  \"env\": {\n    \"FOO\": \"bar\"\n  },\n  \"permissions\": {\n    \"allow\": [\n      \"Bash(ls)\"\n    ]\n  }\n}\n";
 const INDENTED: &str = "{\n    \"env\": {\n        \"CLAUDE_CODE_GZIP_REQUEST_BODIES\": \"0\"\n    },\n    \"permissions\": {\n        \"allow\": [\n            \"Bash(ls)\"\n        ]\n    }\n}\n";
 const FAKE_CLAUDE: &str = "#!/bin/sh\nfor argument in \"$@\"; do printf 'arg:%s\\n' \"$argument\"; done\necho env:\nenv\n";
+const PAIR: [&str; 3] = ["ca.pem", "leaf.pem", "leaf.key"];
 const VARIABLES: [&str; 8] = [
     "HTTPS_PROXY",
     "https_proxy",
@@ -90,10 +91,48 @@ impl Sandbox {
     fn document(&self) -> Value {
         serde_json::from_slice(&std::fs::read(self.settings()).unwrap()).unwrap()
     }
+
+    fn read(&self, name: &str) -> Vec<u8> {
+        std::fs::read(self.intercept().join(name)).unwrap()
+    }
+
+    fn pair(&self) -> Vec<Vec<u8>> {
+        PAIR.iter().map(|name| self.read(name)).collect()
+    }
 }
 
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn write_expired_install(dir: &Path) {
+    let issued = rcgen::date_time_ymd(2020, 1, 1);
+    let expired = rcgen::date_time_ymd(2020, 4, 1);
+    let ca_key = KeyPair::generate().unwrap();
+    let mut ca = CertificateParams::new(Vec::new()).unwrap();
+    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca.not_before = issued;
+    ca.not_after = expired;
+    let ca_pem = ca.self_signed(&ca_key).unwrap().pem();
+    let issuer = Issuer::new(ca, ca_key);
+    let leaf_key = KeyPair::generate().unwrap();
+    let mut leaf = CertificateParams::new(vec!["api.anthropic.com".to_string()]).unwrap();
+    leaf.not_before = issued;
+    leaf.not_after = expired;
+    let leaf_pem = leaf.signed_by(&leaf_key, &issuer).unwrap().pem();
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("ca.pem"), ca_pem).unwrap();
+    std::fs::write(dir.join("leaf.pem"), leaf_pem).unwrap();
+    std::fs::write(dir.join("leaf.key"), leaf_key.serialize_pem()).unwrap();
+    std::fs::write(dir.join("proxy-password"), "t".repeat(43)).unwrap();
 }
 
 fn free_port() -> u16 {
@@ -273,6 +312,79 @@ async fn claude_refuses_another_certificate_and_says_the_password_was_sent() {
     assert!(stderr.contains("another certificate"));
     assert!(stderr.contains("password was sent"));
     assert!(refused.stdout.is_empty());
+}
+
+#[test]
+fn claude_refuses_an_expired_certificate_before_it_connects() {
+    let sandbox = Sandbox::new(None);
+    write_expired_install(&sandbox.intercept());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let refused = sandbox
+        .command(port)
+        .args(["claude", "-p", "hi"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(text(&refused.stderr).contains("restart `duolane serve --intercept`"));
+    assert!(refused.stdout.is_empty());
+    assert!(listener.accept().is_err());
+}
+
+#[test]
+fn renew_replaces_the_certificate_and_keeps_the_password_and_settings() {
+    let sandbox = Sandbox::new(None);
+    std::fs::write(sandbox.settings(), ORIGINAL).unwrap();
+    assert!(sandbox.run(&["intercept", "setup"]).status.success());
+    let before = sandbox.pair();
+    let password = sandbox.password();
+    let settings = std::fs::read(sandbox.settings()).unwrap();
+    let renewed = sandbox
+        .command(free_port())
+        .args(["intercept", "renew"])
+        .output()
+        .unwrap();
+    assert!(renewed.status.success());
+    let stdout = text(&renewed.stdout);
+    assert!(!stdout.contains(&password));
+    for ((name, old), new) in PAIR.iter().zip(&before).zip(sandbox.pair()) {
+        assert!(*old != new, "{name} did not change");
+        assert!(stdout.contains(&format!("wrote {name}")));
+    }
+    assert!(sandbox.password() == password);
+    assert!(std::fs::read(sandbox.settings()).unwrap() == settings);
+    let manifest: Value = serde_json::from_slice(&sandbox.read("manifest.json")).unwrap();
+    let entries = manifest["files"].as_array().unwrap();
+    assert_eq!(entries.len(), 4);
+    for entry in entries {
+        let name = entry["name"].as_str().unwrap();
+        assert!(
+            entry["sha256"] == sha256(&sandbox.read(name)).as_str(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn renew_refuses_a_held_port_and_a_missing_install() {
+    let sandbox = Sandbox::new(None);
+    let missing = sandbox.run(&["intercept", "renew"]);
+    assert!(!missing.status.success());
+    assert!(text(&missing.stderr).contains("no intercept certificate to renew"));
+
+    assert!(sandbox.run(&["intercept", "setup"]).status.success());
+    let before = sandbox.pair();
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = held.local_addr().unwrap().port();
+    let refused = sandbox
+        .command(port)
+        .args(["intercept", "renew"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(text(&refused.stderr).contains(&format!("127.0.0.1:{port}")));
+    assert!(sandbox.pair() == before);
 }
 
 #[test]
