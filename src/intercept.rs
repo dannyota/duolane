@@ -58,16 +58,17 @@ pub fn ca_path() -> PathBuf {
 fn prepare(now: time::OffsetDateTime) -> anyhow::Result<(String, renewal::Loaded)> {
     let dir = intercept_dir();
     let _lock = lock::acquire(&dir, lock::WAIT)?;
-    prepare_locked(&dir, now)
+    prepare_locked(&dir, now, None)
 }
 
 fn prepare_locked(
     dir: &Path,
     now: time::OffsetDateTime,
+    port_check: Option<u16>,
 ) -> anyhow::Result<(String, renewal::Loaded)> {
     files::ensure_dir(dir)?;
     let password = files::load_or_create_password(dir)?;
-    let loaded = renewal::load(dir, now)?;
+    let loaded = renewal::load(dir, now, port_check)?;
     manifest::refresh_files(dir)?;
     Ok((password, loaded))
 }

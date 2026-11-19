@@ -179,6 +179,9 @@ fn main() -> Result<()> {
                     if let Some(intercept) = &intercept {
                         let address = intercept.local_addr()?;
                         monitor_listen_url.push_str(&format!("  intercept proxy {address}"));
+                        for notice in intercept.notices() {
+                            monitor_listen_url.push_str(&format!("  {notice}"));
+                        }
                     }
                     if exposed {
                         monitor_listen_url.push_str("  plain HTTP: use an encrypted path");

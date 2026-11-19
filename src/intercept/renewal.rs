@@ -17,6 +17,9 @@ const PAIR_FILES: [&str; 3] = [KEY_FILE, LEAF_FILE, CA_FILE];
 pub(super) const SOON: &str = "the intercept certificate expires within 14 days; stop `duolane serve`, run `duolane intercept renew`, start `duolane serve --intercept`, then restart Claude Code sessions";
 pub(super) const EXPIRED: &str = "the intercept certificate has expired or is not valid; restart `duolane serve --intercept`, then restart Claude Code sessions";
 const REPLACED: &str = "replaced the intercept certificate because it had expired or could not be read; restart Claude Code sessions so they trust the new one";
+const SOON_NOTICE: &str =
+    "intercept certificate expires within 14 days: run duolane intercept renew";
+const REPLACED_NOTICE: &str = "intercept certificate replaced: restart Claude Code sessions";
 const NOTHING_TO_RENEW: &str = "no intercept certificate to renew; start `duolane serve --intercept` or run `duolane intercept setup` first";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +54,11 @@ pub(super) fn due(
     }
 }
 
-pub(super) fn load(dir: &Path, now: OffsetDateTime) -> anyhow::Result<Loaded> {
+pub(super) fn load(
+    dir: &Path,
+    now: OffsetDateTime,
+    port_check: Option<u16>,
+) -> anyhow::Result<Loaded> {
     let ca = files::read(&dir.join(CA_FILE))?;
     let leaf = files::read(&dir.join(LEAF_FILE))?;
     let key = files::read(&dir.join(KEY_FILE))?;
@@ -64,6 +71,9 @@ pub(super) fn load(dir: &Path, now: OffsetDateTime) -> anyhow::Result<Loaded> {
             ca,
             replaced: false,
         });
+    }
+    if existed && let Some(port) = port_check {
+        check_port_free(port)?;
     }
     let (pair, ca) = write_pair(dir, now)?;
     Ok(Loaded {
@@ -85,6 +95,17 @@ fn write_pair(dir: &Path, now: OffsetDateTime) -> anyhow::Result<(Pair, Certific
         now,
     )
     .ok_or_else(|| anyhow::anyhow!("the new intercept certificate does not verify"))
+}
+
+pub(super) fn notices(due: Due, replaced: bool) -> Vec<&'static str> {
+    let mut notices = Vec::new();
+    if replaced {
+        notices.push(REPLACED_NOTICE);
+    }
+    if due == Due::Soon {
+        notices.push(SOON_NOTICE);
+    }
+    notices
 }
 
 pub(super) fn report_replaced(loaded: &Loaded) {
@@ -115,12 +136,7 @@ pub fn renew() -> anyhow::Result<()> {
     if !present {
         anyhow::bail!(NOTHING_TO_RENEW);
     }
-    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, super::port()));
-    if TcpStream::connect_timeout(&address, PORT_CHECK).is_ok() {
-        anyhow::bail!(
-            "something accepts connections on {address}; stop `duolane serve --intercept`, or whatever holds that port, then run `duolane intercept renew` again"
-        );
-    }
+    check_port_free(super::port())?;
     files::ensure_dir(&dir)?;
     write_pair(&dir, OffsetDateTime::now_utc())?;
     let manifest = manifest::refresh_files(&dir)?;
@@ -131,6 +147,16 @@ pub fn renew() -> anyhow::Result<()> {
         println!("wrote {MANIFEST_FILE}");
     }
     println!("Start `duolane serve --intercept`, then restart Claude Code sessions.");
+    Ok(())
+}
+
+fn check_port_free(port: u16) -> anyhow::Result<()> {
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    if TcpStream::connect_timeout(&address, PORT_CHECK).is_ok() {
+        anyhow::bail!(
+            "something accepts connections on {address}; stop `duolane serve --intercept`, or whatever holds that port, then run `duolane intercept renew` again"
+        );
+    }
     Ok(())
 }
 
@@ -160,19 +186,26 @@ mod tests {
     }
 
     #[test]
+    fn the_dashboard_header_names_a_replacement_and_a_near_expiry() {
+        assert!(notices(Due::Fine, false).is_empty());
+        assert_eq!(notices(Due::Soon, false), [SOON_NOTICE]);
+        assert_eq!(notices(Due::Fine, true), [REPLACED_NOTICE]);
+    }
+
+    #[test]
     fn loading_keeps_a_usable_pair_and_replaces_an_expired_one() {
         let root = tempfile::TempDir::new().unwrap();
         let dir = root.path().join("intercept");
         files::ensure_dir(&dir).unwrap();
         let now = OffsetDateTime::now_utc();
-        let first = load(&dir, now - Duration::days(100)).unwrap();
+        let first = load(&dir, now - Duration::days(100), None).unwrap();
         assert!(!first.replaced);
 
-        let kept = load(&dir, now - Duration::days(30)).unwrap();
+        let kept = load(&dir, now - Duration::days(30), None).unwrap();
         assert!(!kept.replaced);
         assert!(kept.pair.leaf == first.pair.leaf);
 
-        let renewed = load(&dir, now).unwrap();
+        let renewed = load(&dir, now, None).unwrap();
         assert!(renewed.replaced);
         assert!(renewed.pair.leaf != first.pair.leaf);
         let ca = std::fs::read(dir.join(CA_FILE)).unwrap();

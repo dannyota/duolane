@@ -44,6 +44,7 @@ pub struct InterceptListener {
     relay: Relay,
     ca: CertificateDer<'static>,
     leaf: CertificateDer<'static>,
+    notices: Vec<&'static str>,
 }
 
 struct Shared {
@@ -78,6 +79,12 @@ impl InterceptListener {
             tokio::task::spawn_blocking(|| super::prepare(time::OffsetDateTime::now_utc()))
                 .await??;
         renewal::report_replaced(&loaded);
+        let due = renewal::due(
+            std::slice::from_ref(&loaded.ca),
+            &loaded.pair.leaf,
+            time::OffsetDateTime::now_utc(),
+        );
+        let notices = renewal::notices(due, loaded.replaced);
         let leaf = loaded.pair.leaf.clone();
         let config = server_config(loaded.pair)?;
         Ok(Self {
@@ -87,11 +94,16 @@ impl InterceptListener {
             relay: Relay::new()?,
             ca: loaded.ca,
             leaf,
+            notices,
         })
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.listener.local_addr()
+    }
+
+    pub fn notices(&self) -> &[&'static str] {
+        &self.notices
     }
 
     pub async fn serve(self, app: Router, shutdown: impl Future<Output = ()>) {
@@ -102,6 +114,7 @@ impl InterceptListener {
             relay,
             ca,
             leaf,
+            notices: _,
         } = self;
         let watching = tokio::spawn(renewal::watch(ca, leaf));
         let shared = Arc::new(Shared {

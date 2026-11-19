@@ -388,6 +388,38 @@ fn renew_refuses_a_held_port_and_a_missing_install() {
 }
 
 #[test]
+fn setup_replaces_a_damaged_pair_only_when_the_port_is_free() {
+    let sandbox = Sandbox::new(None);
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = held.local_addr().unwrap().port();
+    let setup = || {
+        sandbox
+            .command(port)
+            .args(["intercept", "setup"])
+            .output()
+            .unwrap()
+    };
+    assert!(setup().status.success());
+    std::fs::write(sandbox.intercept().join("leaf.pem"), "damaged").unwrap();
+    let before = sandbox.pair();
+    let manifest = sandbox.read("manifest.json");
+    let settings = std::fs::read(sandbox.settings()).unwrap();
+    let refused = setup();
+    assert!(!refused.status.success());
+    assert!(text(&refused.stderr).contains(&format!("127.0.0.1:{port}")));
+    assert!(sandbox.pair() == before);
+    assert!(sandbox.read("manifest.json") == manifest);
+    assert!(std::fs::read(sandbox.settings()).unwrap() == settings);
+
+    drop(held);
+    let replaced = setup();
+    assert!(replaced.status.success());
+    let stdout = text(&replaced.stdout);
+    assert!(stdout.contains("changed leaf.pem"));
+    assert!(stdout.contains("restart `duolane serve --intercept`"));
+}
+
+#[test]
 fn setup_writes_the_env_block_once_and_keeps_the_rest_of_the_file() {
     let sandbox = Sandbox::new(None);
     std::fs::write(sandbox.settings(), ORIGINAL).unwrap();
