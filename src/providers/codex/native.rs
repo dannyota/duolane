@@ -11,8 +11,8 @@ use http::{HeaderMap, HeaderName, StatusCode};
 use serde_json::{Map, Value, json};
 
 use crate::anthropic::sse::parse_sse_events;
-use crate::config;
 use crate::provider::RequestContext;
+use crate::registry::normalize_incoming_model;
 use crate::traffic::{
     MAX_SSE_CAPTURE_BYTES, MAX_STREAM_CAPTURE_EVENT_BYTES, MAX_STREAM_CAPTURE_EVENTS,
     MAX_STREAM_CAPTURE_FRAME_BYTES,
@@ -20,8 +20,8 @@ use crate::traffic::{
 
 use super::client::{CodexError, CodexHttpClient};
 use super::translate::model_allowlist::{
-    allowed_models_display, assert_allowed_model, full_lane_web_search_model, resolve_alias,
-    service_tier_for_model, split_tier_suffix, uses_responses_lite_with_full_lane,
+    ResolvedModel, alias_target, allowed_models_display, full_lane_web_search_model,
+    resolve_family, resolve_tier_model_alias, service_tier_for_model,
 };
 use super::translate::request::ServiceTier;
 
@@ -42,19 +42,21 @@ impl CodexNativeBackend {
         }
     }
 
-    pub async fn handle(&self, mut body: Value, ctx: RequestContext) -> Response {
-        let resolved = match shape_native_request(&mut body, config::codex_full_lane()) {
-            Ok(resolved) => resolved,
-            Err(response) => return response,
-        };
+    pub(crate) async fn handle(
+        &self,
+        mut body: Value,
+        prepared: NativePrepared,
+        ctx: RequestContext,
+    ) -> Response {
+        prepared.apply(&mut body);
         if let Some(monitor) = ctx.monitor.as_ref() {
-            monitor.model_resolved(&ctx.req_id, &resolved.model);
+            monitor.model_resolved(&ctx.req_id, &prepared.model);
             monitor.upstream_started(&ctx.req_id);
         }
 
         let upstream = match self
             .client
-            .post_native_responses(&body, &ctx, resolved.use_responses_lite, resolved.stream)
+            .post_native_responses(&body, &ctx, prepared.use_responses_lite, prepared.stream)
             .await
         {
             Ok(response) => response,
@@ -65,14 +67,30 @@ impl CodexNativeBackend {
     }
 }
 
-struct NativeResolved {
+pub(crate) struct NativePrepared {
     model: String,
+    service_tier: Option<ServiceTier>,
     use_responses_lite: bool,
     stream: bool,
 }
 
+impl NativePrepared {
+    fn apply(&self, body: &mut Value) {
+        let object = body
+            .as_object_mut()
+            .expect("prepared native Responses body must be an object");
+        object.insert("model".to_string(), Value::String(self.model.clone()));
+        if let Some(tier) = &self.service_tier {
+            object.insert("service_tier".to_string(), json!(tier));
+        }
+    }
+}
+
 #[allow(clippy::result_large_err)]
-pub fn validate_native_request_model(body: &Value) -> Result<String, Response> {
+pub(crate) fn prepare_native_request(
+    body: &Value,
+    full_lane: bool,
+) -> Result<NativePrepared, Response> {
     let object = body.as_object().ok_or_else(|| {
         openai_error(
             StatusCode::BAD_REQUEST,
@@ -86,7 +104,6 @@ pub fn validate_native_request_model(body: &Value) -> Result<String, Response> {
         .get("model")
         .and_then(Value::as_str)
         .filter(|model| !model.is_empty())
-        .map(str::to_string)
         .ok_or_else(|| {
             openai_error(
                 StatusCode::BAD_REQUEST,
@@ -96,8 +113,8 @@ pub fn validate_native_request_model(body: &Value) -> Result<String, Response> {
                 None,
             )
         })?;
-    let (resolved, _) = resolve_native_model(&requested);
-    if let Err(error) = assert_allowed_model(&resolved) {
+    let mut resolved = resolve_native_model(requested);
+    if let Err(error) = resolved.assert_allowed() {
         return Err(openai_error(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
@@ -110,36 +127,17 @@ pub fn validate_native_request_model(body: &Value) -> Result<String, Response> {
             Some("model_not_supported"),
         ));
     }
-    Ok(requested)
-}
-
-#[allow(clippy::result_large_err)]
-fn shape_native_request(body: &mut Value, full_lane: bool) -> Result<NativeResolved, Response> {
-    let requested = validate_native_request_model(body)?;
-    let object = body
-        .as_object_mut()
-        .expect("validated native Responses body must be an object");
-
-    let (mut model, service_tier) = resolve_native_model(&requested);
-
     let hosted_web_search = has_native_hosted_web_search(object);
     if hosted_web_search {
-        model = full_lane_web_search_model(&model).to_string();
+        resolved.model = full_lane_web_search_model(&resolved.model).to_string();
     }
-    object.insert("model".to_string(), Value::String(model.clone()));
-    if let Some(tier) = service_tier
-        && !object.contains_key("service_tier")
-    {
-        object.insert(
-            "service_tier".to_string(),
-            json!(service_tier_for_model(&model, tier)),
-        );
-    }
-
-    Ok(NativeResolved {
-        use_responses_lite: uses_responses_lite_with_full_lane(&model, full_lane)
-            && !hosted_web_search,
-        model,
+    Ok(NativePrepared {
+        use_responses_lite: !hosted_web_search && resolved.uses_responses_lite(full_lane),
+        service_tier: resolved
+            .service_tier
+            .filter(|_| !object.contains_key("service_tier"))
+            .map(|tier| service_tier_for_model(&resolved.model, tier)),
+        model: resolved.model,
         stream: object
             .get("stream")
             .and_then(Value::as_bool)
@@ -147,15 +145,15 @@ fn shape_native_request(body: &mut Value, full_lane: bool) -> Result<NativeResol
     })
 }
 
-fn resolve_native_model(requested: &str) -> (String, Option<ServiceTier>) {
-    let (requested, service_tier) = match split_tier_suffix(requested) {
-        Some((base, tier)) => (base, Some(tier)),
-        None => (requested, None),
-    };
-    (
-        resolve_alias(requested).map_or_else(|| requested.to_string(), |id| id.into_owned()),
-        service_tier,
-    )
+fn resolve_native_model(requested: &str) -> ResolvedModel {
+    if let Some(resolved) = resolve_family(&normalize_incoming_model(requested)) {
+        return resolved;
+    }
+    let mut resolved = resolve_tier_model_alias(requested);
+    if let Some(model) = alias_target(&resolved.model) {
+        resolved.model = model.to_string();
+    }
+    resolved
 }
 
 fn has_native_hosted_web_search(object: &Map<String, Value>) -> bool {
@@ -675,6 +673,13 @@ mod tests {
         assert_eq!(observer.captured_events.len(), MAX_STREAM_CAPTURE_EVENTS);
         assert_eq!(observer.captured_events_truncated, 10);
         observer.finished = true;
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn shape_native_request(body: &mut Value, full_lane: bool) -> Result<NativePrepared, Response> {
+        let prepared = prepare_native_request(body, full_lane)?;
+        prepared.apply(body);
+        Ok(prepared)
     }
 
     #[test]

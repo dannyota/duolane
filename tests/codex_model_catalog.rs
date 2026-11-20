@@ -45,7 +45,7 @@ fn write_catalog(dir: &TempDir, extra: &str) {
         dir.path().join("models_cache.json"),
         serde_json::to_vec(&json!({
             "fetched_at":"2020-01-01T00:00:00Z", "client_version":"0.1.0", "etag":"fixture",
-            "models":[entry(extra,true,"list",true), entry("gpt-6.2-sol",true,"list",false), entry("gpt-6.10-sol",true,"list",false), entry("gpt-9-sol",true,"hide",false), entry("gpt-test-hidden",true,"hide",false),
+            "models":[entry(extra,true,"list",true), entry("gpt-6.2-sol",true,"list",false), entry("gpt-6.10-sol",true,"list",false), entry("gpt-6.10.0-sol",true,"list",true), entry("gpt-9-sol",true,"hide",false), entry("gpt-test-hidden",true,"hide",false),
                 entry("gpt-test-denied",false,"list",true),
                 entry("gpt-5.4",true,"list",true), entry("gpt-6.1-terra",false,"hide",false),
                 entry("opus",true,"list",false), entry("gpt-test-forged-fast",true,"list",true),
@@ -76,16 +76,6 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         "gpt-test-forged-fast",
     ] {
         assert!(!listing.contains(absent), "{absent}");
-    }
-    for alias in [
-        "terra",
-        "sol",
-        "astra",
-        "anthropic-terra",
-        "anthropic-sol",
-        "anthropic-astra",
-    ] {
-        assert!(listing.contains(alias), "{alias}");
     }
     assert!(listing.contains("gpt-6.1-terra"));
     assert!(listing.contains("gpt-6-astra-ultrafast"));
@@ -152,12 +142,30 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         .json()
         .await
         .unwrap();
+    for alias in [
+        "terra",
+        "sol",
+        "astra",
+        "anthropic-terra",
+        "anthropic-sol",
+        "anthropic-astra",
+    ] {
+        assert!(
+            listing["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == alias),
+            "{alias}"
+        );
+    }
     assert!(listing.to_string().contains("gpt-test-future-fast"));
     assert!(!listing.to_string().contains("gpt-test-hidden"));
 
     for (requested, expected, lite, tier) in [
         ("sol", "gpt-6.10-sol", false, None),
         ("anthropic-sol", "gpt-6.10-sol", false, None),
+        ("anthropic-sol[1m]", "gpt-6.10-sol", false, None),
         (
             "gpt-test-future-fast",
             "gpt-test-future",
@@ -282,6 +290,7 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         "gpt-test-forged-fast",
         "gpt-test-future-ultrafast",
         "gpt-test-future-fast-fast",
+        "gpt-5.4[1m]",
     ] {
         let response = client
             .post(format!("{url}/v1/responses"))

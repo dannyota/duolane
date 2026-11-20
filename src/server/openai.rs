@@ -9,7 +9,7 @@ use crate::{
     provider::RequestContext,
     providers::codex::{
         chat_completions::request::translate_request,
-        native::{openai_error, validate_native_request_model},
+        native::{openai_error, prepare_native_request},
     },
     session::{self},
     traffic::{TrafficCaptureOptions, create_traffic_capture},
@@ -123,9 +123,10 @@ pub(super) async fn handler_responses(
         );
         return monitor_response_body(response, request_guard);
     }
-    if let Err(response) = validate_native_request_model(&body) {
-        return monitor_response_body(response, request_guard);
-    }
+    let prepared = match prepare_native_request(&body, crate::config::codex_full_lane()) {
+        Ok(prepared) => prepared,
+        Err(response) => return monitor_response_body(response, request_guard),
+    };
     let current = session::record_session_request(
         session_id.as_deref(),
         session_state.as_ref(),
@@ -181,7 +182,7 @@ pub(super) async fn handler_responses(
         passthrough: None,
     };
     let response = match state.native_responses.as_ref() {
-        Some(backend) => backend.handle(body, context).await,
+        Some(backend) => backend.handle(body, prepared, context).await,
         None => openai_error(
             StatusCode::NOT_FOUND,
             "not_found_error",

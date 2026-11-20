@@ -68,9 +68,7 @@ use self::live_completion::*;
 use self::live_response::*;
 use self::request_state::*;
 use self::translate::accumulate::accumulate_response_with_traffic;
-use self::translate::model_allowlist::{
-    assert_allowed_model, resolve_model_request_with_config_override,
-};
+use self::translate::model_allowlist::resolve_model_request_with_config_override;
 use self::translate::request::{TranslateOptions, is_compact_messages_request, translate_request};
 use self::translate::stream::translate_stream_bytes_with_traffic;
 
@@ -125,7 +123,7 @@ impl CodexProvider {
 
         let mut resolved =
             resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
-        if let Err(e) = assert_allowed_model(&resolved.model) {
+        if let Err(e) = resolved.assert_allowed() {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
@@ -215,7 +213,7 @@ impl CodexProvider {
             );
         }
         let use_responses_lite =
-            apply_model_lane_for_request(&mut resolved.model, body, config::codex_full_lane());
+            apply_model_lane_for_request(&mut resolved, body, config::codex_full_lane());
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &resolved.model);
         }
@@ -632,7 +630,7 @@ impl Provider for CodexProvider {
         let model = body.model.as_deref().unwrap_or("opus");
         let mut resolved =
             resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
-        if let Err(e) = assert_allowed_model(&resolved.model) {
+        if let Err(e) = resolved.assert_allowed() {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
@@ -643,7 +641,7 @@ impl Provider for CodexProvider {
             );
         }
         let use_responses_lite =
-            apply_model_lane_for_request(&mut resolved.model, &body, config::codex_full_lane());
+            apply_model_lane_for_request(&mut resolved, &body, config::codex_full_lane());
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &resolved.model);
         }

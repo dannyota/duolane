@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::BTreeSet};
 
 use crate::config;
 
-use super::model_catalog::{catalog_model, catalog_models};
+use super::model_catalog::{CatalogModel, catalog_model, catalog_models};
 use super::request::ServiceTier;
 
 pub const ALLOWED_MODELS: &[&str] = &[
@@ -75,15 +75,29 @@ pub fn resolve_alias(model: &str) -> Option<Cow<'static, str>> {
     if !is_family_alias(model) {
         return alias_target(model).map(Cow::Borrowed);
     }
+    resolve_family(model).map(|resolved| Cow::Owned(resolved.model))
+}
+
+pub(in crate::providers::codex) fn resolve_family(model: &str) -> Option<ResolvedModel> {
+    if !is_family_alias(model) {
+        return None;
+    }
+    resolve_family_in(model, catalog_models())
+}
+
+fn resolve_family_in(model: &str, catalog: Vec<CatalogModel>) -> Option<ResolvedModel> {
     let family = model.strip_prefix("anthropic-").unwrap_or(model);
-    let mut candidates: Vec<_> = listed_catalog_models()
+    let mut candidates: Vec<_> = catalog
         .into_iter()
-        .filter_map(|id| version(&id, family).map(|v| (id, v)))
+        .filter(|entry| entry.listed && entry.supported_in_api)
+        .filter_map(|entry| {
+            version(&entry.slug, family).map(|v| (entry.slug, v, entry.use_responses_lite))
+        })
         .collect();
     if candidates.is_empty() {
         candidates = ALLOWED_MODELS
             .iter()
-            .filter_map(|id| version(id, family).map(|v| ((*id).to_string(), v)))
+            .filter_map(|id| version(id, family).map(|v| ((*id).to_string(), v, false)))
             .collect();
     }
     candidates.sort_by(|a, b| {
@@ -95,7 +109,14 @@ pub fn resolve_alias(model: &str) -> Option<Cow<'static, str>> {
         }
         a.0.cmp(&b.0)
     });
-    candidates.into_iter().next().map(|(id, _)| Cow::Owned(id))
+    candidates.into_iter().next().map(|(model, _, lite)| {
+        let family_catalog_lite = (!ALLOWED_MODELS.contains(&model.as_str())).then_some(lite);
+        ResolvedModel {
+            model,
+            service_tier: None,
+            family_catalog_lite,
+        }
+    })
 }
 
 pub fn alias_target(model: &str) -> Option<&'static str> {
@@ -118,6 +139,22 @@ fn alias_target_in(model: &str, catalog: impl FnOnce() -> Vec<String>) -> Option
 pub struct ResolvedModel {
     pub model: String,
     pub service_tier: Option<ServiceTier>,
+    family_catalog_lite: Option<bool>,
+}
+
+impl ResolvedModel {
+    pub(in crate::providers::codex) fn assert_allowed(&self) -> Result<(), ModelNotAllowedError> {
+        if self.family_catalog_lite.is_some() {
+            Ok(())
+        } else {
+            assert_allowed_model(&self.model)
+        }
+    }
+
+    pub(in crate::providers::codex) fn uses_responses_lite(&self, full_lane: bool) -> bool {
+        self.family_catalog_lite
+            .unwrap_or_else(|| uses_responses_lite_with_full_lane(&self.model, full_lane))
+    }
 }
 
 pub fn is_allowed_model(model: &str) -> bool {
@@ -193,15 +230,17 @@ pub fn service_tier_for_model(model: &str, tier: ServiceTier) -> ServiceTier {
     }
 }
 
-fn resolve_tier_model_alias(model: &str) -> ResolvedModel {
+pub(in crate::providers::codex) fn resolve_tier_model_alias(model: &str) -> ResolvedModel {
     match split_tier_suffix(model) {
         Some((base, tier)) => ResolvedModel {
             model: base.to_string(),
             service_tier: Some(tier),
+            family_catalog_lite: None,
         },
         None => ResolvedModel {
             model: model.to_string(),
             service_tier: None,
+            family_catalog_lite: None,
         },
     }
 }
@@ -219,24 +258,19 @@ pub fn resolve_model_request_with_config_override(
 }
 
 fn resolve_with_model_override(model: &str, override_model: Option<&str>) -> ResolvedModel {
-    let alias = resolve_alias(model).unwrap_or(Cow::Borrowed(model));
-
-    let requested = resolve_tier_model_alias(&alias);
-
-    let resolved = match override_model {
+    let requested = resolve_family(model)
+        .unwrap_or_else(|| resolve_tier_model_alias(alias_target(model).unwrap_or(model)));
+    let requested_tier = requested.service_tier.clone();
+    let mut resolved = match override_model {
         Some(val) if !val.is_empty() => resolve_tier_model_alias(val),
-        _ => requested.clone(),
+        _ => requested,
     };
 
-    let service_tier = resolved
+    resolved.service_tier = resolved
         .service_tier
-        .or(requested.service_tier)
+        .or(requested_tier)
         .map(|tier| service_tier_for_model(&resolved.model, tier));
-
-    ResolvedModel {
-        model: resolved.model,
-        service_tier,
-    }
+    resolved
 }
 
 pub fn resolve_model(model: &str) -> String {
@@ -306,18 +340,41 @@ pub fn full_lane_web_search_model(model: &str) -> &str {
 }
 
 pub fn is_valid_model_for_codex(model: &str) -> bool {
-    if is_allowed_model(model) {
+    if is_family_alias(model) || is_allowed_model(model) {
         return true;
     }
     if split_tier_suffix(model).is_some() {
         return true;
     }
-    is_family_alias(model) || MODEL_ALIASES.iter().any(|(alias, _)| *alias == model)
+    MODEL_ALIASES.iter().any(|(alias, _)| *alias == model)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_family_model_remains_valid_after_catalog_removal() {
+        let id = "gpt-99.1-sol";
+        assert!(!is_allowed_model(id));
+        for lite in [true, false] {
+            let resolved = resolve_family_in(
+                "anthropic-sol",
+                vec![CatalogModel {
+                    slug: id.to_string(),
+                    use_responses_lite: lite,
+                    supported_in_api: true,
+                    listed: true,
+                    priority: None,
+                    display_name: None,
+                }],
+            )
+            .unwrap();
+            assert_eq!(resolved.model, id);
+            assert!(resolved.assert_allowed().is_ok());
+            assert_eq!(resolved.uses_responses_lite(true), lite);
+        }
+    }
 
     #[test]
     fn haiku_resolves_to_luna() {
