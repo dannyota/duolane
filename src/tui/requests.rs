@@ -360,9 +360,19 @@ pub(super) fn render_events(
     area: Rect,
     recent: &[CompletedSnapshot],
 ) -> VisibleRows {
+    let retry_count = recent
+        .iter()
+        .filter(|request| request.retry_requested)
+        .count();
+    let title = if retry_count > 0 {
+        format!("Events | Retry requested: {retry_count}")
+    } else {
+        "Events".to_string()
+    };
     let events = recent
         .iter()
         .enumerate()
+        .filter(|(_, request)| !request.retry_requested)
         .filter(|(_, request)| {
             request.status == crate::monitor::RequestStatus::Failed
                 || request.http_status.is_some_and(|status| status >= 400)
@@ -371,7 +381,7 @@ pub(super) fn render_events(
         .take(12)
         .collect::<Vec<_>>();
     if events.is_empty() {
-        render_empty_table_state(frame, area, "Events", false, "No events");
+        render_empty_table_state(frame, area, &title, false, "No events");
         return VisibleRows::default();
     }
 
@@ -409,7 +419,7 @@ pub(super) fn render_events(
         frame,
         area,
         Table::new(rows, widths.clone()),
-        panel("Events", false),
+        panel(&title, false),
         column_header(&columns),
         &mut TableState::default(),
         events.iter().map(|(index, _)| *index),

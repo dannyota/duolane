@@ -241,6 +241,7 @@ pub(super) fn completed_request(
         generation_duration: None,
         status,
         http_status,
+        retry_requested: false,
         latency,
         streamed_bytes: 0,
         stream_chunks: 0,

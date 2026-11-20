@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
-pub(super) fn panel(title: &'static str, focused: bool) -> Block<'static> {
+pub(super) fn panel(title: &str, focused: bool) -> Block<'static> {
     let color = if focused { TEAL } else { SEPARATOR };
     Block::default()
         .title(Span::styled(
@@ -48,7 +48,7 @@ pub(super) fn table_header_aligned(
 pub(super) fn render_empty_table_state(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
-    title: &'static str,
+    title: &str,
     focused: bool,
     message: &str,
 ) {

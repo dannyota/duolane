@@ -117,7 +117,21 @@ impl Provider for RequestCaptureProvider {
         body: MessagesRequest,
         _ctx: RequestContext,
     ) -> axum::response::Response {
+        let lookalike_error = body.extra.get("mock_lookalike_error") == Some(&Value::Bool(true));
         self.captured.lock().unwrap().push(body);
+        if lookalike_error {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "capability_rejected: beta_header:message-threads-2026-08-12"
+                    }
+                })),
+            )
+                .into_response();
+        }
         (StatusCode::OK, "captured").into_response()
     }
 
@@ -442,6 +456,11 @@ async fn assert_message_thread_rejected(body: Value) {
     assert_eq!(state.recent.len(), 1);
     assert_eq!(state.recent[0].status, RequestStatus::Failed);
     assert_eq!(state.recent[0].http_status, Some(400));
+    let snapshot: duolane::monitor::snapshot::MonitorSnapshot = state.clone().into();
+    assert_eq!(
+        serde_json::to_value(&snapshot.recent[0]).unwrap()["retry_requested"],
+        true
+    );
     assert!(
         state.recent[0]
             .error
@@ -476,6 +495,30 @@ async fn assert_message_thread_dispatched(mut body: Value) {
     assert_eq!(
         serde_json::to_value(&captured[0]).unwrap(),
         serde_json::to_value(expected).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn message_thread_lookalike_provider_error_is_not_a_retry() {
+    let (response, captured, monitor) = message_thread_response(
+        AliasProvider::Codex,
+        "codex",
+        json!({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "mock_lookalike_error": true
+        }),
+    )
+    .await;
+    assert_eq!(captured.len(), 1);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let snapshot: duolane::monitor::snapshot::MonitorSnapshot = monitor.snapshot().into();
+    assert_eq!(snapshot.recent.len(), 1);
+    assert_eq!(snapshot.recent[0].status, RequestStatus::Failed);
+    assert!(!snapshot.recent[0].retry_requested);
+    assert_eq!(
+        snapshot.recent[0].error.as_deref(),
+        Some("capability_rejected: beta_header:message-threads-2026-08-12")
     );
 }
 

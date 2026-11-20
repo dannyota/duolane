@@ -9,6 +9,11 @@ use super::{
     sessions::{first_session_output_bucket, session_summaries, session_token_bucket},
 };
 
+enum CompletionIssue {
+    Failure(String),
+    RetryRequested(String),
+}
+
 #[derive(Debug)]
 pub(super) struct MonitorStore {
     pub(super) started_at: SystemTime,
@@ -271,7 +276,7 @@ impl MonitorStore {
                     http_status,
                     None,
                     None,
-                    Some(error),
+                    Some(CompletionIssue::Failure(error)),
                 );
             }
             MonitorEvent::RequestAbandoned { request_id, error } => {
@@ -281,10 +286,22 @@ impl MonitorStore {
                     None,
                     None,
                     None,
-                    Some(error),
+                    Some(CompletionIssue::Failure(error)),
                 );
             }
         }
+        self.prune_session_history_if_due(SystemTime::now());
+    }
+
+    pub(super) fn request_retry_requested(&mut self, request_id: String, error: String) {
+        self.finish(
+            &request_id,
+            RequestStatus::Failed,
+            Some(400),
+            None,
+            None,
+            Some(CompletionIssue::RetryRequested(error)),
+        );
         self.prune_session_history_if_due(SystemTime::now());
     }
 
@@ -295,7 +312,7 @@ impl MonitorStore {
         http_status: Option<u16>,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
-        error: Option<String>,
+        error: Option<CompletionIssue>,
     ) {
         if self.active.contains_key(request_id) {
             self.finish(
@@ -316,7 +333,7 @@ impl MonitorStore {
         http_status: Option<u16>,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
-        error: Option<String>,
+        error: Option<CompletionIssue>,
     ) {
         let mut active = self
             .active
@@ -354,6 +371,11 @@ impl MonitorStore {
         let input_delta = update_token_count(&mut active.input_tokens, input_tokens);
         let output_delta = update_token_count(&mut active.output_tokens, output_tokens);
         self.record_session_usage(active.session_id.clone(), input_delta, output_delta);
+        let (error, retry_requested) = match error {
+            Some(CompletionIssue::Failure(error)) => (Some(error), false),
+            Some(CompletionIssue::RetryRequested(error)) => (Some(error), true),
+            None => (None, false),
+        };
         let completed = CompletedRequest {
             request_id: active.request_id,
             session_id: active.session_id,
@@ -372,6 +394,7 @@ impl MonitorStore {
             generation_duration: active.generation_duration,
             status,
             http_status,
+            retry_requested,
             latency: active.started_instant.elapsed(),
             streamed_bytes: active.streamed_bytes,
             stream_chunks: active.stream_chunks,
