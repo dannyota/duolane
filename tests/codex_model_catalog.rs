@@ -45,7 +45,7 @@ fn write_catalog(dir: &TempDir, extra: &str) {
         dir.path().join("models_cache.json"),
         serde_json::to_vec(&json!({
             "fetched_at":"2020-01-01T00:00:00Z", "client_version":"0.1.0", "etag":"fixture",
-            "models":[entry(extra,true,"list",true), entry("gpt-test-hidden",true,"hide",false),
+            "models":[entry(extra,true,"list",true), entry("gpt-6.2-sol",true,"list",false), entry("gpt-6.10.0-sol",true,"list",true), entry("gpt-6.10-sol",true,"list",false), entry("gpt-9-sol",true,"hide",false), entry("gpt-test-hidden",true,"hide",false),
                 entry("gpt-test-denied",false,"list",true),
                 entry("gpt-5.4",true,"list",true), entry("gpt-6.1-terra",false,"hide",false),
                 entry("opus",true,"list",false), entry("gpt-test-forged-fast",true,"list",true),
@@ -142,10 +142,30 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         .json()
         .await
         .unwrap();
+    for alias in [
+        "terra",
+        "sol",
+        "astra",
+        "anthropic-terra",
+        "anthropic-sol",
+        "anthropic-astra",
+    ] {
+        assert!(
+            listing["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == alias),
+            "{alias}"
+        );
+    }
     assert!(listing.to_string().contains("gpt-test-future-fast"));
     assert!(!listing.to_string().contains("gpt-test-hidden"));
 
     for (requested, expected, lite, tier) in [
+        ("sol", "gpt-6.10-sol", false, None),
+        ("anthropic-sol", "gpt-6.10-sol", false, None),
+        ("anthropic-sol[1m]", "gpt-6.10-sol", false, None),
         (
             "gpt-test-future-fast",
             "gpt-test-future",
@@ -214,6 +234,19 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         assert_eq!(body["service_tier"], "priority");
         assert!(headers.contains_key("x-openai-internal-codex-responses-lite"));
         assert!(body.get("client_metadata").is_some());
+        request["model"] = json!("anthropic-sol");
+        let response = client
+            .post(format!("{url}{route}"))
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let (_, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body["model"], "gpt-6.10-sol");
     }
     for full_lane in [false, true] {
         std::fs::write(
@@ -257,6 +290,7 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         "gpt-test-forged-fast",
         "gpt-test-future-ultrafast",
         "gpt-test-future-fast-fast",
+        "gpt-5.4[1m]",
     ] {
         let response = client
             .post(format!("{url}/v1/responses"))
@@ -267,7 +301,7 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         assert!(response.status().is_client_error(), "{rejected}");
     }
     assert!(rx.try_recv().is_err());
-    write_catalog(&dir, "gpt-test-added");
+    write_catalog(&dir, "gpt-7.0-sol");
     tokio::time::sleep(Duration::from_millis(1100)).await;
     let listing = client
         .get(format!("{url}/v1/models"))
@@ -277,11 +311,11 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         .text()
         .await
         .unwrap();
-    assert!(listing.contains("gpt-test-added"));
+    assert!(listing.contains("gpt-7.0-sol"));
     assert!(!listing.contains("gpt-test-future"));
     let response = client
         .post(format!("{url}/v1/responses"))
-        .json(&json!({"model":"gpt-test-added-fast","input":"synthetic"}))
+        .json(&json!({"model":"gpt-7.0-sol-fast","input":"synthetic"}))
         .send()
         .await
         .unwrap();
@@ -290,13 +324,25 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(body["model"], "gpt-test-added");
+    assert_eq!(body["model"], "gpt-7.0-sol");
     assert_eq!(body["service_tier"], "priority");
+    let response = client
+        .post(format!("{url}/v1/responses"))
+        .json(&json!({"model":"sol","input":"synthetic"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let (_, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(body["model"], "gpt-7.0-sol");
     std::fs::remove_file(dir.path().join("models_cache.json")).unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await;
     let response = client
         .post(format!("{url}/v1/responses"))
-        .json(&json!({"model":"gpt-test-added","input":"synthetic"}))
+        .json(&json!({"model":"gpt-7.0-sol","input":"synthetic"}))
         .send()
         .await
         .unwrap();
@@ -309,7 +355,41 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         .text()
         .await
         .unwrap();
-    assert!(!listing.contains("gpt-test-added"));
+    assert!(!listing.contains("gpt-7.0-sol"));
     assert!(listing.contains("gpt-6.1-terra"));
+    let response = client
+        .post(format!("{url}/v1/responses"))
+        .json(&json!({"model":"sol","input":"synthetic"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let (_, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(body["model"], "gpt-6.1-sol");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"codex":{"fullLane":true}}"#,
+    )
+    .unwrap();
+    for (model, expected_status) in [("sol", 200), ("gpt-6.1-sol", 400), ("opus", 400)] {
+        let response = client
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({"model":model,"messages":[{"role":"user","content":"synthetic"}],"temperature":0.2}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), expected_status, "{model}");
+    }
+    let (headers, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(body["model"], "gpt-6.1-sol");
+    assert_eq!(body["temperature"], 0.2);
+    assert!(!headers.contains_key("x-openai-internal-codex-responses-lite"));
+    assert!(rx.try_recv().is_err());
     upstream_task.abort();
 }

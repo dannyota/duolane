@@ -12,9 +12,7 @@ use super::continuation::continuation_candidate_for_owner;
 use super::continuation::{ContinuationReservation, abort_continuation_for_owner};
 #[cfg(test)]
 use super::translate::model_allowlist::resolve_model_request_with_config_override;
-use super::translate::model_allowlist::{
-    full_lane_web_search_model, uses_responses_lite_with_full_lane,
-};
+use super::translate::model_allowlist::{ResolvedModel, full_lane_web_search_model};
 #[cfg(test)]
 use super::translate::reasoning_signature::ReasoningAccount;
 use super::translate::request::has_hosted_web_search;
@@ -24,15 +22,15 @@ use super::translate::request::{TranslateOptions, translate_request};
 use super::*;
 
 pub(super) fn apply_model_lane_for_request(
-    model: &mut String,
+    resolved: &mut ResolvedModel,
     body: &MessagesRequest,
     full_lane: bool,
 ) -> bool {
     if has_hosted_web_search(body) {
-        *model = full_lane_web_search_model(model).to_string();
+        resolved.model = full_lane_web_search_model(&resolved.model).to_string();
         return false;
     }
-    uses_responses_lite_with_full_lane(model, full_lane)
+    resolved.uses_responses_lite(full_lane)
 }
 
 pub(super) fn count_sse_events(bytes: &[u8]) -> u64 {
@@ -136,10 +134,10 @@ mod tests {
             ("gpt-5.4", "gpt-5.4"),
         ] {
             for full_lane in [false, true] {
-                let mut model = resolved.to_string();
+                let mut model = resolve_model_request_with_config_override(resolved, false);
                 let lite = apply_model_lane_for_request(&mut model, &body, full_lane);
                 assert!(!lite, "{resolved} with web_search must use the full lane");
-                assert_eq!(model, expected);
+                assert_eq!(model.model, expected);
             }
         }
     }
@@ -157,9 +155,12 @@ mod tests {
             ("gpt-6.1-terra", true),
             ("gpt-5.4", false),
         ] {
-            let mut model = resolved.to_string();
+            let mut model = resolve_model_request_with_config_override(resolved, false);
             let lite = apply_model_lane_for_request(&mut model, &body, false);
-            assert_eq!(model, resolved, "model must not change without web_search");
+            assert_eq!(
+                model.model, resolved,
+                "model must not change without web_search"
+            );
             assert_eq!(lite, lite_expected);
         }
     }
@@ -184,14 +185,14 @@ mod tests {
                     body.extra.insert("tool_choice".to_string(),
                         serde_json::json!({"type":"auto", "disable_parallel_tool_use":disable_parallel}),
                     );
-                    let mut resolved = model.to_string();
+                    let mut resolved = resolve_model_request_with_config_override(model, false);
                     let lite = apply_model_lane_for_request(&mut resolved, &body, full_lane);
                     let translated = translate_request(
                         &body,
                         TranslateOptions {
                             session_id: None,
                             service_tier: None,
-                            model: resolved,
+                            model: resolved.model,
                             use_responses_lite: lite,
                             reasoning_account: ReasoningAccount::default(),
                         },
@@ -218,7 +219,7 @@ mod tests {
                 let mut body = request_with_tools(tools);
                 body.model = Some(requested.to_string());
                 let mut resolved = resolve_model_request_with_config_override(requested, false);
-                let lite = apply_model_lane_for_request(&mut resolved.model, &body, false);
+                let lite = apply_model_lane_for_request(&mut resolved, &body, false);
                 let translated = translate_request(
                     &body,
                     TranslateOptions {

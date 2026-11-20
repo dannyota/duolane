@@ -53,8 +53,9 @@ Point Claude Code at the proxy in `~/.claude/settings.json`:
   },
   "modelPicker": {
     "options": [
-      { "model": "gpt-6.2-sol", "label": "GPT-6.2-Sol (Codex)" },
-      { "model": "gpt-6.2-astra", "label": "GPT-6.2-Astra (Codex)" }
+      { "model": "terra", "label": "Terra (Codex)" },
+      { "model": "sol", "label": "Sol (Codex)" },
+      { "model": "astra", "label": "Astra (Codex)" }
     ]
   }
 }
@@ -75,8 +76,13 @@ Restart Claude Code, then choose a model:
 
 ```text
 /model claude-opus-5-5
-/model gpt-6.2-sol
+/model sol
 ```
+
+`terra`, `sol`, and `astra` select the newest listed, API-capable model in each
+family in the local Codex catalog. `anthropic-terra`, `anthropic-sol`, and
+`anthropic-astra` are equivalent. Use a full ID such as `gpt-6.2-sol` to pin a
+version. Without a matching catalog entry, the aliases use built-in models.
 
 Claude Code does not know Codex models and assumes a 1M-token context window.
 GPT-6.2 Sol and Astra support up to 1M tokens, while Codex itself defaults to
@@ -108,8 +114,8 @@ Start Claude Code through it, with any `claude` arguments:
 duolane claude --remote-control
 ```
 
-`duolane claude` changes no file. It adds the Codex models from the Codex
-catalog to the `/model` picker for that launch. To route every Claude Code
+`duolane claude` changes no file. It adds the Codex family aliases and catalog
+models to the `/model` picker for that launch. To route every Claude Code
 session, including background agents, write the same settings to the Claude Code
 user settings once. Every session then needs the proxy running:
 

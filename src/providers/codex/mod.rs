@@ -68,9 +68,7 @@ use self::live_completion::*;
 use self::live_response::*;
 use self::request_state::*;
 use self::translate::accumulate::accumulate_response_with_traffic;
-use self::translate::model_allowlist::{
-    assert_allowed_model, resolve_model_request_with_config_override,
-};
+use self::translate::model_allowlist::{ResolvedModel, resolve_model_request_with_config_override};
 use self::translate::request::{TranslateOptions, is_compact_messages_request, translate_request};
 use self::translate::stream::translate_stream_bytes_with_traffic;
 
@@ -103,29 +101,10 @@ impl CodexProvider {
         ctx: RequestContext,
         conversation_identity: Option<ConversationIdentity>,
     ) -> Response {
-        let response = self
-            .handle_messages_for_account(&body, ctx.clone(), conversation_identity.clone())
-            .await;
-        if response.extensions().get::<CodexAccountChanged>().is_none() {
-            return response;
-        }
-        self.handle_messages_for_account(&body, ctx, conversation_identity)
-            .await
-    }
-
-    async fn handle_messages_for_account(
-        &self,
-        body: &MessagesRequest,
-        ctx: RequestContext,
-        conversation_identity: Option<ConversationIdentity>,
-    ) -> Response {
-        let message_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
-        let want_stream = body.stream;
         let model = body.model.as_deref().unwrap_or("opus");
-
         let mut resolved =
             resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
-        if let Err(e) = assert_allowed_model(&resolved.model) {
+        if let Err(e) = resolved.assert_allowed() {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
@@ -135,7 +114,39 @@ impl CodexProvider {
                 ),
             );
         }
-        if search::is_standalone_search_request(body) {
+        let standalone_search = search::is_standalone_search_request(&body);
+        let use_responses_lite = !standalone_search
+            && apply_model_lane_for_request(&mut resolved, &body, config::codex_full_lane());
+        let handle_for_account = |ctx, conversation_identity| {
+            self.handle_messages_for_account(
+                &body,
+                ctx,
+                conversation_identity,
+                &resolved,
+                standalone_search,
+                use_responses_lite,
+            )
+        };
+        let response = handle_for_account(ctx.clone(), conversation_identity.clone()).await;
+        if response.extensions().get::<CodexAccountChanged>().is_none() {
+            return response;
+        }
+        handle_for_account(ctx, conversation_identity).await
+    }
+
+    async fn handle_messages_for_account(
+        &self,
+        body: &MessagesRequest,
+        ctx: RequestContext,
+        conversation_identity: Option<ConversationIdentity>,
+        resolved: &ResolvedModel,
+        standalone_search: bool,
+        use_responses_lite: bool,
+    ) -> Response {
+        let message_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+        let want_stream = body.stream;
+        let model = body.model.as_deref().unwrap_or("opus");
+        if standalone_search {
             if let Some(monitor) = ctx.monitor.as_ref() {
                 monitor.model_resolved(&ctx.req_id, &resolved.model);
             }
@@ -214,8 +225,6 @@ impl CodexProvider {
                 ctx.traffic.as_deref(),
             );
         }
-        let use_responses_lite =
-            apply_model_lane_for_request(&mut resolved.model, body, config::codex_full_lane());
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &resolved.model);
         }
@@ -632,7 +641,7 @@ impl Provider for CodexProvider {
         let model = body.model.as_deref().unwrap_or("opus");
         let mut resolved =
             resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
-        if let Err(e) = assert_allowed_model(&resolved.model) {
+        if let Err(e) = resolved.assert_allowed() {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
@@ -643,7 +652,7 @@ impl Provider for CodexProvider {
             );
         }
         let use_responses_lite =
-            apply_model_lane_for_request(&mut resolved.model, &body, config::codex_full_lane());
+            apply_model_lane_for_request(&mut resolved, &body, config::codex_full_lane());
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &resolved.model);
         }

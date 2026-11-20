@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+### Added
+
+- `terra`, `sol`, and `astra` aliases and their `anthropic-` equivalents select
+  the newest listed model in each Codex family. The three short names appear in
+  the intercept model picker.
+
 ## 0.1.1
 
 ### Added

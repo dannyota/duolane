@@ -75,6 +75,7 @@ pub fn valid_slug(slug: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
         && !slug.ends_with("-fast")
         && !slug.ends_with("-ultrafast")
+        && !super::model_allowlist::is_family_alias(slug)
         && !crate::registry::is_anthropic_alias(slug)
 }
 
@@ -214,6 +215,16 @@ mod tests {
             assert!(!valid_slug(slug), "{slug:?}");
         }
         assert!(!valid_slug(&"a".repeat(129)));
+        for alias in [
+            "terra",
+            "sol",
+            "astra",
+            "anthropic-terra",
+            "anthropic-sol",
+            "anthropic-astra",
+        ] {
+            assert!(!valid_slug(alias));
+        }
         assert!(valid_slug("gpt-7.2-codex"));
     }
 
