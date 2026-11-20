@@ -45,7 +45,7 @@ fn write_catalog(dir: &TempDir, extra: &str) {
         dir.path().join("models_cache.json"),
         serde_json::to_vec(&json!({
             "fetched_at":"2020-01-01T00:00:00Z", "client_version":"0.1.0", "etag":"fixture",
-            "models":[entry(extra,true,"list",true), entry("gpt-6.2-sol",true,"list",false), entry("gpt-6.10-sol",true,"list",false), entry("gpt-6.10.0-sol",true,"list",true), entry("gpt-9-sol",true,"hide",false), entry("gpt-test-hidden",true,"hide",false),
+            "models":[entry(extra,true,"list",true), entry("gpt-6.2-sol",true,"list",false), entry("gpt-6.10.0-sol",true,"list",true), entry("gpt-6.10-sol",true,"list",false), entry("gpt-9-sol",true,"hide",false), entry("gpt-test-hidden",true,"hide",false),
                 entry("gpt-test-denied",false,"list",true),
                 entry("gpt-5.4",true,"list",true), entry("gpt-6.1-terra",false,"hide",false),
                 entry("opus",true,"list",false), entry("gpt-test-forged-fast",true,"list",true),
@@ -369,5 +369,27 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         .unwrap()
         .unwrap();
     assert_eq!(body["model"], "gpt-6.1-sol");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"codex":{"fullLane":true}}"#,
+    )
+    .unwrap();
+    for (model, expected_status) in [("sol", 200), ("gpt-6.1-sol", 400), ("opus", 400)] {
+        let response = client
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({"model":model,"messages":[{"role":"user","content":"synthetic"}],"temperature":0.2}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), expected_status, "{model}");
+    }
+    let (headers, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(body["model"], "gpt-6.1-sol");
+    assert_eq!(body["temperature"], 0.2);
+    assert!(!headers.contains_key("x-openai-internal-codex-responses-lite"));
+    assert!(rx.try_recv().is_err());
     upstream_task.abort();
 }

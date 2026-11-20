@@ -2,7 +2,7 @@ use http::StatusCode;
 use serde_json::{Map, Value, json};
 
 use crate::providers::codex::translate::{
-    model_allowlist::{allowed_models_display, resolve_model_request},
+    model_allowlist::{allowed_models_display, is_family_alias, resolve_model_request},
     request::{Effort, resolve_effort_override, to_codex_effort},
 };
 use crate::{config, registry::normalize_incoming_model};
@@ -59,7 +59,8 @@ fn translate_request_with_override(
             Some("model_not_supported"),
         )
     })?;
-    let use_responses_lite = resolved.uses_responses_lite(false);
+    let full_lane = is_family_alias(&normalized) && config::codex_full_lane();
+    let use_responses_lite = resolved.uses_responses_lite(full_lane);
 
     let messages = object
         .get("messages")

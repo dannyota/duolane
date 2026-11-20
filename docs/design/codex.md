@@ -22,8 +22,8 @@ and the reasoning formats. [Security](security.md) owns credentials and limits.
   among listed, API-capable entries. A candidate id is `gpt-<version>-<family>`
   with one to three numeric version components. Missing components count as
   zero. Ties select the id that sorts first. If there is no candidate for that
-  family, use its highest built-in version. Resolution uses the current cache
-  snapshot on each request. Model overrides keep their existing precedence. Tier
+  family, use its highest built-in version. Select once per request and hold the
+  selection across retries. Model overrides keep their existing precedence. Tier
   suffixes are for exact ids, not family aliases.
 
 ## Lanes
@@ -34,7 +34,8 @@ Codex serves two lanes: the full Responses API and Responses Lite.
   catalog entry's Lite field decides, and it defaults to false.
 - `DUOLANE_CODEX_FULL_LANE` moves the built-in Lite models that are known to
   exist on the full lane off Lite. It never overrides the catalog for other ids,
-  because their full-lane availability is unknown.
+  because their full-lane availability is unknown. On Chat Completions, only the
+  Codex family aliases honor this setting.
 - Requests with hosted `web_search` use the full lane, because Lite accepts only
   function and custom tools.
 - The Luna family exists only on Lite. A hosted search request for a Luna model
