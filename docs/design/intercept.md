@@ -239,6 +239,19 @@ files, so two of them never interleave.
     after it began sending the password, it says the password was exposed and
     that `duolane intercept cleanup` replaces it.
 
+## Live results
+
+Checked on 2026-11-20 with Claude Code 2.1.328:
+
+- The owner ran `duolane claude --remote-control`: `/model` listed the Codex
+  rows, and from the phone, `/model gpt-6.2-sol` answered, including with tools.
+- In intercept mode Claude Code first sends the `message-threads` beta to a
+  Codex model; the Codex route refuses it with 400, and Claude Code resends the
+  turn with its full history.
+- `duolane intercept setup` then `cleanup` on a copy of the owner's settings
+  file wrote eight variables and an 11-row `modelPicker`, then restored the file
+  byte for byte and removed the intercept directory.
+
 ## Spike results
 
 Checked on 2026-11-19 with Claude Code 2.1.327 behind an existing intercepting
