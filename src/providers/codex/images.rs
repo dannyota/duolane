@@ -97,11 +97,21 @@ pub struct CodexImagesBackend {
 
 impl CodexImagesBackend {
     pub fn new() -> Result<Self, String> {
+        Self::with_http_client(
+            std::sync::Arc::new(super::client::CodexHttpClient::new()),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
+        )
+    }
+
+    pub(crate) fn with_http_client(
+        client: std::sync::Arc<super::client::CodexHttpClient>,
+        limiter: std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> Result<Self, String> {
         let base_url = validate_image_base_url(&crate::config::codex_images_base_url())?;
         Ok(Self {
-            client: std::sync::Arc::new(super::client::CodexHttpClient::new()),
+            client,
             base_url,
-            limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
+            limiter,
         })
     }
 
@@ -171,6 +181,7 @@ impl CodexImagesBackend {
                 code: Some("upstream_error"),
             });
             copy_safe_image_headers(&headers, response.headers_mut());
+            super::profiles::add_switch_header(&mut response);
             return response;
         }
         let body =

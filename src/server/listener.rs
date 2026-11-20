@@ -97,7 +97,10 @@ pub async fn serve_listeners(
             ),
         ])),
     );
-    let app = app_with_monitor(Arc::new(Registry::with_default_alias()), monitor);
+    let app = tokio::task::spawn_blocking(move || {
+        app_with_monitor(Arc::new(Registry::with_default_alias()), monitor)
+    })
+    .await?;
     let guarded = crate::inbound_auth::guard(app.clone(), policy);
     let Some(intercept) = intercept else {
         serve_connections(listener, guarded, shutdown, HEADER_READ_TIMEOUT).await;

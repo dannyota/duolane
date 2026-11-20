@@ -247,12 +247,7 @@ impl PendingRequest {
                 close_after,
                 acknowledged,
             })
-            .unwrap_or_else(|_| {
-                panic!(
-                    "upstream socket closed before responding to {}",
-                    self.captured.marker()
-                )
-            });
+            .unwrap_or_else(|_| panic!("upstream socket closed before responding"));
         tokio::time::timeout(REQUEST_TIMEOUT, acknowledgement)
             .await
             .expect("mock response acknowledgement timed out")
@@ -403,8 +398,14 @@ impl InstrumentedUpstream {
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string)
         };
-        assert_eq!(header("authorization"), Some(format!("Bearer {access}")));
-        assert_eq!(header("chatgpt-account-id").as_deref(), Some(account));
+        assert!(
+            header("authorization") == Some(format!("Bearer {access}")),
+            "upstream authorization does not match the selected login"
+        );
+        assert!(
+            header("chatgpt-account-id").as_deref() == Some(account),
+            "upstream account does not match the selected login"
+        );
         pending
     }
 
@@ -762,6 +763,7 @@ impl IdentityHeaders {
 
 struct DrainedResponse {
     status: StatusCode,
+    headers: HeaderMap,
     body: String,
 }
 
@@ -793,9 +795,14 @@ struct TestHarness {
 
 impl TestHarness {
     async fn start() -> Self {
+        Self::start_with_config(|_| {}).await
+    }
+
+    async fn start_with_config(setup: impl FnOnce(&Path)) -> Self {
         let upstream = InstrumentedUpstream::spawn().await;
         let config_dir = TempDir::new().unwrap();
         write_codex_auth(config_dir.path());
+        setup(config_dir.path());
         let environment = configure_environment(config_dir.path(), &upstream.base_url);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -834,12 +841,14 @@ impl TestHarness {
                 .expect("proxy response headers timed out")
                 .expect("proxy request failed");
             let status = response.status();
+            let headers = response.headers().clone();
             let body = tokio::time::timeout(REQUEST_TIMEOUT, response.bytes())
                 .await
                 .expect("proxy response body timed out")
                 .expect("proxy response body failed");
             DrainedResponse {
                 status,
+                headers,
                 body: String::from_utf8_lossy(&body).into_owned(),
             }
         })
@@ -2166,6 +2175,240 @@ async fn drained(request: JoinHandle<DrainedResponse>) -> DrainedResponse {
         .await
         .expect("downstream request task timed out")
         .expect("downstream request task failed")
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn codex_auth_use_replays_the_limited_turn_with_the_selected_account() {
+    let _environment_lock = env_lock();
+    let state = TempDir::new().unwrap();
+    let _state_env = EnvGuard::set("DUOLANE_STATE_DIR", state.path());
+    let mut harness = TestHarness::start_with_config(|config_dir| {
+        let backup = config_dir.join("backup");
+        write_codex_login(&backup, "backup-access", "acct_test");
+        std::fs::write(
+            config_dir.join("codex-profiles.json"),
+            serde_json::to_vec(&json!({"backup": backup.join("codex")})).unwrap(),
+        )
+        .unwrap();
+    })
+    .await;
+    let case = unique("profile-switch");
+    let headers = IdentityHeaders::main(&tagged(&case, "session"));
+    let instructions = "Use the project status to answer";
+    let first_prompt = "Check the project status";
+    let portable_reasoning = "Read the status before replying";
+    let tool_schema = json!({
+        "type": "object", "properties": {"file": {"type": "string"}}, "required": ["file"]
+    });
+    let tool_args = r#"{"file":"STATUS"}"#;
+    let tool_result = "Checks passed";
+    let tool_reply = "The project is ready";
+    let failed_prompt = "Summarize the status";
+    let first_response_id = tagged(&case, "first-response");
+    let tool_response_id = tagged(&case, "tool-response");
+    let call_id = tagged(&case, "tool-call");
+    let encrypted = tagged(&case, "default-account-reasoning");
+    let request_body = |messages| {
+        let mut body = messages_body(false, messages);
+        body["system"] = json!(instructions);
+        body["output_config"] = json!({"effort": "high"});
+        body["tools"] = json!([{
+            "name": "ReadStatus",
+            "input_schema": tool_schema
+        }]);
+        body
+    };
+
+    let reasoning_and_tool_events = |response_id: &str| {
+        vec![
+            json!({"type": "response.output_item.added", "output_index": 0,
+                "item": {"type": "reasoning", "id": "rs_default"}}),
+            json!({"type": "response.reasoning_summary_text.delta", "output_index": 0,
+                "delta": portable_reasoning}),
+            json!({"type": "response.output_item.done", "output_index": 0,
+                "item": {"type": "reasoning", "id": "rs_default", "encrypted_content": encrypted}}),
+            json!({"type": "response.output_item.added", "output_index": 1,
+                "item": {"type": "function_call", "id": "fc_first", "call_id": call_id, "name": "ReadStatus"}}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 1, "delta": tool_args}),
+            json!({"type": "response.output_item.done", "output_index": 1,
+                "item": {"type": "function_call", "id": "fc_first", "call_id": call_id,
+                    "name": "ReadStatus", "arguments": tool_args}}),
+            json!({"type": "response.completed", "response": {
+                "id": response_id, "usage": {"input_tokens": 5, "output_tokens": 2}}}),
+        ]
+    };
+
+    let first = harness.start_request(
+        request_body(vec![message("user", first_prompt)]),
+        headers.clone(),
+    );
+    let first_capture = harness
+        .upstream
+        .next_request_for_login("test-access", "acct_test")
+        .await
+        .respond_with_events(reasoning_and_tool_events(&first_response_id))
+        .await;
+    let first = drained(first).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let first: Value = serde_json::from_str(&first.body).unwrap();
+    assert!(
+        first["content"][0]["signature"]
+            .as_str()
+            .is_some_and(|signature| signature.starts_with("duolane:codex:v1:")),
+        "the original account did not sign the reasoning"
+    );
+    let mut history = vec![
+        message("user", first_prompt),
+        json!({"role": "assistant", "content": first["content"]}),
+        json!({"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": call_id, "content": tool_result
+        }]}),
+    ];
+    let tool_turn = harness.start_request(request_body(history.clone()), headers.clone());
+    let tool_capture = harness
+        .upstream
+        .next_request_for_login("test-access", "acct_test")
+        .await
+        .respond(&tool_response_id, tool_reply, false)
+        .await;
+    assert!(
+        tool_capture.previous_response_id() == Some(first_response_id.as_str()),
+        "the original account did not continue the tool turn"
+    );
+    let tool_turn = drained(tool_turn).await;
+    assert_eq!(tool_turn.status, StatusCode::OK);
+    assert!(
+        tool_turn.body.contains(tool_reply),
+        "the tool turn did not complete"
+    );
+    history.extend([
+        message("assistant", tool_reply),
+        message("user", failed_prompt),
+    ]);
+    let history = request_body(history);
+
+    let limited = harness.start_request(history.clone(), headers.clone());
+    let limited_capture = harness
+        .upstream
+        .next_request_for_login("test-access", "acct_test")
+        .await
+        .respond_with_events(vec![json!({
+            "type": "error",
+            "status_code": 429,
+            "error": {"type": "usage_limit_reached", "message": "The usage limit has been reached",
+                "resets_at": 1_900_000_000u64}
+        })])
+        .await;
+    assert!(
+        limited_capture.previous_response_id() == Some(tool_response_id.as_str()),
+        "the original account did not use its continuation"
+    );
+    let limited = drained(limited).await;
+    assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.headers["x-should-retry"], "false");
+    assert_eq!(
+        limited.headers["anthropic-ratelimit-unified-reset"],
+        "1900000000"
+    );
+
+    let in_flight = harness.start_request(
+        request_body(vec![message("user", first_prompt)]),
+        IdentityHeaders::main(&tagged(&case, "in-flight-session")),
+    );
+    let in_flight_pending = harness
+        .upstream
+        .next_request_for_login("test-access", "acct_test")
+        .await;
+
+    let config_dir = harness._config_dir.path().to_path_buf();
+    let state_dir = state.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let use_profile = |profile| {
+            std::process::Command::new(env!("CARGO_BIN_EXE_duolane"))
+                .args(["codex", "auth", "use", profile])
+                .env_clear()
+                .env("HOME", &config_dir)
+                .env("USERPROFILE", &config_dir)
+                .env("DUOLANE_CONFIG_DIR", &config_dir)
+                .env("DUOLANE_STATE_DIR", &state_dir)
+                .env(
+                    "DUOLANE_CODEX_AUTH_FILE",
+                    config_dir.join("codex/auth.json"),
+                )
+                .output()
+                .expect("run codex auth use")
+                .status
+        };
+        assert!(use_profile("backup").success(), "select the backup profile");
+        assert!(
+            !use_profile("missing").success(),
+            "reject an unknown profile"
+        );
+    })
+    .await
+    .expect("finish codex auth use");
+    assert!(
+        limited.body.contains("duolane codex auth use"),
+        "the usage limit omitted the profile-switch command"
+    );
+
+    let retry_reply = "Ready to proceed";
+    let retry = harness.start_request(history, headers);
+    let rebuilt = harness
+        .upstream
+        .next_request_for_login("backup-access", "acct_test")
+        .await
+        .respond(&tagged(&case, "backup-response"), retry_reply, false)
+        .await;
+    let retry = drained(retry).await;
+    assert_eq!(retry.status, StatusCode::OK);
+    assert!(
+        retry.body.contains(retry_reply),
+        "the retried turn did not complete"
+    );
+    assert_ne!(rebuilt.socket_ordinal, first_capture.socket_ordinal);
+    assert!(rebuilt.previous_response_id().is_none());
+    for capture in [&first_capture, &tool_capture, &limited_capture, &rebuilt] {
+        assert!(
+            capture.body["model"] == "gpt-5.6-sol",
+            "concrete model ID changed"
+        );
+        assert!(
+            capture.body["reasoning"]["effort"] == "high",
+            "explicit effort changed"
+        );
+    }
+    assert!(
+        rebuilt.body["input"]
+            == json!([
+                {"type": "additional_tools", "role": "developer", "tools": [{
+                    "type": "function", "name": "ReadStatus", "parameters": tool_schema, "strict": false
+                }]},
+                upstream_item("developer", instructions),
+                upstream_item("user", first_prompt),
+                upstream_item("assistant", &format!("<previous_reasoning>\n{portable_reasoning}\n</previous_reasoning>")),
+                {"type": "function_call", "call_id": call_id, "name": "ReadStatus", "arguments": tool_args},
+                {"type": "function_call_output", "call_id": call_id, "output": tool_result},
+                upstream_item("assistant", tool_reply),
+                upstream_item("user", failed_prompt)
+            ]),
+        "the backup account did not receive the full portable history"
+    );
+    in_flight_pending
+        .respond_with_events(reasoning_and_tool_events(&tagged(
+            &case,
+            "in-flight-response",
+        )))
+        .await;
+    let in_flight = drained(in_flight).await;
+    assert_eq!(in_flight.status, StatusCode::OK);
+    let in_flight: Value = serde_json::from_str(&in_flight.body).unwrap();
+    assert!(
+        in_flight["content"][0]["signature"] == first["content"][0]["signature"],
+        "the in-flight request must finish with its original reasoning signature"
+    );
+    harness.shutdown().await;
 }
 
 #[allow(clippy::await_holding_lock)]

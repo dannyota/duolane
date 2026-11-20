@@ -1,6 +1,6 @@
 pub mod auth;
 pub mod chat_completions;
-mod cli;
+pub mod cli;
 pub mod client;
 mod client_buffered;
 mod client_capture;
@@ -22,6 +22,7 @@ pub mod images;
 mod live_completion;
 mod live_response;
 pub mod native;
+pub(crate) mod profiles;
 #[cfg(test)]
 mod provider_test_support;
 mod request_state;
@@ -55,7 +56,6 @@ use crate::provider::{CliHandlers, Provider, RequestContext};
 use crate::request_identity::ConversationIdentity;
 use crate::retry::{compute_backoff_delay, sleep};
 
-use self::auth::token_store::file_store;
 use self::client::CodexHttpClient;
 use self::compaction::{
     CompactionError, abort_compaction_attempt, apply_compaction_replay, begin_compaction,
@@ -90,9 +90,11 @@ impl Default for CodexProvider {
 
 impl CodexProvider {
     pub fn new() -> Self {
-        Self {
-            client: Arc::new(CodexHttpClient::new()),
-        }
+        Self::with_client(Arc::new(CodexHttpClient::new()))
+    }
+
+    pub(crate) fn with_client(client: Arc<CodexHttpClient>) -> Self {
+        Self { client }
     }
 }
 
@@ -598,12 +600,7 @@ impl Provider for CodexProvider {
     }
 
     fn missing_login_hint(&self) -> Option<&'static str> {
-        file_store()
-            .load_auth()
-            .ok()
-            .flatten()
-            .is_none()
-            .then_some("run `codex login`")
+        self.client.auth_manager().missing_login_hint()
     }
 
     fn supported_models(&self) -> Vec<String> {

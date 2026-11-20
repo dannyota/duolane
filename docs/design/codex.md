@@ -18,6 +18,42 @@ and the reasoning formats. [Security](security.md) owns credentials and limits.
 - Each Claude alias has an ordered list of Codex targets. The first one the
   account's catalog lists wins, and the first entry applies without a catalog.
 
+## Account profiles
+
+An optional `codex-profiles.json` in the duolane config directory maps names to
+absolute Codex home paths. It holds at most 16 profiles and 16 KiB. Each home
+has its own `auth.json` and optional `models_cache.json`. The implicit `default`
+profile uses the usual Codex home and auth-file resolution. Profile names are at
+most 32 ASCII letters, digits, hyphens, or underscores, start with a letter or
+digit, and reserve `default`.
+
+The server loads profile definitions at startup.
+`duolane codex auth use <profile>` checks for a saved login with an account ID
+in a named profile, then atomically writes the selection and a fingerprint of
+the profile definitions to `codex-profile` in the state directory. The selection
+is shared by instances using that directory. A running server checks the
+fingerprint against the definitions it loaded. Restart after editing the
+definitions. `duolane codex auth list` marks the selected profile and
+`auth status` shows its login status. A missing selection means `default`. An
+invalid selection fails explicitly on Codex routes and model discovery. Claude
+passthrough and liveness remain available. An invalid command leaves the
+previous selection in place.
+
+Each request picks the profile once. Routing and model discovery use its
+catalog. Its auth store stays bound through translation, sending, retries,
+refresh, and streaming. Requests already in flight finish on their original
+profile. Usage limits return the normal 429 with a profile-switch hint. A user
+can switch profiles and resend the failed turn in the same conversation.
+
+With profiles configured, Codex aliases resolve to their first built-in target
+across all profiles. Use a concrete model ID to choose a different target. The
+switch keeps the model ID and explicit reasoning effort. Access errors from the
+selected account surface to the user. The first Claude Messages request for a
+different account rebuilds input from the full history provided by the client.
+It uses portable reasoning text. Encrypted reasoning, continuation IDs, and
+server compaction state stay with the old account. OpenAI-compatible clients
+supply their own history when they change accounts.
+
 ## Lanes
 
 Codex serves two lanes: the full Responses API and Responses Lite.

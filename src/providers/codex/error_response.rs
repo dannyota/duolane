@@ -66,7 +66,7 @@ pub(super) fn usage_limit_response(limit: &events::CodexUsageLimit) -> Response 
         json_error(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limit_error",
-            &limit.message,
+            profiles::usage_limit_message(&limit.message),
         ),
     )
         .into_response()

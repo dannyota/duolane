@@ -118,6 +118,49 @@ The intercept certificate lasts 90 days. When fewer than 14 days remain,
 `/model <codex model>` also saves that model as the default for new sessions.
 Pick a Claude model before you run Claude Code without duolane.
 
+## Switching accounts
+
+To switch Claude accounts in a running Claude Code session, use `/login`. Claude
+Code supplies the login for the next request.
+
+To switch Codex accounts, sign in once per Codex home with the official CLI. Set
+`cli_auth_credentials_store = "file"` in each home's `config.toml` so duolane
+can find the sign-in there.
+
+```bash
+mkdir -p "$HOME/.codex-work"
+CODEX_HOME="$HOME/.codex-work" codex login
+```
+
+Add the named home in `codex-profiles.json` alongside duolane's `config.json`.
+Use an absolute path:
+
+```json
+{
+  "work": "/home/you/.codex-work"
+}
+```
+
+Start duolane with these definitions, then change the active profile from
+another terminal:
+
+```bash
+duolane codex auth list
+duolane codex auth use work
+duolane codex auth status
+duolane codex auth use default
+```
+
+The change applies to new requests from every session using that duolane state
+directory. After a quota error, select another profile and resend the failed
+turn in the same Claude Code session. Keep the same concrete Codex model ID and
+reasoning effort. The new account must have access to that model. The first turn
+uses the history Claude Code sends and may take longer while its prompt cache
+warms up.
+
+Restart duolane after editing the profile definitions. Switching between
+configured profiles takes effect while duolane runs.
+
 ## Commands
 
 | Command                     | Purpose                                       |
@@ -125,7 +168,9 @@ Pick a Claude model before you run Claude Code without duolane.
 | `duolane serve`             | Start the proxy and its terminal dashboard    |
 | `duolane monitor`           | Attach a dashboard to a running proxy         |
 | `duolane models`            | List the models you can use                   |
-| `duolane codex auth status` | Check the Codex login                         |
+| `duolane codex auth status` | Check the selected Codex login                |
+| `duolane codex auth list`   | List Codex profiles and the active choice     |
+| `duolane codex auth use`    | Select a Codex profile for new requests       |
 | `duolane claude [args]`     | Start Claude Code through the intercept proxy |
 | `duolane intercept setup`   | Route every Claude Code session through it    |
 | `duolane intercept cleanup` | Remove the intercept settings and files       |

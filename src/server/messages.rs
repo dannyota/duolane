@@ -11,6 +11,7 @@ use crate::{
     monitor::EndpointKind,
     project,
     provider::RequestContext,
+    providers::codex::translate::model_catalog::invalid_selection,
     registry::normalize_incoming_model,
     request_identity::ConversationIdentity,
     session::{self},
@@ -173,14 +174,13 @@ async fn dispatch_request(
     let model = match body.model.as_deref() {
         Some(model) => model,
         None => {
-            let response = json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                format!(
-                    "Missing \"model\" in request body. {}",
-                    state.registry.unknown_model_message().await
-                ),
-            );
+            let missing = "Missing \"model\" in request body.";
+            let message = if invalid_selection() {
+                missing.to_string()
+            } else {
+                format!("{missing} {}", state.registry.unknown_model_message().await)
+            };
+            let response = json_error(StatusCode::BAD_REQUEST, "invalid_request_error", message);
             log_request_completed(
                 &log,
                 RequestLogContext {
@@ -250,6 +250,20 @@ async fn dispatch_request(
         original_provider
     };
 
+    if invalid_selection()
+        && provider
+            .as_ref()
+            .is_none_or(|selected| selected.name() == "codex")
+    {
+        let response = super::profile::invalid_selection_response();
+        monitor_failed(
+            state.monitor.as_ref(),
+            &req_id,
+            Some(response.status()),
+            crate::providers::codex::profiles::SELECTION_ERROR,
+        );
+        return with_request_id(response, &req_id);
+    }
     let provider = match provider {
         Some(provider) => provider,
         None => {

@@ -4,6 +4,7 @@ use crate::{
     monitor::MonitorHandle,
     providers::codex::{
         chat_completions::ChatCompletionsBackend,
+        client::CodexHttpClient,
         images::{CodexImagesBackend, MAX_EDIT_REQUEST_BYTES},
         native::CodexNativeBackend,
         transcription::{CodexTranscriptionBackend, MAX_TRANSCRIPTION_REQUEST_BYTES},
@@ -21,6 +22,7 @@ use axum::{
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 mod auto_review;
 mod error_capture;
@@ -28,6 +30,7 @@ mod images;
 mod listener;
 mod messages;
 mod openai;
+mod profile;
 mod request_monitor;
 mod transcription;
 
@@ -91,14 +94,25 @@ pub fn app_with_features(
     monitor: Option<MonitorHandle>,
     features: AppFeatures,
 ) -> Router {
+    profile::app(registry, monitor, features)
+}
+
+fn app_for_profile(
+    registry: Arc<Registry>,
+    monitor: Option<MonitorHandle>,
+    features: AppFeatures,
+    client: Arc<CodexHttpClient>,
+    image_limiter: Arc<Semaphore>,
+    transcription_limiter: Arc<Semaphore>,
+) -> Router {
     let native_responses = features
         .responses_api
-        .then(|| Arc::new(CodexNativeBackend::new()));
+        .then(|| Arc::new(CodexNativeBackend::with_http_client(client.clone())));
     let chat_completions = features
         .responses_api
-        .then(|| Arc::new(ChatCompletionsBackend::new()));
+        .then(|| Arc::new(ChatCompletionsBackend::with_http_client(client.clone())));
     let images = if features.images_api {
-        match CodexImagesBackend::new() {
+        match CodexImagesBackend::with_http_client(client.clone(), image_limiter) {
             Ok(backend) => Some(Arc::new(backend)),
             Err(error) => {
                 create_logger("server").warn(
@@ -111,9 +125,12 @@ pub fn app_with_features(
     } else {
         None
     };
-    let transcriptions = features
-        .transcriptions_api
-        .then(|| Arc::new(CodexTranscriptionBackend::new()));
+    let transcriptions = features.transcriptions_api.then(|| {
+        Arc::new(CodexTranscriptionBackend::with_http_client(
+            client,
+            transcription_limiter,
+        ))
+    });
     let state = Arc::new(AppState {
         registry,
         monitor,

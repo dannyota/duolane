@@ -1,4 +1,10 @@
-use crate::{config::AliasProvider, provider::Provider};
+use crate::{
+    config::AliasProvider,
+    provider::Provider,
+    providers::codex::{
+        CodexProvider, client::CodexHttpClient, translate::model_catalog::REQUEST_CATALOG,
+    },
+};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -38,10 +44,6 @@ impl Registry {
                 .map(|alias| (*alias).to_string())
                 .collect(),
         );
-        models.insert(
-            "codex".into(),
-            crate::providers::codex::translate::model_allowlist::listed_models(),
-        );
         let mut handlers: BTreeMap<String, Arc<dyn Provider>> = BTreeMap::new();
         handlers.insert(
             "anthropic".into(),
@@ -56,6 +58,21 @@ impl Registry {
             alias_provider,
             dynamic_codex: true,
             models,
+            handlers,
+        }
+    }
+
+    pub(crate) fn uses_default_codex(&self) -> bool {
+        self.dynamic_codex
+    }
+
+    pub(crate) fn with_codex_client(&self, client: Arc<CodexHttpClient>) -> Self {
+        let mut handlers = self.handlers.clone();
+        handlers.insert("codex".into(), Arc::new(CodexProvider::with_client(client)));
+        Self {
+            alias_provider: self.alias_provider,
+            dynamic_codex: self.dynamic_codex,
+            models: self.models.clone(),
             handlers,
         }
     }
@@ -174,8 +191,15 @@ impl Registry {
 
     async fn unknown_model_message_off_thread(self: &Arc<Self>, codex_only: bool) -> String {
         let registry = self.clone();
+        let catalog = REQUEST_CATALOG.try_with(Clone::clone).ok();
         tokio::task::spawn_blocking(move || {
-            registry.unknown_model_message_for(|provider| !codex_only || provider == "codex")
+            let message = || {
+                registry.unknown_model_message_for(|provider| !codex_only || provider == "codex")
+            };
+            match catalog {
+                Some(catalog) => REQUEST_CATALOG.sync_scope(catalog, message),
+                None => message(),
+            }
         })
         .await
         .unwrap_or_default()

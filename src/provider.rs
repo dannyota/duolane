@@ -18,6 +18,10 @@ pub enum AuthCommand {
     Device,
     #[command(about = "Show the current authentication status")]
     Status,
+    #[command(about = "List configured Codex profiles and mark the active one")]
+    List,
+    #[command(about = "Select a Codex profile for new requests")]
+    Use { profile: String },
     #[command(about = "Delete stored authentication credentials")]
     Logout,
 }
