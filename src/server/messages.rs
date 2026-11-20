@@ -333,15 +333,15 @@ async fn dispatch_request(
             response,
         )
         .await;
-        monitor_failed(
-            state.monitor.as_ref(),
-            &req_id,
-            Some(response.status()),
-            details
-                .as_ref()
-                .map(|details| details.message.as_str())
-                .unwrap_or(message),
-        );
+        if let Some(monitor) = state.monitor.as_ref() {
+            monitor.request_retry_requested(
+                &req_id,
+                details
+                    .as_ref()
+                    .map(|details| details.message.as_str())
+                    .unwrap_or(message),
+            );
+        }
         return with_request_id(response, &req_id);
     }
 

@@ -203,6 +203,7 @@ pub struct CompletedRequest {
     pub status: RequestStatus,
     pub http_status: Option<u16>,
     pub latency: Duration,
+    pub retry_requested: bool,
     pub streamed_bytes: u64,
     pub stream_chunks: u64,
     pub input_tokens: Option<u64>,
@@ -469,6 +470,16 @@ impl MonitorHandle {
             http_status,
             error: bounded_text(error),
         });
+    }
+
+    pub(crate) fn request_retry_requested(
+        &self,
+        request_id: impl Into<String>,
+        error: impl Into<String>,
+    ) {
+        if let Ok(mut store) = self.store.lock() {
+            store.request_retry_requested(bounded_text(request_id), bounded_text(error));
+        }
     }
 
     pub fn request_abandoned(&self, request_id: impl Into<String>, error: impl Into<String>) {
@@ -777,6 +788,7 @@ mod tests {
             generation_duration,
             status: RequestStatus::Completed,
             http_status: Some(200),
+            retry_requested: false,
             latency,
             streamed_bytes: 0,
             stream_chunks: 0,

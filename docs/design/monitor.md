@@ -16,7 +16,18 @@ overlays are visible. No pointer support for Active requests.
 Read hit targets from the visible table rows of the last rendered frame,
 including the scroll offset and the Events filter. Enable mouse capture only
 while the monitor owns the terminal, and restore the terminal on setup failure
-and exit. The monitor snapshot protocol does not change.
+and exit. Mouse input does not change the snapshot protocol.
 
-Event classification is a separate follow-up. The mouse change does not alter
-which rows Events shows.
+## Events
+
+The Events table shows the latest 12 abnormal completions, excluding expected
+thread retries. Its title shows `Retry requested: N` when the current recent
+request snapshot contains such retries. They remain clickable in Recent requests
+with their original HTTP 400 and detail message. The count reports requests to
+retry, not completed retries. Failure totals do not change.
+
+Mark a retry only where the proxy generates the `message-threads` capability
+rejection on the Codex route. Do not classify retries by matching upstream error
+text. Carry the marker as a default-false field on completed monitor snapshots
+so older snapshots still render, and keep the monitor protocol version, HTTP
+response, and request routing unchanged.

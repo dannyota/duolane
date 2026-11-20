@@ -223,6 +223,8 @@ pub struct CompletedSnapshot {
     pub traffic_capture_path: Option<PathBuf>,
     pub finished_at: SystemTime,
     pub http_status: Option<u16>,
+    #[serde(default)]
+    pub retry_requested: bool,
     pub latency: Duration,
     throughput: Throughput,
 }
@@ -258,6 +260,7 @@ impl From<CompletedRequest> for CompletedSnapshot {
             traffic_capture_path: value.traffic_capture_path,
             finished_at: value.finished_at,
             http_status: value.http_status,
+            retry_requested: value.retry_requested,
             latency: value.latency,
             throughput,
         }
@@ -353,6 +356,28 @@ mod tests {
         assert_eq!(decoded.active[0].rate(), snapshot.active[0].rate());
         assert_eq!(decoded.sessions[0].rate(), snapshot.sessions[0].rate());
         assert_eq!(decoded.recent[0].http_status, Some(200));
+    }
+
+    #[test]
+    fn legacy_completed_snapshot_defaults_retry_marker_to_false() {
+        let monitor = MonitorHandle::default();
+        monitor.request_started("done", None, None, EndpointKind::Messages);
+        monitor.request_failed(
+            "done",
+            Some(400),
+            "capability_rejected: beta_header:message-threads-2026-08-12",
+        );
+        let snapshot: MonitorSnapshot = monitor.snapshot().into();
+        let mut legacy = serde_json::to_value(snapshot).unwrap();
+        legacy["recent"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("retry_requested");
+        let decoded: MonitorSnapshot = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap()["recent"][0]["retry_requested"],
+            false
+        );
     }
 
     #[test]

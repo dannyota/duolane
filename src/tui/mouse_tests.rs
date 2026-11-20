@@ -137,6 +137,33 @@ fn clicking_a_filtered_event_keeps_its_raw_request_identity_until_eviction() {
 }
 
 #[test]
+fn retry_events_do_not_hide_a_lookalike_failure_or_change_click_identity() {
+    let mut state: MonitorSnapshot = mock_state().into();
+    let mut failure = state.recent[0].clone();
+    failure.request_id = "actual-failure".into();
+    failure.status = RequestStatus::Failed;
+    failure.http_status = Some(400);
+    failure.error = Some("capability_rejected: beta_header:message-threads-2026-08-12".into());
+    let mut retry = serde_json::to_value(&failure).unwrap();
+    retry["retry_requested"] = true.into();
+    state.recent = (0..12)
+        .map(|index| {
+            retry["request_id"] = format!("retry-{index}").into();
+            serde_json::from_value(retry.clone()).unwrap()
+        })
+        .collect();
+    state.recent.push(failure);
+    let mut app = app();
+    click(&mut app, &state, |screen| {
+        let text = buffer_text(screen);
+        assert!(text.contains("Retry requested: 12"));
+        left_click(screen, "capability_rejected")
+    });
+    assert_eq!(app.recent_selected, 12);
+    assert!(detail_text(&mut app, &state).contains("actual-failure"));
+}
+
+#[test]
 fn only_left_button_down_on_an_uncovered_data_row_opens_detail() {
     let mut state: MonitorSnapshot = mock_state().into();
     state.sessions.truncate(1);

@@ -442,6 +442,11 @@ async fn assert_message_thread_rejected(body: Value) {
     assert_eq!(state.recent.len(), 1);
     assert_eq!(state.recent[0].status, RequestStatus::Failed);
     assert_eq!(state.recent[0].http_status, Some(400));
+    let snapshot: duolane::monitor::snapshot::MonitorSnapshot = state.clone().into();
+    assert_eq!(
+        serde_json::to_value(&snapshot.recent[0]).unwrap()["retry_requested"],
+        true
+    );
     assert!(
         state.recent[0]
             .error
