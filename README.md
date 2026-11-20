@@ -8,10 +8,12 @@ ChatGPT subscription in the same session. It picks the backend for each request
 from the model name, so you can keep one model on each plan and switch between
 them mid-conversation.
 
-This is a personal, unofficial project, not affiliated with or endorsed by
-Anthropic or OpenAI. It has no release yet and has not been checked against live
-accounts, so run it only on a machine you trust. Expect breaking changes until
-`1.0.0`.
+This is an unofficial open-source project, not affiliated with or endorsed by
+Anthropic or OpenAI. Run it only on a machine you trust. Expect breaking changes
+until `1.0.0`.
+
+Bug reports, documentation improvements, and focused pull requests are welcome.
+See [Contributing](CONTRIBUTING.md) to get started.
 
 ## Requirements
 

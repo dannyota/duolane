@@ -1,8 +1,12 @@
 # Contributing
 
-Bug reports and focused fixes are welcome. Read the
-[architecture](docs/design/architecture.md) and
-[security design](docs/design/security.md) first.
+Bug reports, documentation improvements, and focused fixes are welcome. Open an
+issue first to discuss a larger change. Report vulnerabilities privately as
+explained in [SECURITY.md](SECURITY.md).
+
+Fork the repository and create a branch from `main`. Before changing behavior,
+read the [architecture](docs/design/architecture.md) and
+[security design](docs/design/security.md).
 
 ## Setup
 
@@ -25,7 +29,15 @@ make hooks-install
 4. Run `make check`, which runs every check that works offline. `make help`
    lists each target. A change to `Cargo.lock` also needs `make deny` and
    `make crate-age`.
+5. Open a pull request against `main` with a short description and the checks
+   you ran.
 
 Code has no comments, as the
 [engineering standard](docs/standards/engineering.md#code-comments) explains.
 Contributions are licensed under the MIT License.
+
+## Optional Claude Code agents
+
+The role definitions in [`.claude/agents/`](.claude/agents/) are optional. They
+require a Claude Code setup that can route the specified GPT model IDs. You do
+not need Claude Code or these agents to contribute.
