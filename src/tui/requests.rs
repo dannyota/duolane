@@ -9,6 +9,7 @@ use super::layout::{
     LayoutTier, MODEL_MEDIUM_WIDTH, MODEL_NARROW_WIDTH, MODEL_WIDE_WIDTH, PROJECT_MEDIUM_WIDTH,
     PROJECT_WIDE_WIDTH, PROVIDER_WIDTH, RATE_WIDTH, STATUS_WIDTH, TIME_WIDTH, TOKEN_WIDTH,
 };
+use super::mouse::{VisibleRows, render_clickable_table};
 use super::{PANEL_BG, SELECTED_BG};
 use crate::monitor::snapshot::{ActiveSnapshot, CompletedSnapshot};
 use ratatui::layout::{Alignment, Rect};
@@ -238,7 +239,7 @@ pub(super) fn render_recent(
     recent: &[CompletedSnapshot],
     selected: usize,
     focused: bool,
-) {
+) -> VisibleRows {
     if recent.is_empty() {
         render_empty_table_state(
             frame,
@@ -247,7 +248,7 @@ pub(super) fn render_recent(
             focused,
             "No recent requests",
         );
-        return;
+        return VisibleRows::default();
     }
 
     let columns = recent_columns(LayoutTier::for_outer_width(area.width));
@@ -289,11 +290,16 @@ pub(super) fn render_recent(
             Style::default().bg(PANEL_BG)
         })
     });
-    let table = Table::new(rows, widths.clone())
-        .header(column_header(&columns))
-        .block(panel("Recent requests", focused));
     let mut table_state = TableState::default().with_selected(Some(selected));
-    frame.render_stateful_widget(table, area, &mut table_state);
+    render_clickable_table(
+        frame,
+        area,
+        Table::new(rows, widths.clone()),
+        panel("Recent requests", focused),
+        column_header(&columns),
+        &mut table_state,
+        0..recent.len(),
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -353,10 +359,11 @@ pub(super) fn render_events(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     recent: &[CompletedSnapshot],
-) {
+) -> VisibleRows {
     let events = recent
         .iter()
-        .filter(|request| {
+        .enumerate()
+        .filter(|(_, request)| {
             request.status == crate::monitor::RequestStatus::Failed
                 || request.http_status.is_some_and(|status| status >= 400)
                 || request.error.is_some()
@@ -365,12 +372,12 @@ pub(super) fn render_events(
         .collect::<Vec<_>>();
     if events.is_empty() {
         render_empty_table_state(frame, area, "Events", false, "No events");
-        return;
+        return VisibleRows::default();
     }
 
     let columns = event_columns(LayoutTier::for_outer_width(area.width));
     let widths = column_constraints(&columns);
-    let rows = events.iter().map(|request| {
+    let rows = events.iter().map(|(_, request)| {
         let message = request
             .error
             .as_deref()
@@ -398,10 +405,15 @@ pub(super) fn render_events(
             .collect::<Vec<_>>();
         Row::new(cells).style(Style::default().bg(PANEL_BG))
     });
-    let table = Table::new(rows, widths.clone())
-        .header(column_header(&columns))
-        .block(panel("Events", false));
-    frame.render_widget(table, area);
+    render_clickable_table(
+        frame,
+        area,
+        Table::new(rows, widths.clone()),
+        panel("Events", false),
+        column_header(&columns),
+        &mut TableState::default(),
+        events.iter().map(|(index, _)| *index),
+    )
 }
 
 #[cfg(test)]

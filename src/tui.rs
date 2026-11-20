@@ -1,12 +1,16 @@
 mod cells;
 mod detail;
 mod layout;
+mod mouse;
+#[cfg(test)]
+mod mouse_tests;
 mod overlay;
 mod requests;
 mod sessions;
 
 use cells::format_duration;
 use detail::{render_request_detail, render_session_detail};
+use mouse::{MouseTarget, MouseTargets, VisibleRows};
 use overlay::{
     render_help_overlay, render_setup_overlay, render_shutdown_confirmation,
     render_shutdown_overlay,
@@ -21,7 +25,10 @@ use std::{
 };
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -139,8 +146,7 @@ fn run_monitor_loop(
     mut snapshot: impl FnMut() -> SnapshotUpdate,
     config: UiSession,
 ) -> Result<MonitorExit, anyhow::Error> {
-    let mut terminal = setup_terminal()?;
-    let _guard = TerminalGuard;
+    let (_guard, mut terminal) = setup_terminal()?;
     let mut app = MonitorApp {
         listen_url: config.listen_url,
         setup_text: config.setup_text,
@@ -160,7 +166,9 @@ fn run_monitor_loop(
     if run_result.is_err() {
         app.begin_shutdown();
         let state = snapshot();
-        let _ = terminal.draw(|frame| render(frame, &mut app, state.snapshot()));
+        let _ = terminal.draw(|frame| {
+            render(frame, &mut app, state.snapshot());
+        });
         app.wait_for_shutdown_completion();
     }
     let cursor_result = terminal.show_cursor();
@@ -179,8 +187,9 @@ fn run_monitor_events(
         let state = update.snapshot();
         app.clamp_selection(state.sessions.len(), state.recent.len());
         app.tick = app.tick.wrapping_add(1);
+        let mut targets = MouseTargets::default();
         terminal.draw(|frame| {
-            render(frame, app, state);
+            targets = render(frame, app, state);
             if let Some(error) = update.connection_error() {
                 let area = frame.area();
                 let banner = Rect::new(
@@ -240,10 +249,10 @@ fn run_monitor_events(
                     KeyCode::Enter => {
                         app.detail = match app.focus {
                             FocusPane::Sessions if !state.sessions.is_empty() => {
-                                Some(DetailView::Session)
+                                Some(DetailView::Session(DetailSelection::Keyboard))
                             }
                             FocusPane::Recent if !state.recent.is_empty() => {
-                                Some(DetailView::Request)
+                                Some(DetailView::Request(DetailSelection::Keyboard))
                             }
                             _ => None,
                         }
@@ -259,7 +268,7 @@ fn run_monitor_events(
                     }
                     _ => {}
                 },
-                Event::Resize(_, _) => {}
+                Event::Mouse(mouse) => app.handle_mouse(mouse, state, &targets),
                 _ => {}
             }
         }
@@ -281,10 +290,32 @@ impl FocusPane {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum DetailView {
-    Session,
-    Request,
+    Session(DetailSelection<Option<String>>),
+    Request(DetailSelection<String>),
+}
+
+enum DetailSelection<T> {
+    Keyboard,
+    Pinned(T),
+}
+
+impl<T: PartialEq> DetailSelection<T> {
+    fn index<'a>(
+        &'a self,
+        keyboard_index: usize,
+        mut identities: impl ExactSizeIterator<Item = &'a T>,
+    ) -> usize {
+        match self {
+            Self::Keyboard => keyboard_index,
+            Self::Pinned(identity) => {
+                let unavailable = identities.len();
+                identities
+                    .position(|candidate| candidate == identity)
+                    .unwrap_or(unavailable)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -310,6 +341,37 @@ struct MonitorApp {
 }
 
 impl MonitorApp {
+    fn handle_mouse(&mut self, mouse: MouseEvent, state: &MonitorSnapshot, targets: &MouseTargets) {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left)
+            || self.show_help
+            || self.show_setup
+            || self.phase != MonitorPhase::Running
+        {
+            return;
+        }
+        match targets.hit(mouse.column, mouse.row) {
+            Some(MouseTarget::Session(index)) => {
+                if let Some(session) = state.sessions.get(index) {
+                    self.focus = FocusPane::Sessions;
+                    self.selected = index;
+                    self.detail = Some(DetailView::Session(DetailSelection::Pinned(
+                        session.session_id.clone(),
+                    )));
+                }
+            }
+            Some(MouseTarget::Request(index)) => {
+                if let Some(request) = state.recent.get(index) {
+                    self.focus = FocusPane::Recent;
+                    self.recent_selected = index;
+                    self.detail = Some(DetailView::Request(DetailSelection::Pinned(
+                        request.request_id.clone(),
+                    )));
+                }
+            }
+            None => {}
+        }
+    }
+
     fn is_attached(&self) -> bool {
         self.shutdown.is_none() && self.shutdown_complete.is_none()
     }
@@ -413,24 +475,39 @@ impl Drop for MonitorApp {
     }
 }
 
-struct TerminalGuard;
+struct TerminalGuard {
+    mouse_capture_attempted: bool,
+}
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
+        if self.mouse_capture_attempted {
+            let _ = execute!(io::stdout(), DisableMouseCapture);
+        }
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = disable_raw_mode();
     }
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, anyhow::Error> {
+fn setup_terminal() -> Result<(TerminalGuard, Terminal<CrosstermBackend<Stdout>>), anyhow::Error> {
     enable_raw_mode()?;
+    let mut guard = TerminalGuard {
+        mouse_capture_attempted: false,
+    };
     execute!(io::stdout(), EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(io::stdout());
-    Ok(Terminal::new(backend)?)
+    guard.mouse_capture_attempted = true;
+    execute!(io::stdout(), EnableMouseCapture)?;
+    let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    Ok((guard, terminal))
 }
 
-fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorSnapshot) {
-    let (area, state) = (frame.area(), &state.for_terminal());
+fn render(
+    frame: &mut ratatui::Frame<'_>,
+    app: &mut MonitorApp,
+    state: &MonitorSnapshot,
+) -> MouseTargets {
+    let area = frame.area();
+    let terminal_state = &state.for_terminal();
     frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
     let root = Layout::default()
@@ -445,30 +522,42 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
         ])
         .split(area);
 
-    render_header(frame, root[0], app, state);
-    match app.detail {
-        Some(DetailView::Session) => render_session_detail(frame, root[1], state, app.selected),
-        Some(DetailView::Request) => {
-            render_request_detail(frame, root[1], state, app.recent_selected)
+    render_header(frame, root[0], app, terminal_state);
+    let sessions = match &app.detail {
+        Some(DetailView::Session(detail)) => {
+            let index = detail.index(
+                app.selected,
+                state.sessions.iter().map(|session| &session.session_id),
+            );
+            render_session_detail(frame, root[1], terminal_state, index);
+            VisibleRows::default()
+        }
+        Some(DetailView::Request(detail)) => {
+            let index = detail.index(
+                app.recent_selected,
+                state.recent.iter().map(|request| &request.request_id),
+            );
+            render_request_detail(frame, root[1], terminal_state, index);
+            VisibleRows::default()
         }
         None => render_sessions(
             frame,
             root[1],
-            &state.sessions,
+            &terminal_state.sessions,
             app.selected,
             app.focus == FocusPane::Sessions,
-            state.snapshot_at,
+            terminal_state.snapshot_at,
         ),
-    }
-    render_active(frame, root[2], &state.active, app.tick);
-    render_recent(
+    };
+    render_active(frame, root[2], &terminal_state.active, app.tick);
+    let recent = render_recent(
         frame,
         root[3],
-        &state.recent,
+        &terminal_state.recent,
         app.recent_selected,
         app.focus == FocusPane::Recent,
     );
-    render_events(frame, root[4], &state.recent);
+    let events = render_events(frame, root[4], &terminal_state.recent);
     render_footer(frame, root[5], app);
 
     if app.show_setup {
@@ -481,6 +570,11 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
         MonitorPhase::Running => {}
         MonitorPhase::ConfirmingShutdown => render_shutdown_confirmation(frame, area),
         MonitorPhase::ShuttingDown => render_shutdown_overlay(frame, area, app.tick),
+    }
+    MouseTargets {
+        sessions,
+        recent,
+        events,
     }
 }
 
@@ -548,7 +642,7 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
         Span::styled(" navigate  ", Style::default().fg(DIM)),
         Span::styled("Tab", Style::default().fg(TEAL)),
         Span::styled(" pane  ", Style::default().fg(DIM)),
-        Span::styled("Enter", Style::default().fg(TEAL)),
+        Span::styled("Enter/click", Style::default().fg(TEAL)),
         Span::styled(" open", Style::default().fg(DIM)),
     ];
     frame.render_widget(
@@ -599,14 +693,18 @@ mod tests {
     use ratatui::{backend::TestBackend, buffer::Buffer};
     use std::time::SystemTime;
 
-    pub(super) fn draw(
+    pub(super) fn draw<R>(
         width: u16,
         height: u16,
-        render: impl FnOnce(&mut ratatui::Frame<'_>),
+        render: impl FnOnce(&mut ratatui::Frame<'_>) -> R,
     ) -> Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(render).unwrap();
+        terminal
+            .draw(|frame| {
+                render(frame);
+            })
+            .unwrap();
         terminal.backend().buffer().clone()
     }
 

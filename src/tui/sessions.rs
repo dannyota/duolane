@@ -8,6 +8,7 @@ use super::layout::{
     MODEL_WIDE_WIDTH, PROJECT_MEDIUM_WIDTH, PROJECT_WIDE_WIDTH, PROVIDER_WIDTH, RATE_WIDTH,
     STATUS_WIDTH, TOKEN_WIDTH,
 };
+use super::mouse::{VisibleRows, render_clickable_table};
 use super::{PANEL_BG, SELECTED_BG, SESSION_SPARKLINE_MIN_WIDTH, TEAL};
 use crate::monitor::snapshot::SessionSnapshot;
 use ratatui::layout::{Alignment, Rect};
@@ -109,10 +110,10 @@ pub(super) fn render_sessions(
     selected: usize,
     focused: bool,
     snapshot_at: SystemTime,
-) {
+) -> VisibleRows {
     if sessions.is_empty() {
         render_empty_table_state(frame, area, "Sessions", focused, "No sessions");
-        return;
+        return VisibleRows::default();
     }
 
     let tier = LayoutTier::for_outer_width(area.width);
@@ -171,11 +172,16 @@ pub(super) fn render_sessions(
             Style::default().bg(PANEL_BG)
         })
     });
-    let table = Table::new(rows, widths.clone())
-        .header(column_header(&columns))
-        .block(panel("Sessions", focused));
     let mut table_state = TableState::default().with_selected(Some(selected));
-    frame.render_stateful_widget(table, area, &mut table_state);
+    render_clickable_table(
+        frame,
+        area,
+        Table::new(rows, widths.clone()),
+        panel("Sessions", focused),
+        column_header(&columns),
+        &mut table_state,
+        0..sessions.len(),
+    )
 }
 
 #[cfg(test)]

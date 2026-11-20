@@ -110,7 +110,7 @@ pub(super) fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, at
         ("arrows", "navigate rows and panes"),
         ("j / k", "previous / next row"),
         ("Tab", "switch pane"),
-        ("Enter", "open detail"),
+        ("Enter", "open detail (or click a row)"),
         ("Esc", "close overlay / detail"),
     ];
     let content = lines
