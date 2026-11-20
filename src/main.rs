@@ -458,7 +458,7 @@ fn print_server_banner(
     println!("  # token set here overrides it and breaks the Claude route (401).");
     println!("  export ANTHROPIC_DEFAULT_OPUS_MODEL=\"claude-opus-5-5\"   # opus slot -> Claude");
     println!(
-        "  export ANTHROPIC_DEFAULT_SONNET_MODEL=\"gpt-5.6-terra\"  # sonnet slot -> a backend above"
+        "  export ANTHROPIC_DEFAULT_SONNET_MODEL=\"gpt-6.1-terra\"  # sonnet slot -> a backend above"
     );
     println!(
         "  export ANTHROPIC_DEFAULT_HAIKU_MODEL=\"claude-haiku-5-5\"  # small model -> Claude"
