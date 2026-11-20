@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.1
+
+### Added
+
+- Click a session, recent request, or event to open its details in the monitor.
+- Publish crates.io versions from CI using Trusted Publishing and owner
+  approval.
+
+### Changed
+
+- Events counts expected thread retries separately so they do not displace
+  failures. Their HTTP 400 and details remain in Recent requests.
+- The contribution guide explains how to submit a pull request from a fork.
+
 ## 0.1.0 - 2026-11-20
 
 ### Added

@@ -23,6 +23,15 @@ See [Contributing](CONTRIBUTING.md) to get started.
 
 ## Install
 
+Install the published version from
+[crates.io](https://crates.io/crates/duolane):
+
+```bash
+cargo install duolane --locked
+```
+
+To build from the latest source instead:
+
 ```bash
 cargo install --git https://github.com/dannyota/duolane --locked
 ```
