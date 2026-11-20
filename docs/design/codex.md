@@ -14,9 +14,17 @@ and the reasoning formats. [Security](security.md) owns credentials and limits.
   metadata changes. A missing or invalid file removes the extension, never the
   built-in list.
 - A catalog entry is skipped when it is malformed, or when its id could be
-  mistaken for a Claude alias, a tier suffix, or provider syntax.
+  mistaken for a Claude or Codex family alias, a tier suffix, or provider
+  syntax.
 - Each Claude alias has an ordered list of Codex targets. The first one the
   account's catalog lists wins, and the first entry applies without a catalog.
+- A Codex family alias selects the highest numeric version of the same family
+  among listed, API-capable entries. A candidate id is `gpt-<version>-<family>`
+  with one to three numeric version components. Missing components count as
+  zero. Ties select the id that sorts first. If there is no candidate for that
+  family, use its highest built-in version. Resolution uses the current cache
+  snapshot on each request. Model overrides keep their existing precedence. Tier
+  suffixes are for exact ids, not family aliases.
 
 ## Lanes
 
@@ -35,8 +43,8 @@ Codex serves two lanes: the full Responses API and Responses Lite.
 
 ## Service tiers
 
-- The suffix `-fast` on any model requests the priority tier. `-ultrafast`
-  exists only on a built-in list of models.
+- The suffix `-fast` on an allowed exact Codex model id requests the priority
+  tier. `-ultrafast` exists only on a built-in list of models.
 - duolane narrows a requested tier to one the model offers, because the backend
   serves an unavailable tier at standard speed without an error. Ultrafast falls
   back to priority.

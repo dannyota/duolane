@@ -20,7 +20,7 @@ use crate::traffic::{
 
 use super::client::{CodexError, CodexHttpClient};
 use super::translate::model_allowlist::{
-    alias_target, allowed_models_display, assert_allowed_model, full_lane_web_search_model,
+    allowed_models_display, assert_allowed_model, full_lane_web_search_model, resolve_alias,
     service_tier_for_model, split_tier_suffix, uses_responses_lite_with_full_lane,
 };
 use super::translate::request::ServiceTier;
@@ -153,7 +153,7 @@ fn resolve_native_model(requested: &str) -> (String, Option<ServiceTier>) {
         None => (requested, None),
     };
     (
-        alias_target(requested).unwrap_or(requested).to_string(),
+        resolve_alias(requested).map_or_else(|| requested.to_string(), |id| id.into_owned()),
         service_tier,
     )
 }

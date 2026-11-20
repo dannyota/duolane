@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde::de::IgnoredAny;
 
-use crate::providers::codex::translate::model_allowlist::ALLOWED_MODELS;
+use crate::providers::codex::translate::model_allowlist::{ALLOWED_MODELS, FAMILY_ALIASES};
 use crate::providers::codex::translate::model_catalog::{self, CatalogModel, valid_slug};
 
 use super::settings;
@@ -66,6 +66,14 @@ fn build(catalog: &[CatalogModel]) -> Option<Lineup> {
             .map(|model| row(&model.slug, model.display_name.as_deref()))
             .collect()
     };
+    for (i, alias) in FAMILY_ALIASES.iter().enumerate() {
+        let name = match *alias {
+            "terra" => "Terra",
+            "sol" => "Sol",
+            _ => "Astra",
+        };
+        options.insert(i, row(alias, Some(name)));
+    }
     options.truncate(MAX_ROWS);
     let lineup = Lineup { options };
     let size = lineup.settings().ok()?.len();
@@ -173,12 +181,15 @@ mod tests {
         assert_eq!(options.len(), MAX_ROWS);
         let labels: Vec<(&str, &str)> = options
             .iter()
-            .take(3)
+            .take(6)
             .map(|row| (row.model.as_str(), row.label.as_str()))
             .collect();
         assert_eq!(
             labels,
             [
+                ("terra", "Terra (Codex)"),
+                ("sol", "Sol (Codex)"),
+                ("astra", "Astra (Codex)"),
                 ("gpt-a", "gpt-a (Codex)"),
                 ("gpt-b", "gpt-b (Codex)"),
                 ("gpt-c", "Gamma (Codex)")
@@ -191,9 +202,9 @@ mod tests {
         );
 
         let fallback = build(&[]).unwrap().options;
-        assert_eq!(fallback.len(), ALLOWED_MODELS.len());
+        assert_eq!(fallback.len(), ALLOWED_MODELS.len() + FAMILY_ALIASES.len());
         let newest = ALLOWED_MODELS[ALLOWED_MODELS.len() - 1];
-        assert_eq!(fallback[0].model, newest);
-        assert_eq!(fallback[0].label, format!("{newest} (Codex)"));
+        assert_eq!(fallback[3].model, newest);
+        assert_eq!(fallback[3].label, format!("{newest} (Codex)"));
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{borrow::Cow, collections::BTreeSet};
 
 use crate::config;
 
@@ -44,6 +44,59 @@ pub const MODEL_ALIASES: &[(&str, &[&str])] = &[
     ("claude-fable-5", OPUS_TARGETS),
     ("claude-fable-5-1", OPUS_TARGETS),
 ];
+
+pub const FAMILY_ALIASES: &[&str] = &["terra", "sol", "astra"];
+
+pub fn is_family_alias(model: &str) -> bool {
+    FAMILY_ALIASES.contains(&model.strip_prefix("anthropic-").unwrap_or(model))
+}
+
+fn version(id: &str, family: &str) -> Option<[String; 3]> {
+    let suffix = format!("-{family}");
+    let numbers = id.strip_prefix("gpt-")?.strip_suffix(&suffix)?;
+    let parts: Vec<_> = numbers.split('.').collect();
+    if parts.is_empty()
+        || parts.len() > 3
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    let mut result = [String::from("0"), String::from("0"), String::from("0")];
+    for (i, part) in parts.iter().enumerate() {
+        let n = part.trim_start_matches('0');
+        result[i] = if n.is_empty() { "0" } else { n }.to_string();
+    }
+    Some(result)
+}
+
+pub fn resolve_alias(model: &str) -> Option<Cow<'static, str>> {
+    if !is_family_alias(model) {
+        return alias_target(model).map(Cow::Borrowed);
+    }
+    let family = model.strip_prefix("anthropic-").unwrap_or(model);
+    let mut candidates: Vec<_> = listed_catalog_models()
+        .into_iter()
+        .filter_map(|id| version(&id, family).map(|v| (id, v)))
+        .collect();
+    if candidates.is_empty() {
+        candidates = ALLOWED_MODELS
+            .iter()
+            .filter_map(|id| version(id, family).map(|v| ((*id).to_string(), v)))
+            .collect();
+    }
+    candidates.sort_by(|a, b| {
+        for (x, y) in a.1.iter().zip(&b.1) {
+            let order = y.len().cmp(&x.len()).then_with(|| y.cmp(x));
+            if !order.is_eq() {
+                return order;
+            }
+        }
+        a.0.cmp(&b.0)
+    });
+    candidates.into_iter().next().map(|(id, _)| Cow::Owned(id))
+}
 
 pub fn alias_target(model: &str) -> Option<&'static str> {
     alias_target_in(model, listed_catalog_models)
@@ -102,6 +155,10 @@ pub fn listed_models() -> Vec<String> {
             std::iter::once(m).chain(variants)
         })
         .collect();
+    for family in FAMILY_ALIASES {
+        models.push((*family).to_string());
+        models.push(format!("anthropic-{family}"));
+    }
     models.sort_unstable();
     models
 }
@@ -162,9 +219,9 @@ pub fn resolve_model_request_with_config_override(
 }
 
 fn resolve_with_model_override(model: &str, override_model: Option<&str>) -> ResolvedModel {
-    let alias = alias_target(model).unwrap_or(model);
+    let alias = resolve_alias(model).unwrap_or(Cow::Borrowed(model));
 
-    let requested = resolve_tier_model_alias(alias);
+    let requested = resolve_tier_model_alias(&alias);
 
     let resolved = match override_model {
         Some(val) if !val.is_empty() => resolve_tier_model_alias(val),
@@ -255,7 +312,7 @@ pub fn is_valid_model_for_codex(model: &str) -> bool {
     if split_tier_suffix(model).is_some() {
         return true;
     }
-    MODEL_ALIASES.iter().any(|(alias, _)| *alias == model)
+    is_family_alias(model) || MODEL_ALIASES.iter().any(|(alias, _)| *alias == model)
 }
 
 #[cfg(test)]

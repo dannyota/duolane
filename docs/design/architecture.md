@@ -31,6 +31,10 @@ other model.
 - Codex model ids come from a built-in list plus the API-capable entries in the
   Codex CLI's `models_cache.json`. Unlisted catalog entries are accepted when
   requested by exact id but are not advertised.
+- `terra`, `sol`, and `astra`, and their `anthropic-` forms, select Codex before
+  any auto-review override. All six names are advertised. The
+  [Codex catalog](codex.md#model-catalog) determines their targets, without
+  changing how explicit ids resolve.
 - A `[1m]` suffix on a model id is ignored.
 - A setting can send `claude-*` and the Claude aliases to Codex instead.
 - A setting can override the model of Claude Code's auto-review requests. Those
@@ -49,20 +53,21 @@ other model.
   discovery, which `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` turns on
   ([gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol)).
   Claude Code adds only ids that contain `claude` or `anthropic`, so the Claude
-  aliases are what reach its `/model` picker. Codex ids are still listed for
-  other clients. Discovery needs a gateway credential, so with a claude.ai login
-  it does not run: Claude Code 2.1.328 logged
-  `[gatewayDiscovery] skipped: no credential` on 2026-11-19.
+  aliases and the `anthropic-` Codex aliases can reach its `/model` picker.
+  Discovery needs a gateway credential, so with a claude.ai login it does not
+  run: Claude Code 2.1.328 logged `[gatewayDiscovery] skipped: no credential` on
+  2026-11-19.
 - Codex models reach the `/model` picker through a
   [`modelPicker`](https://code.claude.com/docs/en/settings-reference#modelpicker)
   lineup, which takes any model id and was seen listing `gpt-6.2-sol` on
-  2026-11-19. The lineup has one row per Codex catalog entry with `visibility`
-  `list` that duolane advertises, in catalog `priority` order, without tier
-  variants such as `-fast`. A row is `model` and `label` only: the catalog
-  display name followed by `(Codex)`, or the id when the display name holds a
-  control character or is longer than 64 characters. The catalog is untrusted:
-  ids must pass the catalog's slug check, the lineup holds at most 20 rows, and
-  duolane drops it when its JSON exceeds 16 KiB. Without a catalog, the rows
+  2026-11-19. The three short Codex family aliases come first so they always
+  fit. The remaining rows are Codex catalog entries with `visibility` `list`
+  that duolane advertises, in catalog `priority` order, without tier variants
+  such as `-fast`. A row is `model` and `label` only: the catalog display name
+  followed by `(Codex)`, or the id when the display name holds a control
+  character or is longer than 64 characters. The catalog is untrusted: ids must
+  pass the catalog's slug check, the lineup holds at most 20 rows, and duolane
+  drops it when its JSON exceeds 16 KiB. Without a catalog, the remaining rows
   come from the built-in Codex list, labeled with the id. duolane never writes
   an empty lineup, never sets `behavesAs`, and never edits `availableModels`,
   which can still hide these rows. Intercept mode supplies the lineup, as the
