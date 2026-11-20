@@ -29,8 +29,20 @@ def file_digest(directory: Path, name: str) -> str:
         raise ValueError("unreadable artifact file") from error
 
 
+def tracked_regular_files(tree: bytes) -> set[bytes]:
+    files = set()
+    for entry in tree.split(b"\0"):
+        if not entry:
+            continue
+        header, path = entry.split(b"\t", 1)
+        mode, kind, _ = header.split(b" ")
+        if kind == b"blob" and mode in (b"100644", b"100755"):
+            files.add(path)
+    return files
+
+
 def validate(tag: str, commit: str, manifest: dict, release: dict, runs: list,
-             owners: dict, artifacts_dir: Path) -> None:
+             owners: dict, artifacts_dir: Path, tree: bytes) -> None:
     if not isinstance(tag, str) or not TAG.fullmatch(tag):
         raise ValueError("invalid tag")
     if not isinstance(commit, str) or not COMMIT.fullmatch(commit):
@@ -40,6 +52,7 @@ def validate(tag: str, commit: str, manifest: dict, release: dict, runs: list,
         raise ValueError("manifest does not match tag")
     if "workspace" in manifest or "workspace" in package:
         raise ValueError("expected a standalone package manifest")
+    tracked_files = tracked_regular_files(tree)
     for field in ("readme", "license-file"):
         if field not in package:
             continue
@@ -51,6 +64,8 @@ def validate(tag: str, commit: str, manifest: dict, release: dict, runs: list,
         path = PurePosixPath(value)
         if path.is_absolute() or ".." in path.parts:
             raise ValueError("package metadata path must stay inside checkout")
+        if path.as_posix().encode("utf-8") not in tracked_files:
+            raise ValueError("package metadata path must name a tracked regular file")
 
     if len(records(runs)) != 1:
         raise ValueError("expected one release run")
@@ -84,7 +99,7 @@ def validate(tag: str, commit: str, manifest: dict, release: dict, runs: list,
 
 def main(args):
     try:
-        tag, commit, manifest, release, runs, owners, artifacts_dir = args
+        tag, commit, manifest, release, runs, owners, artifacts_dir, tree = args
         validate(
             tag, commit,
             tomllib.loads(Path(manifest).read_text(encoding="utf-8")),
@@ -92,6 +107,7 @@ def main(args):
             json.loads(Path(runs).read_bytes()),
             json.loads(Path(owners).read_bytes()),
             Path(artifacts_dir),
+            Path(tree).read_bytes(),
         )
     except (OSError, ValueError):
         print("check-crate-release: invalid release metadata or artifacts", file=sys.stderr)

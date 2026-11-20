@@ -21,6 +21,10 @@ class ReleaseGate(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.artifacts = Path(temporary.name)
         self.manifest = {"package": {"name": "duolane", "version": "0.1.0"}}
+        self.tree = (
+            b"100755 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tLICENSE\0"
+            b"100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tdocs/README.md\0"
+        )
         self.runs = [{
             "databaseId": 101,
             "headBranch": TAG,
@@ -49,7 +53,7 @@ class ReleaseGate(unittest.TestCase):
 
     def validate(self):
         return check_crate_release.validate(
-            TAG, COMMIT, self.manifest, self.release, self.runs, self.owners, self.artifacts,
+            TAG, COMMIT, self.manifest, self.release, self.runs, self.owners, self.artifacts, self.tree,
         )
 
     def test_complete_release_passes(self):
@@ -62,7 +66,7 @@ class ReleaseGate(unittest.TestCase):
 
     def test_package_metadata_paths_stay_inside_checkout(self):
         package = self.manifest["package"]
-        package.update({"readme": "docs/README.md", "license-file": "LICENSE"})
+        package.update({"readme": "./docs//README.md", "license-file": "LICENSE"})
         self.assertIsNone(self.validate())
         for field, path in (("readme", "../README.md"), ("license-file", "/tmp/LICENSE")):
             original = package[field]
@@ -71,6 +75,14 @@ class ReleaseGate(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.validate()
             package[field] = original
+
+    def test_explicit_package_metadata_requires_tracked_files(self):
+        for field in ("readme", "license-file"):
+            with self.subTest(field=field):
+                self.manifest["package"][field] = ".git/logs/HEAD"
+                with self.assertRaises(ValueError):
+                    self.validate()
+            del self.manifest["package"][field]
 
     def test_package_requires_standalone_manifest(self):
         for table, workspace in ((self.manifest, {}), (self.manifest["package"], "..")):

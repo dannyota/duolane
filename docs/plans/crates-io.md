@@ -20,7 +20,7 @@
 
 **Files:** `.github/workflows/publish-crates.yml`, `.github/workflows/ci.yml`, `scripts/check-crate-release.py`, `scripts/test/check-crate-release-test.py`, `docs/design/README.md`.
 
-**Interface:** `validate(tag: str, commit: str, manifest: dict, release: dict, runs: list, owners: dict, artifacts_dir: Path) -> None` raises `ValueError` on invalid metadata or differing digests. The CLI takes `TAG COMMIT MANIFEST RELEASE_JSON RUNS_JSON OWNERS_JSON ARTIFACTS_DIR` and emits a fixed error for invalid input. `verify` passes only the validated 40-digit commit and numeric toolchain as job outputs.
+**Interface:** `validate(tag: str, commit: str, manifest: dict, release: dict, runs: list, owners: dict, artifacts_dir: Path, tree: bytes) -> None` raises `ValueError` on invalid metadata or differing digests. The CLI takes `TAG COMMIT MANIFEST RELEASE_JSON RUNS_JSON OWNERS_JSON ARTIFACTS_DIR TREE`, where `TREE` contains `git ls-tree -r --full-tree -z` for the verified commit. It emits a fixed error for invalid input. `verify` passes only the validated 40-digit commit and numeric toolchain as job outputs.
 
 ## Review Focus
 

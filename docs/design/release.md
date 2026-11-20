@@ -18,11 +18,11 @@ access and crates.io access.
   the exact branch name. Publishing additionally requires protected `main`.
 - Preflight resolves the tag to a commit in the dispatch commit's history. The
   tagged manifest must describe the standalone `duolane` crate, match the tag
-  version, and keep README and license paths inside the checkout. The tag and
-  commit must have a successful `release.yml` tag-push run. The published GitHub
-  Release must contain all six uploaded archives and their checksums. Each asset
-  digest must match the corresponding artifact file from that run. The `duolane`
-  crate must list `dannyota` as an owner.
+  version, and use tracked regular files for explicit README and license paths.
+  The tag and commit must have a successful `release.yml` tag-push run. The
+  published GitHub Release must contain all six uploaded archives and their
+  checksums. Each asset digest must match the corresponding artifact file from
+  that run. The `duolane` crate must list `dannyota` as an owner.
 - With publishing requested, preflight also requires an immutable GitHub Release
   and HTTP 404 for the exact version on crates.io. After recording the verified
   outputs, its last step builds the package with
