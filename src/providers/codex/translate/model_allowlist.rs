@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::config;
 
-use super::model_catalog::{catalog_model, catalog_models};
+use super::model_catalog::{catalog_model, catalog_models, has_named_profiles};
 use super::request::ServiceTier;
 
 pub const ALLOWED_MODELS: &[&str] = &[
@@ -46,6 +46,9 @@ pub const MODEL_ALIASES: &[(&str, &[&str])] = &[
 ];
 
 pub fn alias_target(model: &str) -> Option<&'static str> {
+    if has_named_profiles() {
+        return alias_target_in(model, Vec::new);
+    }
     alias_target_in(model, listed_catalog_models)
 }
 

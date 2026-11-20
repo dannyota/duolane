@@ -27,6 +27,20 @@ pub struct StoredAuth {
     pub account_id: Option<String>,
 }
 
+impl StoredAuth {
+    pub(super) fn validate_profile_login(&self, named: bool) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !named
+                || self
+                    .account_id
+                    .as_ref()
+                    .is_some_and(|id| !id.trim().is_empty()),
+            "The Codex profile needs a saved login with an account ID. Run `codex login` in the selected Codex home."
+        );
+        Ok(())
+    }
+}
+
 pub struct CodexTokenStore<S: AuthStorage<StoredAuth>> {
     store: S,
 }
@@ -38,6 +52,14 @@ impl<S: AuthStorage<StoredAuth>> CodexTokenStore<S> {
 
     pub fn load_auth(&self) -> Result<Option<StoredAuth>, anyhow::Error> {
         self.store.load()
+    }
+
+    pub(crate) fn load_profile_auth(&self, named: bool) -> anyhow::Result<Option<StoredAuth>> {
+        let auth = self.load_auth()?;
+        if let Some(auth) = &auth {
+            auth.validate_profile_login(named)?;
+        }
+        Ok(auth)
     }
 
     pub fn save_auth(&self, value: StoredAuth) -> Result<(), anyhow::Error> {
@@ -244,7 +266,11 @@ pub fn codex_auth_file() -> PathBuf {
 }
 
 pub fn file_store() -> CodexTokenStore<DefaultCodexAuthStore> {
-    CodexTokenStore::new(CodexCliAuthStore::new(codex_auth_file()))
+    file_store_at(codex_auth_file())
+}
+
+pub(crate) fn file_store_at(path: PathBuf) -> CodexTokenStore<DefaultCodexAuthStore> {
+    CodexTokenStore::new(CodexCliAuthStore::new(path))
 }
 
 fn now_ms() -> u64 {

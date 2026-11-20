@@ -29,9 +29,11 @@ impl Default for ChatCompletionsBackend {
 
 impl ChatCompletionsBackend {
     pub fn new() -> Self {
-        Self {
-            client: Arc::new(CodexHttpClient::new()),
-        }
+        Self::with_http_client(Arc::new(CodexHttpClient::new()))
+    }
+
+    pub(crate) fn with_http_client(client: Arc<CodexHttpClient>) -> Self {
+        Self { client }
     }
 
     #[cfg(test)]
@@ -195,7 +197,8 @@ async fn upstream_error_response(upstream: reqwest::Response, idle_timeout_ms: u
         };
         (status, kind)
     };
-    let response = ChatError::new(status, kind, message, None, None).response();
+    let mut response = ChatError::new(status, kind, message, None, None).response();
+    super::profiles::add_switch_header(&mut response);
     if let Some(retry_after) = retry_after {
         let (mut parts, body) = response.into_parts();
         parts.headers.insert(http::header::RETRY_AFTER, retry_after);

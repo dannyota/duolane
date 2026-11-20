@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde::de::IgnoredAny;
 
+use crate::providers::codex::profiles::Profiles;
 use crate::providers::codex::translate::model_allowlist::ALLOWED_MODELS;
 use crate::providers::codex::translate::model_catalog::{self, CatalogModel, valid_slug};
 
@@ -40,7 +41,17 @@ impl Lineup {
 }
 
 pub(super) fn lineup() -> Option<Lineup> {
-    build(&model_catalog::catalog_models())
+    let profiles = Profiles::load().ok()?;
+    let selected = profiles.active().ok()?;
+    let catalog_path = profiles
+        .auth_path(&selected)?
+        .with_file_name("models_cache.json");
+    let catalog = model_catalog::RequestCatalog::load(
+        &catalog_path,
+        &std::sync::Mutex::default(),
+        profiles.has_named_profiles(),
+    );
+    model_catalog::REQUEST_CATALOG.sync_scope(catalog, || build(&model_catalog::catalog_models()))
 }
 
 fn build(catalog: &[CatalogModel]) -> Option<Lineup> {

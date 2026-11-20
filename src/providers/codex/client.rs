@@ -4,7 +4,7 @@ use crate::provider::RequestContext;
 
 use super::auth::constants::CODEX_API_ENDPOINT;
 use super::auth::manager::CodexAuthManager;
-use super::auth::token_store::{DefaultCodexAuthStore, StoredAuth, file_store};
+use super::auth::token_store::{CodexTokenStore, DefaultCodexAuthStore, StoredAuth, file_store};
 pub use super::client_error::*;
 pub use super::client_headers::*;
 use super::client_proxy::*;
@@ -83,6 +83,13 @@ impl Default for CodexHttpClient {
 
 impl CodexHttpClient {
     pub fn new() -> Self {
+        Self::with_store(file_store(), None)
+    }
+
+    pub(crate) fn with_store(
+        store: CodexTokenStore<DefaultCodexAuthStore>,
+        profile: Option<ring::digest::Digest>,
+    ) -> Self {
         let timeout_ms = config::codex_header_timeout_ms();
         let proxy_environment = ProxyEnvironment::from_env();
         Self {
@@ -91,7 +98,7 @@ impl CodexHttpClient {
             websocket_client: websocket_http_client(&proxy_environment),
             websocket_proxy_config: proxy_environment.websocket_proxy_config(),
             auto_http_fallback_enabled: true,
-            auth_manager: CodexAuthManager::new(file_store()),
+            auth_manager: CodexAuthManager::with_profile(store, profile),
             base_url: config::codex_base_url(CODEX_API_ENDPOINT),
             header_timeout_ms: timeout_ms,
             body_idle_timeout_ms: HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS,
@@ -156,20 +163,40 @@ impl CodexHttpClient {
             usage_limit: None,
             origin: CodexErrorOrigin::Auth,
         })?;
-        bind_account(account, auth)
+        self.bind_account(account, auth)
     }
 
     pub(super) async fn refreshed_auth(
         &self,
         current: &StoredAuth,
     ) -> Result<StoredAuth, CodexError> {
-        let account = ReasoningAccount::new(current.account_id.as_deref());
+        let account = self
+            .auth_manager
+            .account_scope(current.account_id.as_deref());
         let auth = self
             .auth_manager
             .force_refresh(&current.access)
             .await
             .map_err(auth_refresh_error)?;
-        bind_account(&account, auth)
+        self.bind_account(&account, auth)
+    }
+
+    fn bind_account(
+        &self,
+        account: &ReasoningAccount,
+        auth: StoredAuth,
+    ) -> Result<StoredAuth, CodexError> {
+        if *account == self.auth_manager.account_scope(auth.account_id.as_deref()) {
+            return Ok(auth);
+        }
+        Err(CodexError {
+            status: 409,
+            message: "The Codex login changed during this request; retry it".to_string(),
+            detail: Some(CODEX_ACCOUNT_CHANGED_DETAIL.to_string()),
+            retry_after: None,
+            usage_limit: None,
+            origin: CodexErrorOrigin::Auth,
+        })
     }
 
     pub fn body_idle_timeout_ms(&self) -> u64 {
@@ -210,20 +237,6 @@ pub(super) fn response_headers(resp: &reqwest::Response) -> Vec<(String, String)
         .iter()
         .map(|(key, value)| (key.to_string(), value.to_str().unwrap_or("").to_string()))
         .collect()
-}
-
-fn bind_account(account: &ReasoningAccount, auth: StoredAuth) -> Result<StoredAuth, CodexError> {
-    if *account == ReasoningAccount::new(auth.account_id.as_deref()) {
-        return Ok(auth);
-    }
-    Err(CodexError {
-        status: 409,
-        message: "The Codex login changed during this request; retry it".to_string(),
-        detail: Some(CODEX_ACCOUNT_CHANGED_DETAIL.to_string()),
-        retry_after: None,
-        usage_limit: None,
-        origin: CodexErrorOrigin::Auth,
-    })
 }
 
 pub(super) fn log_buffered_retry(

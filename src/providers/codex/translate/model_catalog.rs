@@ -3,7 +3,7 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -50,11 +50,11 @@ enum Visibility {
 }
 
 #[derive(Default)]
-struct CacheState {
+pub(crate) struct CacheState {
     path: Option<PathBuf>,
     checked_at: Option<Instant>,
     key: Option<(SystemTime, u64)>,
-    models: Vec<CatalogModel>,
+    models: Arc<[CatalogModel]>,
 }
 
 static CACHE: OnceLock<Mutex<CacheState>> = OnceLock::new();
@@ -108,7 +108,7 @@ fn parse_catalog(bytes: &[u8]) -> Option<Vec<CatalogModel>> {
 }
 
 impl CacheState {
-    fn load(&mut self, path: Option<&Path>, now: Instant) -> Vec<CatalogModel> {
+    fn load(&mut self, path: Option<&Path>, now: Instant) -> Arc<[CatalogModel]> {
         if self.path.as_deref() != path {
             *self = Self {
                 path: path.map(Path::to_path_buf),
@@ -139,19 +139,76 @@ impl CacheState {
                     .read_to_end(&mut bytes)
                     .ok()?;
                 self.key = key;
-                parse_catalog(&bytes)
+                parse_catalog(&bytes).map(Arc::from)
             })
             .unwrap_or_default();
         self.models.clone()
     }
 }
 
+#[derive(Clone)]
+pub(crate) enum RequestCatalog {
+    Active {
+        models: Arc<[CatalogModel]>,
+        named_profiles: bool,
+    },
+    InvalidSelection,
+}
+
+tokio::task_local! {
+    pub(crate) static REQUEST_CATALOG: RequestCatalog;
+}
+
+impl RequestCatalog {
+    pub(crate) fn load(path: &Path, cache: &Mutex<CacheState>, named_profiles: bool) -> Self {
+        let models = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .load((!cfg!(test)).then_some(path), Instant::now());
+        Self::Active {
+            models,
+            named_profiles,
+        }
+    }
+
+    fn models(&self) -> &[CatalogModel] {
+        match self {
+            Self::Active { models, .. } => models,
+            Self::InvalidSelection => &[],
+        }
+    }
+}
+
+pub(crate) fn has_named_profiles() -> bool {
+    REQUEST_CATALOG
+        .try_with(|catalog| {
+            matches!(
+                catalog,
+                RequestCatalog::Active {
+                    named_profiles: true,
+                    ..
+                }
+            )
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn invalid_selection() -> bool {
+    REQUEST_CATALOG
+        .try_with(|catalog| matches!(catalog, RequestCatalog::InvalidSelection))
+        .unwrap_or(false)
+}
+
 pub fn catalog_models() -> Vec<CatalogModel> {
+    if let Ok(models) = REQUEST_CATALOG.try_with(|catalog| catalog.models().to_vec()) {
+        return models;
+    }
     CACHE
         .get_or_init(|| Mutex::new(CacheState::default()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .load(catalog_path().as_deref(), Instant::now())
+        .to_vec()
 }
 
 pub fn catalog_model(slug: &str) -> Option<CatalogModel> {

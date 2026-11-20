@@ -9,6 +9,7 @@ use super::request::ResponsesInputItem;
 const FAMILY_PREFIX: &str = "duolane:";
 const CODEX_FAMILY_PREFIX: &str = "duolane:codex:";
 const PREFIX: &str = "duolane:codex:v1:";
+const PROFILE_PREFIX: &str = "duolane:codex:v2:";
 const ACCOUNT_TAG_BYTES: usize = 8;
 const MAX_ID_BYTES: usize = 4 * 1024;
 const MAX_ENCRYPTED_CONTENT_BYTES: usize = 8 * 1024 * 1024;
@@ -24,12 +25,23 @@ pub(crate) fn is_codex_signature(signature: &str) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct ReasoningAccount {
     tag: Option<String>,
+    profile_scoped: bool,
 }
 
 impl ReasoningAccount {
     pub fn new(account_id: Option<&str>) -> Self {
+        Self::for_profile(account_id, None)
+    }
+
+    pub(crate) fn for_profile(account_id: Option<&str>, profile: Option<&digest::Digest>) -> Self {
         Self {
-            tag: account_id.filter(|id| !id.is_empty()).map(account_tag),
+            tag: account_id
+                .filter(|id| !id.is_empty())
+                .map(|id| match profile {
+                    Some(profile) => profile_account_tag(profile, id),
+                    None => account_tag(id),
+                }),
+            profile_scoped: profile.is_some(),
         }
     }
 
@@ -38,11 +50,19 @@ impl ReasoningAccount {
     }
 
     pub fn sign(&self, replay: &ReasoningReplay) -> Option<String> {
-        encode_reasoning_signature(self.tag.as_deref()?, replay)
+        encode_signature(self.prefix(), self.tag.as_deref()?, replay)
     }
 
     pub fn replay(&self, signature: Option<&str>) -> Option<ReasoningReplay> {
-        decode_reasoning_signature(self.tag.as_deref()?, signature?)
+        decode_signature(self.prefix(), self.tag.as_deref()?, signature?)
+    }
+
+    fn prefix(&self) -> &'static str {
+        if self.profile_scoped {
+            PROFILE_PREFIX
+        } else {
+            PREFIX
+        }
     }
 }
 
@@ -53,6 +73,13 @@ fn account_tag(account_id: &str) -> String {
         .take(ACCOUNT_TAG_BYTES)
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn profile_account_tag(profile: &digest::Digest, account_id: &str) -> String {
+    let mut hash = digest::Context::new(&digest::SHA256);
+    hash.update(profile.as_ref());
+    hash.update(account_id.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash.finish())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +148,10 @@ impl ReasoningSigner {
 }
 
 pub fn encode_reasoning_signature(account_tag: &str, replay: &ReasoningReplay) -> Option<String> {
+    encode_signature(PREFIX, account_tag, replay)
+}
+
+fn encode_signature(prefix: &str, account_tag: &str, replay: &ReasoningReplay) -> Option<String> {
     if replay.id.is_empty()
         || replay.id.len() > MAX_ID_BYTES
         || replay.encrypted_content.is_empty()
@@ -130,14 +161,18 @@ pub fn encode_reasoning_signature(account_tag: &str, replay: &ReasoningReplay) -
     }
     let encoded_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(replay.id.as_bytes());
     Some(format!(
-        "{PREFIX}{account_tag}:{encoded_id}:{}",
+        "{prefix}{account_tag}:{encoded_id}:{}",
         replay.encrypted_content
     ))
 }
 
 pub fn decode_reasoning_signature(account_tag: &str, signature: &str) -> Option<ReasoningReplay> {
+    decode_signature(PREFIX, account_tag, signature)
+}
+
+fn decode_signature(prefix: &str, account_tag: &str, signature: &str) -> Option<ReasoningReplay> {
     let payload = signature
-        .strip_prefix(PREFIX)?
+        .strip_prefix(prefix)?
         .strip_prefix(account_tag)?
         .strip_prefix(':')?;
     if payload.is_empty() || payload.len() > max_payload_len() {

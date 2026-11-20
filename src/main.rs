@@ -261,7 +261,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Models => {
-            print_models(&Registry::with_default_alias());
+            println!(
+                "{}",
+                duolane::providers::codex::cli::list_models(&Registry::with_default_alias())?
+            );
             Ok(())
         }
         Commands::Codex { command } => run_provider_cli("codex", command),
@@ -396,20 +399,15 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
                 }
                 Ok(())
             }
+            duolane::provider::AuthCommand::List => duolane::providers::codex::cli::list_profiles(),
+            duolane::provider::AuthCommand::Use { profile } => {
+                duolane::providers::codex::cli::use_profile(&profile)
+            }
             duolane::provider::AuthCommand::Logout => {
                 handlers.logout()?;
                 Ok(())
             }
         },
-    }
-}
-
-fn print_models(registry: &Registry) {
-    let provider = "codex";
-    if let Some(hint) = registry.signed_out().get(provider) {
-        println!("{provider}: not signed in, {hint}");
-    } else if let Some(models) = registry.grouped_models().get(provider) {
-        println!("{provider}: {}", terminal_text(&models.join(", ")));
     }
 }
 
@@ -449,7 +447,10 @@ fn print_server_banner(
     if cfg.exists() {
         println!("Config: {}", cfg.display());
     }
-    print_models(registry);
+    match duolane::providers::codex::cli::list_models(registry) {
+        Ok(models) => println!("{models}"),
+        Err(error) => println!("codex: {}", terminal_text(&error.to_string())),
+    }
     println!();
     println!("Configure Claude Code:");
     println!("  export ANTHROPIC_BASE_URL=\"http://localhost:{port}\"");

@@ -37,9 +37,11 @@ impl Default for CodexNativeBackend {
 
 impl CodexNativeBackend {
     pub fn new() -> Self {
-        Self {
-            client: Arc::new(CodexHttpClient::new()),
-        }
+        Self::with_http_client(Arc::new(CodexHttpClient::new()))
+    }
+
+    pub(crate) fn with_http_client(client: Arc<CodexHttpClient>) -> Self {
+        Self { client }
     }
 
     pub async fn handle(&self, mut body: Value, ctx: RequestContext) -> Response {
@@ -292,6 +294,7 @@ fn passthrough_response(
     let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = status;
     *response.headers_mut() = headers;
+    super::profiles::add_switch_header(&mut response);
     response.extensions_mut().insert(outcome);
     response
 }

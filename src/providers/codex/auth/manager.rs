@@ -25,11 +25,21 @@ pub struct CodexAuthManager<S: AuthStorage<StoredAuth>> {
     refresh_lock: Arc<AsyncMutex<()>>,
     refresh_client: reqwest::Client,
     token_endpoint: String,
+    profile: Option<ring::digest::Digest>,
 }
 
 impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
     pub fn new(store: CodexTokenStore<S>) -> Self {
         Self::new_with_token_endpoint(store, format!("{ISSUER}/oauth/token"))
+    }
+
+    pub(crate) fn with_profile(
+        store: CodexTokenStore<S>,
+        profile: Option<ring::digest::Digest>,
+    ) -> Self {
+        let mut manager = Self::new(store);
+        manager.profile = profile;
+        manager
     }
 
     fn new_with_token_endpoint(store: CodexTokenStore<S>, token_endpoint: String) -> Self {
@@ -45,30 +55,63 @@ impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
                 .build()
                 .expect("failed to create Codex OAuth refresh client"),
             token_endpoint,
+            profile: None,
         }
     }
 
     pub async fn get_auth(&self) -> Result<StoredAuth, anyhow::Error> {
-        let stored = self.load_auth().await?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "No Codex credentials. Log in with the Codex CLI (`codex login`) to create ~/.codex/auth.json"
-            )
-        })?;
+        let stored = self
+            .load_auth()
+            .await?
+            .ok_or_else(|| self.missing_credentials())?;
 
         if stored.expires > now_ms() + REFRESH_MARGIN_MS {
             return Ok(stored);
         }
 
-        self.refresh(false, &stored.access).await
+        let refreshed = self.refresh(false, &stored.access).await?;
+        refreshed.validate_profile_login(self.profile.is_some())?;
+        Ok(refreshed)
     }
 
     pub async fn force_refresh(&self, rejected_access: &str) -> Result<StoredAuth, anyhow::Error> {
-        self.refresh(true, rejected_access).await
+        let refreshed = self.refresh(true, rejected_access).await?;
+        refreshed.validate_profile_login(self.profile.is_some())?;
+        Ok(refreshed)
     }
 
     pub async fn reasoning_account(&self) -> ReasoningAccount {
         let auth = self.load_auth().await.ok().flatten();
-        ReasoningAccount::new(auth.as_ref().and_then(|auth| auth.account_id.as_deref()))
+        self.account_scope(auth.as_ref().and_then(|auth| auth.account_id.as_deref()))
+    }
+
+    pub(crate) fn account_scope(&self, account_id: Option<&str>) -> ReasoningAccount {
+        ReasoningAccount::for_profile(account_id, self.profile.as_ref())
+    }
+
+    fn missing_credentials(&self) -> anyhow::Error {
+        if self.profile.is_some() {
+            return anyhow::anyhow!(
+                "No Codex credentials. Run `codex login` in the selected Codex home."
+            );
+        }
+        anyhow::anyhow!(
+            "No Codex credentials. Log in with the Codex CLI (`codex login`) to create ~/.codex/auth.json"
+        )
+    }
+
+    pub(crate) fn missing_login_hint(&self) -> Option<&'static str> {
+        let named = self.profile.is_some();
+        self.store
+            .load_profile_auth(named)
+            .ok()
+            .flatten()
+            .is_none()
+            .then_some(if named {
+                "run `codex login` in the selected Codex home"
+            } else {
+                "run `codex login`"
+            })
     }
 
     async fn load_auth(&self) -> Result<Option<StoredAuth>, anyhow::Error> {
@@ -82,7 +125,8 @@ impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
             return Ok(Some(auth));
         }
 
-        with_store(&self.store, |store| store.load_auth()).await
+        let named = self.profile.is_some();
+        with_store(&self.store, move |store| store.load_profile_auth(named)).await
     }
 
     async fn refresh(&self, force: bool, stale_access: &str) -> Result<StoredAuth, anyhow::Error> {
@@ -101,7 +145,7 @@ impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
         let current = self
             .load_auth()
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
+            .ok_or_else(|| self.missing_credentials())?;
 
         if current.access != stale_access
             || (!force && current.expires > now_ms() + REFRESH_MARGIN_MS)

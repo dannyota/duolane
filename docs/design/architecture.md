@@ -105,27 +105,31 @@ and errors.
 
 ## Reasoning across backends
 
-Two formats live in Claude Code transcripts, outside duolane:
+These formats live in Claude Code transcripts, outside duolane:
 
-| Format          | Value                                                                    |
-| --------------- | ------------------------------------------------------------------------ |
-| Codex signature | `duolane:codex:v1:<account tag>:<base64url item id>:<encrypted content>` |
-| Reasoning text  | `<previous_reasoning>\n<text>\n</previous_reasoning>`                    |
+| Format                  | Value                                                                                |
+| ----------------------- | ------------------------------------------------------------------------------------ |
+| Default Codex signature | `duolane:codex:v1:<account tag>:<base64url item id>:<encrypted content>`             |
+| Named Codex signature   | `duolane:codex:v2:<profile and account tag>:<base64url item id>:<encrypted content>` |
+| Reasoning text          | `<previous_reasoning>\n<text>\n</previous_reasoning>`                                |
 
-The account tag is the first 16 hexadecimal characters of the SHA-256 of the
-ChatGPT account id. Without a known account id, duolane issues no Codex
-signature. Both formats are frozen from the first release. A new version adds a
-new prefix, and duolane keeps recognizing every released one.
+The v1 account tag is the first 16 hexadecimal characters of the SHA-256 of the
+ChatGPT account ID. The v2 profile digest is SHA-256 of the UTF-8 profile name,
+a zero byte, and the configured absolute auth path in the platform encoding. The
+v2 tag is unpadded base64url of SHA-256 of that digest followed by the UTF-8
+ChatGPT account ID. Without a known account ID, duolane issues no Codex
+signature. Released formats are frozen. A new version adds a new prefix, and
+duolane keeps recognizing every released one.
 
 An Anthropic signature is any non-empty signature without a released duolane
 prefix.
 
-| Thinking block                 | Sent to Anthropic | Sent to Codex               |
-| ------------------------------ | ----------------- | --------------------------- |
-| Anthropic signature            | Unchanged         | Reasoning text if non-empty |
-| Codex signature, same account  | Reasoning text    | Encrypted reasoning item    |
-| Codex signature, other account | Reasoning text    | Reasoning text              |
-| No signature                   | Reasoning text    | Reasoning text              |
+| Thinking block                                | Sent to Anthropic | Sent to Codex               |
+| --------------------------------------------- | ----------------- | --------------------------- |
+| Anthropic signature                           | Unchanged         | Reasoning text if non-empty |
+| Codex signature, same profile and account     | Reasoning text    | Encrypted reasoning item    |
+| Codex signature, different profile or account | Reasoning text    | Reasoning text              |
+| No signature                                  | Reasoning text    | Reasoning text              |
 
 An empty block that would become reasoning text is removed. On the Claude route,
 if that empties an assistant message, the message keeps one reasoning text block
@@ -148,7 +152,8 @@ with empty text, so the conversation stays valid.
    Control mirrors in
    [intercept mode](intercept.md#requests-on-the-intercepted-host) is outside
    this rule.
-4. **Encrypted reasoning returns only to the account that produced it.**
+4. **Encrypted reasoning returns only to the profile and account that produced
+   it.**
 5. **Stream failures are visible.** An interrupted or incomplete upstream stream
    is never reported as a successful turn, and a tool call with incomplete
    arguments is never reported as complete. A stop at `max_tokens` is reported

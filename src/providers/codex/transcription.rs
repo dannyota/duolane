@@ -57,10 +57,20 @@ pub struct CodexTranscriptionBackend {
 
 impl CodexTranscriptionBackend {
     pub fn new() -> Self {
+        Self::with_http_client(
+            std::sync::Arc::new(super::client::CodexHttpClient::new()),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        )
+    }
+
+    pub(crate) fn with_http_client(
+        client: std::sync::Arc<super::client::CodexHttpClient>,
+        limiter: std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> Self {
         Self {
-            client: std::sync::Arc::new(super::client::CodexHttpClient::new()),
+            client,
             base_url: TRANSCRIPTION_BASE_URL.to_string(),
-            limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+            limiter,
         }
     }
 
@@ -121,6 +131,7 @@ impl CodexTranscriptionBackend {
                 code: "upstream_error",
             });
             copy_safe_headers(&headers, response.headers_mut());
+            super::profiles::add_switch_header(&mut response);
             return response;
         }
         let body = match collect_response_body(upstream, self.client.body_idle_timeout_ms()).await {

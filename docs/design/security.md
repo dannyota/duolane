@@ -73,6 +73,12 @@ Rejections use the Anthropic error shape and never echo request values:
 - The Claude login passes through in transit and is never stored or logged.
 - The Codex login is read from `$CODEX_HOME/auth.json`, by default
   `~/.codex/auth.json`, and is never deleted, even after a rejected refresh.
+- A user can configure named Codex homes. The local CLI writes an owner-only
+  selector containing a name and definitions fingerprint. The server reads it
+  after inbound checks and validates it against its startup definitions. A named
+  profile reads and refreshes the login in its own home. The CLI accepts profile
+  names from the local command line. Inbound headers and models do not select a
+  credential store.
 - Writes to that file are atomic, flushed to disk, readable only by the user,
   and keep every field duolane does not own. duolane re-reads the file before
   each write for that reason.
@@ -89,11 +95,11 @@ Rejections use the Anthropic error shape and never echo request values:
 - If the lock cannot be taken, duolane keeps using an unexpired token. After a
   rejected refresh, duolane re-reads the file and uses a token that changed.
   Otherwise it reports that a new `codex login` is needed.
-- Connection reuse, continuation, and compaction state are bound to the account
-  that created them, and an account change is a cache miss. A request is sent
-  only with a login for the account it was translated for. If the login changed,
-  duolane translates the request again once for the new account, and answers
-  HTTP 409 if the login changes again during that retry.
+- Connection reuse, continuation, and compaction state are bound to the profile
+  and account that created them. Changing either causes a cache miss. A request
+  is sent only with a login for the account it was translated for. If the login
+  changed, duolane translates the request again once for the new account, and
+  answers HTTP 409 if the login changes again during that retry.
 
 ## Upstream connections
 
