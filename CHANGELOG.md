@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 - 2026-11-20
 
 ### Added
 
@@ -13,6 +13,8 @@
 - `duolane claude`, `duolane intercept setup`, and `duolane intercept cleanup`
   route Claude Code through that proxy, and `duolane intercept renew` replaces
   its certificate before it expires.
+- `duolane claude` and `duolane intercept setup` list the Codex models in Claude
+  Code's `/model` picker.
 
 ### Changed
 
@@ -27,6 +29,8 @@
   beyond loopback, and now also guards `/monitor`.
 - On Windows, config and logs move to `%APPDATA%` and `%LOCALAPPDATA%`.
 - Dependencies are refreshed to close known vulnerabilities.
+- A Codex context window overflow is reported as `prompt is too long`, so Claude
+  Code compacts the conversation.
 
 ### Removed
 

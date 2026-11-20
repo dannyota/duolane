@@ -158,14 +158,30 @@ with empty text, so the conversation stays valid.
    empty thinking is the only exception. Tool definitions follow the
    [Codex route rules](codex.md#request-translation) instead.
 
+## Live results
+
+Checked on 2026-11-20 with Claude Code 2.1.328 against the owner's accounts:
+
+- A Codex model (`gpt-6.2-sol`) answers through `ANTHROPIC_BASE_URL` and through
+  intercept mode.
+- One conversation switched from Opus to Sol and back, with a `Read` tool call
+  on each turn. Each model saw the other's turns and tool results.
+- Prompt caches hit on both sides: the Sol turn read 21,632 cached tokens from
+  Codex, and the return to Opus read 34,393 from Anthropic.
+- Claude Code sends effort for a Codex model: `--effort low` and `high` reached
+  the Codex route.
+- A `modelPicker` lineup lists the Codex models in `/model` in the terminal. The
+  Remote Control model list on a phone does not show them; `/model <id>` from
+  the phone works.
+- Not checked: a token refresh, the `originator` and `User-Agent` values, a
+  context window overflow, and a switch while a tool call is pending.
+
 ## Unverified behavior
 
 These inherited assumptions need a live check:
 
 - Switching backends while a tool call is pending.
 - Claude Code recording `request-id` as `requestId`.
-- Whether the Remote Control model control on a phone shows `modelPicker` rows,
-  and whether Claude Code sends effort for a Codex row.
 - Claude Code running web search through a client-side `WebSearch` tool and an
   isolated inner request, which would keep hosted search blocks out of the outer
   transcript. The Claude route logs `hosted_web_search_in_history` if such
