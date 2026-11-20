@@ -3,7 +3,7 @@ import json
 import re
 import sys
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 TAG = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -38,6 +38,19 @@ def validate(tag: str, commit: str, manifest: dict, release: dict, runs: list,
     package = manifest.get("package") if isinstance(manifest, dict) else None
     if not isinstance(package, dict) or package.get("name") != CRATE or package.get("version") != tag[1:]:
         raise ValueError("manifest does not match tag")
+    if "workspace" in manifest or "workspace" in package:
+        raise ValueError("expected a standalone package manifest")
+    for field in ("readme", "license-file"):
+        if field not in package:
+            continue
+        value = package[field]
+        if field == "readme" and isinstance(value, bool):
+            continue
+        if not isinstance(value, str) or not value:
+            raise ValueError("invalid package metadata path")
+        path = PurePosixPath(value)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError("package metadata path must stay inside checkout")
 
     if len(records(runs)) != 1:
         raise ValueError("expected one release run")

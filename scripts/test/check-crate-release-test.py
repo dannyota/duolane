@@ -60,6 +60,26 @@ class ReleaseGate(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.validate()
 
+    def test_package_metadata_paths_stay_inside_checkout(self):
+        package = self.manifest["package"]
+        package.update({"readme": "docs/README.md", "license-file": "LICENSE"})
+        self.assertIsNone(self.validate())
+        for field, path in (("readme", "../README.md"), ("license-file", "/tmp/LICENSE")):
+            original = package[field]
+            package[field] = path
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    self.validate()
+            package[field] = original
+
+    def test_package_requires_standalone_manifest(self):
+        for table, workspace in ((self.manifest, {}), (self.manifest["package"], "..")):
+            table["workspace"] = workspace
+            with self.subTest(workspace=workspace):
+                with self.assertRaises(ValueError):
+                    self.validate()
+            del table["workspace"]
+
     def test_release_run_for_another_commit_fails(self):
         self.runs[0]["headSha"] = "b" * 40
         with self.assertRaises(ValueError):

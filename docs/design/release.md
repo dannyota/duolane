@@ -14,9 +14,11 @@ access and crates.io access.
 ## Release gate
 
 - Dispatch `publish-crates.yml` from `main` with a `vMAJOR.MINOR.PATCH` tag. The
-  default is preflight only. Both modes share one concurrency group.
+  default is preflight only. Both modes share one concurrency group and require
+  the exact branch name. Publishing additionally requires protected `main`.
 - Preflight resolves the tag to a commit in the dispatch commit's history. The
-  tagged manifest must name `duolane` and match the tag version. The tag and
+  tagged manifest must describe the standalone `duolane` crate, match the tag
+  version, and keep README and license paths inside the checkout. The tag and
   commit must have a successful `release.yml` tag-push run. The published GitHub
   Release must contain all six uploaded archives and their checksums. Each asset
   digest must match the corresponding artifact file from that run. The `duolane`
@@ -30,9 +32,9 @@ access and crates.io access.
   `crates-io` environment approval. Before token exchange it checks the owner
   reviewer is still configured and that the run recorded an approval from that
   owner for the environment. It stops if the tag moved or the checkout includes
-  a Cargo config. It invokes the pinned numeric Rust version explicitly with an
-  empty Cargo home and the built-in `cargo:token` provider. It exchanges GitHub
-  OIDC for a short-lived token, then runs
+  a Cargo config or a tracked symlink. It invokes the pinned numeric Rust
+  version explicitly with an empty Cargo home and the built-in `cargo:token`
+  provider. It exchanges GitHub OIDC for a short-lived token, then runs
   `cargo publish --no-verify --locked --registry crates-io` without a build
   cache or compilation.
 

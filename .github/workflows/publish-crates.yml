@@ -34,6 +34,9 @@ jobs:
       commit: ${{ steps.validate.outputs.commit }}
       toolchain: ${{ steps.validate.outputs.toolchain }}
     steps:
+      - name: Require exact main ref
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -143,17 +146,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          environment_id=$(gh api "repos/$GITHUB_REPOSITORY/environments/crates-io" | jq -er '
-            select(.name == "crates-io" and any(
-              .protection_rules[] | select(.type == "required_reviewers") | .reviewers[];
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REF_PROTECTED" = true
+          environment_id=$(gh api "repos/$GITHUB_REPOSITORY/environments/crates-io" | jq -esr '
+            select(length == 1) | .[0] | objects
+            | select(.name == "crates-io" and any(
+              .protection_rules | arrays | .[] | objects | select(.type == "required_reviewers")
+              | .reviewers | arrays | .[] | objects;
               .type == "User" and .reviewer.login == "dannyota"
-            )) | .id | select(type == "number")
+            )) | .id | numbers
           ')
           [[ "$environment_id" =~ ^[1-9][0-9]*$ ]]
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" |
-            jq -e --argjson id "$environment_id" 'any(.[];
+            jq -es --argjson id "$environment_id" '
+              select(length == 1) | .[0] | arrays | any(.[] | objects;
               .state == "approved" and .user.login == "dannyota" and
-              any(.environments[]; .id == $id and .name == "crates-io")
+              any(.environments | arrays | .[] | objects; .id == $id and .name == "crates-io")
             )' > /dev/null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -167,6 +175,11 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$COMMIT"
           [[ -f Cargo.toml && ! -L Cargo.toml ]]
+          modes=$(git ls-files --format='%(objectmode)')
+          if grep -qx '120000' <<< "$modes"; then
+            echo 'Publishing requires a checkout without tracked symlinks' >&2
+            exit 1
+          fi
           if [[ -L .cargo || -e .cargo/config || -L .cargo/config || -e .cargo/config.toml || -L .cargo/config.toml ]]; then
             echo 'Publishing requires a checkout without Cargo configuration' >&2
             exit 1
