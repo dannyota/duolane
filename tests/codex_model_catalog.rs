@@ -48,7 +48,7 @@ fn write_catalog(dir: &TempDir, extra: &str) {
             "models":[entry(extra,true,"list",true), entry("gpt-6.2-sol",true,"list",false), entry("gpt-6.10.0-sol",true,"list",true), entry("gpt-6.10-sol",true,"list",false), entry("gpt-9-sol",true,"hide",false), entry("gpt-6.1-luna",true,"list",false), entry("gpt-6.2-luna",true,"list",true), entry("gpt-9-luna",true,"hide",true), entry("gpt-10-luna",false,"list",true), entry("gpt-test-hidden",true,"hide",false),
                 entry("gpt-test-denied",false,"list",true),
                 entry("gpt-5.4",true,"list",true), entry("gpt-6.1-terra",false,"hide",false),
-                entry("opus",true,"list",false), entry("gpt-test-forged-fast",true,"list",true),
+                entry("opus",true,"list",false), entry("luna",true,"list",true), entry("anthropic-luna",true,"list",true), entry("gpt-test-forged-fast",true,"list",true),
                 {"slug":"gpt-test-incomplete"}]
         }))
         .unwrap(),
@@ -152,14 +152,28 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         "anthropic-sol",
         "anthropic-astra",
     ] {
-        assert!(
+        assert_eq!(
             listing["data"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|entry| entry["id"] == alias),
+                .filter(|entry| entry["id"] == alias)
+                .count(),
+            1,
             "{alias}"
         );
+    }
+    for alias in ["luna", "anthropic-luna"] {
+        for suffix in ["fast", "ultrafast"] {
+            let variant = format!("{alias}-{suffix}");
+            assert!(
+                !listing["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["id"] == variant)
+            );
+        }
     }
     assert!(listing.to_string().contains("gpt-test-future-fast"));
     assert!(!listing.to_string().contains("gpt-test-hidden"));
@@ -214,6 +228,20 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         );
         assert_eq!(headers["authorization"], "Bearer synthetic-access");
     }
+    let response = client
+        .post(format!("{url}/v1/responses"))
+        .json(&json!({"model":"luna","input":"synthetic","tools":[{"type":"web_search"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let (headers, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(body["model"], "gpt-6.2-sol");
+    assert!(!headers.contains_key("x-openai-internal-codex-responses-lite"));
+
     for route in ["/v1/messages", "/v1/chat/completions"] {
         let mut request = json!({"model":"gpt-test-future-fast","stream":false,
                 "messages":[{"role":"user","content":"synthetic"}]});
@@ -295,6 +323,10 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         "gpt-test-future-ultrafast",
         "gpt-test-future-fast-fast",
         "gpt-5.4[1m]",
+        "luna-fast",
+        "luna-ultrafast",
+        "anthropic-luna-fast",
+        "anthropic-luna-ultrafast",
     ] {
         let response = client
             .post(format!("{url}/v1/responses"))

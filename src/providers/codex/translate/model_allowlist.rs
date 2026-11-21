@@ -331,11 +331,26 @@ pub fn uses_responses_lite_with_full_lane(model: &str, full_lane: bool) -> bool 
     uses_responses_lite(model)
 }
 
-pub fn full_lane_web_search_model(model: &str) -> &str {
+pub fn full_lane_web_search_model(model: &str) -> Cow<'_, str> {
     match model {
-        "gpt-5.6-luna" => "gpt-5.6-sol",
-        "gpt-6-luna" => "gpt-6-sol",
-        _ => model,
+        "gpt-5.6-luna" => Cow::Borrowed("gpt-5.6-sol"),
+        "gpt-6-luna" => Cow::Borrowed("gpt-6-sol"),
+        _ if version(model, "luna").is_some() && uses_responses_lite(model) => {
+            let sibling = format!("{}-sol", model.strip_suffix("-luna").unwrap_or(model));
+            let catalog = catalog_models();
+            if ALLOWED_MODELS.contains(&sibling.as_str())
+                || catalog
+                    .iter()
+                    .any(|entry| entry.slug == sibling && entry.listed && entry.supported_in_api)
+            {
+                Cow::Owned(sibling)
+            } else {
+                resolve_family_in("sol", catalog)
+                    .map(|resolved| Cow::Owned(resolved.model))
+                    .unwrap_or(Cow::Borrowed(model))
+            }
+        }
+        _ => Cow::Borrowed(model),
     }
 }
 
