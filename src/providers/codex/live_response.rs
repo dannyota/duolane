@@ -238,12 +238,13 @@ async fn live_stream_response_once(
     let mut upstream_sse_body = Vec::new();
     let mut pending_chunk = Vec::new();
     let mut generation_started = false;
+    let mut hosted_tool_executed = false;
 
     while let Some(item) = upstream_events.recv().await {
         let payload = match item {
             Ok(payload) => payload,
             Err(err) => {
-                if retryable_live_start_codex_error(&err) {
+                if !hosted_tool_executed && retryable_live_start_codex_error(&err) {
                     return provider_retry(&upstream_events, err);
                 }
                 abort_request_state(
@@ -254,6 +255,7 @@ async fn live_stream_response_once(
                 return LiveStreamStart::Response(map_codex_error_to_response(&err));
             }
         };
+        hosted_tool_executed |= events::event_confirms_hosted_tool_execution(&payload);
         if !generation_started && codex_generation_event(&payload) {
             if let Some(monitor) = ctx.monitor.as_ref() {
                 monitor.generation_started(&ctx.req_id);
@@ -274,7 +276,7 @@ async fn live_stream_response_once(
                     return LiveStreamStart::Response(usage_limit_response(&limit));
                 }
                 if let Some(failure) = events::classify_event_failure(&payload) {
-                    if failure.retryable() {
+                    if !hosted_tool_executed && failure.retryable() {
                         return provider_retry(
                             &upstream_events,
                             codex_event_failure_error(
@@ -306,6 +308,15 @@ async fn live_stream_response_once(
             && !translator.has_semantic_output()
             && !(accept_empty && terminal_status_is_completed(&payload))
         {
+            let error = empty_live_completion_error();
+            if hosted_tool_executed {
+                abort_request_state(
+                    ctx.session_id.as_deref(),
+                    &request_continuation,
+                    compaction.attempt,
+                );
+                return LiveStreamStart::Response(map_codex_error_to_response(&error));
+            }
             create_logger("codex").warn(
                 "codex_empty_completion_retry",
                 Some(serde_json::Map::from_iter([
@@ -318,7 +329,7 @@ async fn live_stream_response_once(
                     ("stream".to_string(), serde_json::json!(true)),
                 ])),
             );
-            return provider_retry(&upstream_events, empty_live_completion_error());
+            return provider_retry(&upstream_events, error);
         }
         if translator.has_semantic_output() && !pending_chunk.is_empty() {
             record_live_stream_downstream_capture(&ctx, &pending_chunk);
@@ -365,17 +376,16 @@ async fn live_stream_response_once(
         }
     }
 
-    provider_retry(
-        &upstream_events,
-        client::CodexError {
-            status: 0,
-            message: "WebSocket connection closed before terminal Codex response event".to_string(),
-            detail: Some(websocket::WEBSOCKET_MISSING_TERMINAL_DETAIL.to_string()),
-            retry_after: None,
-            usage_limit: None,
-            origin: client::CodexErrorOrigin::WebSocket,
-        },
-    )
+    let error = websocket::missing_terminal_error();
+    if hosted_tool_executed {
+        abort_request_state(
+            ctx.session_id.as_deref(),
+            &request_continuation,
+            compaction.attempt,
+        );
+        return LiveStreamStart::Response(map_codex_error_to_response(&error));
+    }
+    provider_retry(&upstream_events, error)
 }
 
 fn translate_live_stream_payload(
@@ -1059,6 +1069,142 @@ mod tests {
         while let Some(frame) = body.frame().await {
             frame.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn live_websocket_retries_tls_eof_before_output() {
+        check_live_websocket_tls_eof(false).await;
+    }
+
+    #[tokio::test]
+    async fn live_websocket_does_not_replay_tls_eof_after_output() {
+        check_live_websocket_tls_eof(true).await;
+    }
+
+    #[tokio::test]
+    async fn live_websocket_does_not_replay_tls_eof_after_hosted_search() {
+        assert_no_websocket_replay_after_hosted_search(
+            serde_json::json!({
+                "type": "response.web_search_call.completed",
+                "item_id": "search_1",
+                "output_index": 0
+            }),
+            |client| async move {
+                let req = live_test_request("search");
+                let model = req.model.clone();
+                live_stream_response(
+                    Arc::new(client),
+                    "message".to_string(),
+                    &model,
+                    live_test_context("hosted-search-live"),
+                    req,
+                    ContinuationReservation::for_owner_turn(None, None),
+                    LiveStreamCompaction {
+                        compact_boundary: false,
+                        attempt: None,
+                    },
+                    config::CodexTransport::WebSocket,
+                    false,
+                )
+                .await
+                .status()
+                .as_u16()
+            },
+        )
+        .await;
+    }
+
+    async fn check_live_websocket_tls_eof(after_output: bool) {
+        use super::super::client_test_support::{http_test_auth, loopback_tls};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tls, http) = loopback_tls();
+        let mut client = CodexHttpClient::new_for_test(
+            http.clone(),
+            format!("https://{addr}/responses"),
+            1_000,
+            1_000,
+        );
+        client.websocket_client = http;
+        client.auth_manager().set_test_auth(http_test_auth());
+        let (visible_tx, visible_rx) = tokio::sync::oneshot::channel();
+        let server = async {
+            for attempt in 0..2 {
+                let (socket, _) = listener.accept().await.unwrap();
+                let stream = tls.accept(socket).await.unwrap();
+                let mut websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let _ = next_live_websocket_request(&mut websocket).await;
+                if after_output || attempt == 1 {
+                    for event in [
+                        serde_json::json!({
+                            "type": "response.output_item.added",
+                            "output_index": 0,
+                            "item": {"type": "message", "id": "upstream-message"}
+                        }),
+                        serde_json::json!({
+                            "type": "response.output_text.delta",
+                            "output_index": 0,
+                            "delta": "visible"
+                        }),
+                    ] {
+                        emit_live_event(&mut websocket, &event).await;
+                    }
+                }
+                if attempt == 1 {
+                    emit_live_event(
+                        &mut websocket,
+                        &serde_json::json!({
+                            "type": "response.completed",
+                            "response": {"id": "upstream-response", "status": "completed", "output": []}
+                        }),
+                    )
+                    .await;
+                }
+                if after_output {
+                    visible_rx.await.unwrap();
+                    break;
+                }
+            }
+        };
+        let run = async {
+            let request = live_test_request("one");
+            let model = request.model.clone();
+            let response = live_stream_response(
+                Arc::new(client),
+                "message".to_string(),
+                &model,
+                live_test_context("tls-eof"),
+                request,
+                ContinuationReservation::for_owner_turn(None, None),
+                LiveStreamCompaction {
+                    compact_boundary: false,
+                    attempt: None,
+                },
+                config::CodexTransport::WebSocket,
+                false,
+            )
+            .await;
+            assert_eq!(response.status(), http::StatusCode::OK);
+            let mut body = response.into_body();
+            let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+            assert!(std::str::from_utf8(&first).unwrap().contains("visible"));
+            if after_output {
+                visible_tx.send(()).unwrap();
+            }
+            let remaining = body.collect().await.unwrap().to_bytes();
+            let sse = std::str::from_utf8(&remaining).unwrap();
+            assert_eq!(sse.contains("event: error"), after_output);
+            assert_eq!(sse.contains("event: message_stop"), !after_output);
+        };
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(run, server) })
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

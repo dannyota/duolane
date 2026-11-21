@@ -1,8 +1,79 @@
+use axum::Json;
+use axum::response::{IntoResponse, Response};
+use http::StatusCode;
+use tiktoken_rs::o200k_base_singleton;
+
+use crate::anthropic::error::json_error;
+use crate::anthropic::schema::{CountTokensResponse, MessagesRequest};
+use crate::config;
+use crate::provider::RequestContext;
+
+use super::CodexProvider;
+use super::request_state::apply_model_lane_for_request;
+use super::translate::model_allowlist::resolve_model_request_with_config_override;
 use super::translate::request::{
     ResponsesContentPart, ResponsesFunctionCallOutput, ResponsesFunctionCallOutputContentPart,
-    ResponsesInputItem, ResponsesRequest, ResponsesTool,
+    ResponsesInputItem, ResponsesRequest, ResponsesTool, TranslateOptions, translate_request,
 };
-use tiktoken_rs::o200k_base_singleton;
+
+impl CodexProvider {
+    pub(super) async fn count_tokens_response(
+        &self,
+        body: MessagesRequest,
+        ctx: RequestContext,
+    ) -> Response {
+        let model = body.model.as_deref().unwrap_or("opus");
+        let mut resolved =
+            resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
+        if let Err(e) = resolved.assert_allowed() {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                format!(
+                    "Model \"{model}\" resolves to unsupported model \"{}\"",
+                    e.model
+                ),
+            );
+        }
+        let use_responses_lite =
+            apply_model_lane_for_request(&mut resolved, &body, config::codex_full_lane());
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            monitor.model_resolved(&ctx.req_id, &resolved.model);
+        }
+
+        let translated = match translate_request(
+            &body,
+            TranslateOptions {
+                session_id: None,
+                service_tier: resolved.service_tier.clone(),
+                model: resolved.model.clone(),
+                use_responses_lite,
+                reasoning_account: self.client.auth_manager().reasoning_account().await,
+            },
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    e.to_string(),
+                );
+            }
+        };
+
+        let tokens = count_translated_tokens(&translated);
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            monitor.usage_updated(&ctx.req_id, Some(tokens), None);
+        }
+        (
+            StatusCode::OK,
+            Json(CountTokensResponse {
+                input_tokens: tokens,
+            }),
+        )
+            .into_response()
+    }
+}
 
 pub fn count_translated_tokens(translated: &ResponsesRequest) -> u64 {
     let mut total = 0u64;

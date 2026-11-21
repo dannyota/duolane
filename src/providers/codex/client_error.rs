@@ -19,6 +19,8 @@ pub struct CodexError {
 }
 
 pub(crate) const CODEX_ACCOUNT_CHANGED_DETAIL: &str = "codex_account_changed";
+pub(super) const TRANSPORT_UNEXPECTED_EOF_DETAIL: &str = "transport_unexpected_eof";
+const HOSTED_TOOL_EXECUTED_DETAIL: &str = "hosted_tool_executed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexErrorOrigin {
@@ -31,6 +33,11 @@ pub enum CodexErrorOrigin {
 }
 
 impl CodexError {
+    pub(super) fn after_hosted_tool_execution(mut self) -> Self {
+        self.detail = Some(HOSTED_TOOL_EXECUTED_DETAIL.to_string());
+        self
+    }
+
     pub fn new(status: u16, message: String) -> Self {
         Self {
             status,
@@ -218,7 +225,10 @@ pub(super) fn codex_error_origin_name(origin: CodexErrorOrigin) -> &'static str 
 }
 
 pub(super) fn is_retryable_transport_error(err: &CodexError) -> bool {
-    if err.detail.as_deref() == Some(HTTP_RESPONSE_HEADERS_DETAIL) {
+    if matches!(
+        err.detail.as_deref(),
+        Some(HTTP_RESPONSE_HEADERS_DETAIL | HOSTED_TOOL_EXECUTED_DETAIL)
+    ) {
         return false;
     }
     if err.origin == CodexErrorOrigin::WebSocketHandshake {
@@ -238,7 +248,8 @@ pub(super) fn is_retryable_transport_error(err: &CodexError) -> bool {
     }
 
     let message = err.message.to_ascii_lowercase();
-    message.contains("timed out waiting")
+    err.detail.as_deref() == Some(TRANSPORT_UNEXPECTED_EOF_DETAIL)
+        || message.contains("timed out waiting")
         || message.contains("transport error")
         || message.contains("connection reset")
         || message.contains("connection closed")
@@ -249,8 +260,16 @@ pub(super) fn is_retryable_transport_error(err: &CodexError) -> bool {
         || message.contains("epipe")
 }
 
+pub(super) fn has_unexpected_eof(error: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(error), |error| error.source()).any(|source| {
+        source
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::UnexpectedEof)
+    })
+}
+
 pub(super) fn is_retryable_reqwest_error(err: &reqwest::Error) -> bool {
-    if err.is_timeout() || err.is_connect() {
+    if err.is_timeout() || err.is_connect() || has_unexpected_eof(err) {
         return true;
     }
     let msg = err.to_string().to_lowercase();

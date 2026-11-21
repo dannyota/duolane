@@ -30,8 +30,11 @@ pub(super) struct HttpEventStreamState {
 }
 
 impl HttpSseDecoder {
-    pub(super) fn push(&mut self, input: &[u8]) -> Result<Vec<DecodedHttpSseEvent>, CodexError> {
-        let mut events = Vec::new();
+    pub(super) fn push(
+        &mut self,
+        input: &[u8],
+        events: &mut Vec<DecodedHttpSseEvent>,
+    ) -> Result<(), CodexError> {
         for &byte in input {
             if self.skip_lf {
                 self.skip_lf = false;
@@ -40,15 +43,15 @@ impl HttpSseDecoder {
                 }
             }
             match byte {
-                b'\n' => self.end_line(&mut events)?,
+                b'\n' => self.end_line(events)?,
                 b'\r' => {
-                    self.end_line(&mut events)?;
+                    self.end_line(events)?;
                     self.skip_lf = true;
                 }
                 _ => self.push_byte(byte)?,
             }
         }
-        Ok(events)
+        Ok(())
     }
 
     pub(super) fn finish(&self) -> Result<(), CodexError> {
@@ -233,14 +236,16 @@ mod tests {
     #[test]
     fn http_sse_decoder_handles_fragmented_crlf_and_done_marker() {
         let mut decoder = HttpSseDecoder::default();
-        assert!(
-            decoder
-                .push(b"event: response.output_text.delta\r")
-                .unwrap()
-                .is_empty()
-        );
-        let events = decoder
-            .push(b"\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\r\n\r\n")
+        let mut events = Vec::new();
+        decoder
+            .push(b"event: response.output_text.delta\r", &mut events)
+            .unwrap();
+        assert!(events.is_empty());
+        decoder
+            .push(
+                b"\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\r\n\r\n",
+                &mut events,
+            )
             .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(
@@ -256,9 +261,10 @@ mod tests {
             Some("ok")
         );
 
-        let done = decoder.push(b"data: [DONE]\n\n").unwrap();
-        assert_eq!(done.len(), 1);
-        assert!(done[0].payload.is_none());
+        events.clear();
+        decoder.push(b"data: [DONE]\n\n", &mut events).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].payload.is_none());
         decoder.finish().unwrap();
     }
 

@@ -33,6 +33,7 @@ pub(crate) const MAX_UPSTREAM_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) struct OwnerAwareCodexResponse {
     response: CodexResponse,
     pub(crate) socket_id: Option<u64>,
+    pub(super) hosted_tool_executed: bool,
 }
 
 impl OwnerAwareCodexResponse {
@@ -40,6 +41,7 @@ impl OwnerAwareCodexResponse {
         Self {
             response,
             socket_id,
+            hosted_tool_executed: false,
         }
     }
 

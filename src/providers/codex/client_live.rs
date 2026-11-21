@@ -76,6 +76,7 @@ impl CodexHttpClient {
             .and_then(|reservation| reservation.candidate().previous_response_id.as_deref())
             .is_some();
         let mut forwarded_any = false;
+        let mut hosted_tool_executed = false;
 
         'attempt: loop {
             socket_id_publisher.publish(None);
@@ -205,11 +206,18 @@ impl CodexHttpClient {
                 };
                 socket_id_publisher.publish(stream.socket_id());
 
+                hosted_tool_executed |= item
+                    .as_ref()
+                    .is_ok_and(super::events::event_confirms_hosted_tool_execution);
                 let unauthorized = match &item {
                     Err(err) => err.status == 401,
                     Ok(payload) => super::websocket::event_error_status(payload) == Some(401),
                 };
-                if unauthorized && !auth_refresh_attempted && !forwarded_any {
+                if unauthorized
+                    && !auth_refresh_attempted
+                    && !forwarded_any
+                    && !hosted_tool_executed
+                {
                     auth_refresh_attempted = true;
                     invalidate_live_continuation_pool(continuation.as_ref());
                     let refresh = self.refreshed_auth(&auth);
@@ -258,6 +266,7 @@ impl CodexHttpClient {
                     && continuation_retry_available
                     && is_continuation_retry_error(err)
                     && !forwarded_any
+                    && !hosted_tool_executed
                 {
                     socket_id_publisher.mark_full_context_retry();
                     continuation = full_context_continuation(continuation.as_ref());

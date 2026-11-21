@@ -181,6 +181,7 @@ impl CodexHttpClient {
         tokio::spawn(async move {
             let log = create_logger("codex");
             let mut semantic_output_forwarded = false;
+            let mut hosted_tool_executed = false;
 
             if tx
                 .send(Ok(serde_json::json!({
@@ -240,7 +241,10 @@ impl CodexHttpClient {
                                 event_count,
                                 Some(&error.message),
                             );
-                            if !semantic_output_forwarded && retryable_http_stream_error(&error) {
+                            if !semantic_output_forwarded
+                                && !hosted_tool_executed
+                                && retryable_http_stream_error(&error)
+                            {
                                 break 'read_attempt error;
                             }
                             let _ = tx.send(Err(error)).await;
@@ -267,7 +271,7 @@ impl CodexHttpClient {
                                 event_count,
                                 Some(&error.message),
                             );
-                            if !semantic_output_forwarded {
+                            if !semantic_output_forwarded && !hosted_tool_executed {
                                 break 'read_attempt error;
                             }
                             let _ = tx.send(Err(error)).await;
@@ -294,7 +298,7 @@ impl CodexHttpClient {
                                 event_count,
                                 Some(&error.message),
                             );
-                            if !semantic_output_forwarded {
+                            if !semantic_output_forwarded && !hosted_tool_executed {
                                 break 'read_attempt error;
                             }
                             let _ = tx.send(Err(error)).await;
@@ -304,26 +308,31 @@ impl CodexHttpClient {
 
                     body_bytes = body_bytes.saturating_add(chunk.len() as u64);
                     body_chunks = body_chunks.saturating_add(1);
-                    let events = match decoder.push(&chunk) {
-                        Ok(events) => events,
-                        Err(error) => {
-                            log_http_stream_end(
-                                &log,
-                                "codex_http_stream_failed",
-                                &req_id,
-                                started_at,
-                                body_bytes,
-                                body_chunks,
-                                event_count,
-                                Some(&error.message),
-                            );
-                            if !semantic_output_forwarded && retryable_http_stream_error(&error) {
-                                break 'read_attempt error;
-                            }
-                            let _ = tx.send(Err(error)).await;
-                            return;
+                    let mut events = Vec::new();
+                    if let Err(error) = decoder.push(&chunk, &mut events) {
+                        hosted_tool_executed |= events
+                            .iter()
+                            .filter_map(|event| event.payload.as_ref())
+                            .any(super::events::event_confirms_hosted_tool_execution);
+                        log_http_stream_end(
+                            &log,
+                            "codex_http_stream_failed",
+                            &req_id,
+                            started_at,
+                            body_bytes,
+                            body_chunks,
+                            event_count,
+                            Some(&error.message),
+                        );
+                        if !semantic_output_forwarded
+                            && !hosted_tool_executed
+                            && retryable_http_stream_error(&error)
+                        {
+                            break 'read_attempt error;
                         }
-                    };
+                        let _ = tx.send(Err(error)).await;
+                        return;
+                    }
 
                     for event in events {
                         let Some(payload) = event.payload else {
@@ -338,6 +347,8 @@ impl CodexHttpClient {
                             );
                         }
 
+                        hosted_tool_executed |=
+                            super::events::event_confirms_hosted_tool_execution(&payload);
                         let event_kind = super::events::classify_stream_event(&payload);
                         let failure = super::events::classify_event_failure(&payload);
                         if !semantic_output_forwarded {
@@ -356,6 +367,7 @@ impl CodexHttpClient {
                             }
                             if let Some(failure) = failure.as_ref()
                                 && failure.retryable()
+                                && !hosted_tool_executed
                             {
                                 pending_events.clear();
                                 break 'read_attempt codex_event_failure_error(failure.clone());
@@ -635,6 +647,127 @@ mod tests {
         assert_eq!(limit.resets_at, Some(1789466238));
         assert_eq!(limit.window, Some(CodexLimitWindow::SevenDay));
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_stream_retries_tls_eof_before_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tls, http) = loopback_tls();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut stream = tls.accept(socket).await.unwrap();
+            read_http_request(&mut stream).await;
+            drop(stream);
+
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut stream = tls.accept(socket).await.unwrap();
+            read_http_request(&mut stream).await;
+            let body = b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        let client = Arc::new(CodexHttpClient::new_for_test(
+            http,
+            format!("https://{addr}/responses"),
+            1_000,
+            1_000,
+        ));
+        client.auth_manager().set_test_auth(http_test_auth());
+        let mut events = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.stream_codex_http_events(&buffered_test_request(), &http_test_context()),
+        )
+        .await
+        .unwrap()
+        .expect("TLS EOF before response headers must be retried");
+        let keepalive = events.recv().await.unwrap().unwrap();
+        assert_eq!(keepalive["type"], "keepalive");
+        let terminal = events.recv().await.unwrap().unwrap();
+        assert_eq!(terminal["type"], "response.completed");
+        assert!(events.recv().await.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_stream_does_not_replay_tls_eof_after_hosted_search() {
+        check_http_stream_does_not_replay_after_hosted_search(false).await;
+    }
+
+    #[tokio::test]
+    async fn http_stream_does_not_replay_malformed_frame_after_hosted_search_in_same_chunk() {
+        check_http_stream_does_not_replay_after_hosted_search(true).await;
+    }
+
+    async fn check_http_stream_does_not_replay_after_hosted_search(malformed_frame: bool) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tls, http) = loopback_tls();
+        let client = Arc::new(CodexHttpClient::new_for_test(
+            http,
+            format!("https://{addr}/responses"),
+            1_000,
+            1_000,
+        ));
+        client.auth_manager().set_test_auth(http_test_auth());
+        let sends = std::cell::Cell::new(0);
+        let server = async {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut stream = tls.accept(socket).await.unwrap();
+                read_http_request(&mut stream).await;
+                sends.set(sends.get() + 1);
+                if sends.get() == 2 {
+                    return;
+                }
+                let event = "data: {\"type\":\"response.web_search_call.completed\",\"item_id\":\"search_1\",\"output_index\":0}\n\n";
+                let (trailing, content_length) = if malformed_frame {
+                    let malformed = "data: {broken json}\n\n";
+                    (malformed, event.len() + malformed.len())
+                } else {
+                    ("", 1024)
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {content_length}\r\n\r\n{event}{trailing}"
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        };
+        let request = async {
+            let mut events = client
+                .stream_codex_http_events(&buffered_test_request(), &http_test_context())
+                .await
+                .unwrap();
+            assert!(events.recv().await.unwrap().unwrap()["type"] == "keepalive");
+            let mut saw_search = false;
+            let error = loop {
+                match events.recv().await.unwrap() {
+                    Ok(event) => {
+                        saw_search |= event["type"] == "response.web_search_call.completed"
+                    }
+                    Err(error) => break error,
+                }
+            };
+            if malformed_frame {
+                assert!(error.message.contains("invalid JSON"));
+            } else {
+                assert!(saw_search);
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                _ = server => {},
+                () = request => {},
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(sends.get(), 1);
     }
 
     #[tokio::test]
