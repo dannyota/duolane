@@ -296,6 +296,7 @@ fn copy_safe_headers(source: &http::HeaderMap, target: &mut http::HeaderMap) {
 }
 
 fn transcription_transport_error_response(error: super::client::CodexError) -> Response {
+    let exhausted = error.is_recovery_exhausted();
     let status = match error.status {
         401 => StatusCode::UNAUTHORIZED,
         403 => StatusCode::FORBIDDEN,
@@ -323,6 +324,11 @@ fn transcription_transport_error_response(error: super::client::CodexError) -> R
             "upstream_error"
         },
     });
+    if exhausted {
+        response
+            .headers_mut()
+            .insert("x-should-retry", http::HeaderValue::from_static("false"));
+    }
     if let Some(retry_after) = error.retry_after
         && let Ok(value) = http::HeaderValue::from_str(&retry_after)
     {
@@ -365,6 +371,7 @@ mod tests {
 
     fn context() -> crate::provider::RequestContext {
         crate::provider::RequestContext {
+            recovery_budget: Default::default(),
             req_id: "transcription-test".to_string(),
             session_id: None,
             traffic: None,

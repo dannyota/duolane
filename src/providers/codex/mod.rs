@@ -26,6 +26,7 @@ mod live_response;
 pub mod native;
 #[cfg(test)]
 mod provider_test_support;
+pub mod recovery;
 mod request_state;
 pub mod request_summary;
 pub mod search;
@@ -55,7 +56,7 @@ use crate::config;
 use crate::logging::create_logger;
 use crate::provider::{CliHandlers, Provider, RequestContext};
 use crate::request_identity::ConversationIdentity;
-use crate::retry::{compute_backoff_delay, sleep};
+use crate::retry::compute_backoff_delay;
 
 use self::auth::token_store::file_store;
 use self::client::CodexHttpClient;
@@ -316,7 +317,9 @@ impl CodexProvider {
                     abort_compaction_attempt(Some(session_id), Some(attempt));
                     return map_codex_error_to_response(&error);
                 }
-                Err(CompactionError::Upstream(error)) if error.usage_limit.is_some() => {
+                Err(CompactionError::Upstream(error))
+                    if error.usage_limit.is_some() || error.is_recovery_exhausted() =>
+                {
                     abort_compaction_attempt(Some(session_id), Some(attempt));
                     log_compaction_event(
                         "server_compaction_failed",
@@ -532,7 +535,11 @@ impl CodexProvider {
                 ])),
             );
             attempt += 1;
-            sleep(delay.wait_ms).await;
+            if !ctx.recovery_budget.wait_retry(delay.wait_ms, true).await {
+                abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
+                abort_continuation_for_owner(&request_continuation);
+                return map_codex_error_to_response(&client::CodexError::recovery_exhausted());
+            }
         };
         if let Some(failure) = events::first_event_failure(&upstream.body) {
             abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
@@ -960,6 +967,16 @@ mod tests {
         event: serde_json::Value,
         expected_attempts: usize,
     ) -> Response {
+        run_live_failure_case_with_budget(session_id, event, expected_attempts, Default::default())
+            .await
+    }
+
+    async fn run_live_failure_case_with_budget(
+        session_id: &str,
+        event: serde_json::Value,
+        expected_attempts: usize,
+        budget: recovery::RecoveryBudget,
+    ) -> Response {
         let owner = ConversationIdentity::Main(session_id.to_string());
         continuation::clear_continuation_for_owner(Some(&owner));
         websocket::invalidate_codex_websocket_pool_owner(&owner);
@@ -985,7 +1002,10 @@ mod tests {
                 client,
                 "message".to_string(),
                 &request.model,
-                live_test_context(session_id),
+                RequestContext {
+                    recovery_budget: budget,
+                    ..live_test_context(session_id)
+                },
                 request.clone(),
                 continuation.clone(),
                 LiveStreamCompaction {
@@ -1062,30 +1082,103 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_exhaustion_aborts_live_request_state_after_eleven_attempts() {
+    async fn retry_exhaustion_aborts_live_request_state_after_four_attempts() {
         let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
         let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
         crate::retry::set_zero_retry_delay_for_tests(true);
         let status = run_live_failure_case(
             "live-retry-exhaustion-cleanup",
-            serde_json::json!({
-                "type": "response.failed",
-                "response": {
-                    "status": "failed",
-                    "error": {
-                        "status": 429,
-                        "code": "rate_limit_exceeded",
-                        "message": "rate limit reached",
-                        "retry_after_seconds": 0
-                    }
-                }
-            }),
-            11,
+            serde_json::json!({"type": "response.created"}),
+            4,
         )
-        .await
-        .status();
+        .await;
         crate::retry::set_zero_retry_delay_for_tests(false);
-        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(status.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(status.headers()["x-should-retry"], "false");
+    }
+
+    #[tokio::test]
+    async fn empty_completion_exhaustion_stops_after_three_attempts() {
+        let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
+        crate::retry::set_zero_retry_delay_for_tests(true);
+        let response = run_live_failure_case(
+            "live-empty-exhaustion-cleanup",
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {"status": "completed"}
+            }),
+            3,
+        )
+        .await;
+        crate::retry::set_zero_retry_delay_for_tests(false);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["x-should-retry"], "false");
+    }
+
+    #[tokio::test]
+    async fn recovery_deadline_refuses_backoff_and_returns_exhausted_response() {
+        let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
+        let response = run_live_failure_case_with_budget(
+            "live-deadline-cleanup",
+            serde_json::json!({"type": "response.created"}),
+            1,
+            recovery::RecoveryBudget::with_window(std::time::Duration::from_millis(20)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["x-should-retry"], "false");
+    }
+
+    #[tokio::test]
+    async fn slow_first_live_attempt_is_not_limited_by_recovery_window() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_live_websocket_request(&mut websocket).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            emit_live_event(&mut websocket, &serde_json::json!({
+                "type":"response.failed", "response":{"status":"failed", "error":{
+                    "status":429, "code":"rate_limit_exceeded", "message":"retry", "retry_after_seconds":0
+                }}
+            })).await;
+            drop(websocket);
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_live_websocket_request(&mut websocket).await;
+            emit_live_event(
+                &mut websocket,
+                &serde_json::json!({
+                    "type":"response.output_text.delta", "output_index":0, "delta":"ok"
+                }),
+            )
+            .await;
+        });
+        let request = live_test_request("one");
+        let mut ctx = live_test_context("slow-first-live");
+        ctx.recovery_budget =
+            recovery::RecoveryBudget::with_window(std::time::Duration::from_millis(200));
+        let response = live_stream_response(
+            authenticated_live_test_client(format!("http://{addr}/responses")),
+            "message".to_string(),
+            &request.model,
+            ctx,
+            request.clone(),
+            continuation::ContinuationReservation::for_owner_turn(None, None),
+            LiveStreamCompaction {
+                compact_boundary: false,
+                attempt: None,
+            },
+            config::CodexTransport::WebSocket,
+            false,
+            Arc::default(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        server.await.unwrap();
     }
 
     #[tokio::test]

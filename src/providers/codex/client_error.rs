@@ -31,9 +31,21 @@ pub enum CodexErrorOrigin {
     Auth,
     BufferedHttp,
     BufferedWebSocket,
+    RecoveryBudget,
 }
 
 impl CodexError {
+    pub(super) fn recovery_exhausted() -> Self {
+        Self {
+            origin: CodexErrorOrigin::RecoveryBudget,
+            ..Self::new(503, "Codex completed without producing output".to_string())
+        }
+    }
+
+    pub(super) fn is_recovery_exhausted(&self) -> bool {
+        self.origin == CodexErrorOrigin::RecoveryBudget
+    }
+
     pub(super) fn after_hosted_tool_execution(mut self) -> Self {
         self.detail = Some(HOSTED_TOOL_EXECUTED_DETAIL.to_string());
         self
@@ -123,7 +135,7 @@ pub(super) fn codex_usage_limit_error(
 }
 
 pub(super) fn retryable_http_stream_error(error: &CodexError) -> bool {
-    if error.usage_limit.is_some() {
+    if error.usage_limit.is_some() || error.is_recovery_exhausted() {
         return false;
     }
     if should_retry_codex_status(error.status) || is_retryable_transport_error(error) {
@@ -236,10 +248,14 @@ pub(super) fn codex_error_origin_name(origin: CodexErrorOrigin) -> &'static str 
         CodexErrorOrigin::Auth => "auth",
         CodexErrorOrigin::BufferedHttp => "buffered_http",
         CodexErrorOrigin::BufferedWebSocket => "buffered_websocket",
+        CodexErrorOrigin::RecoveryBudget => "recovery_budget",
     }
 }
 
 pub(super) fn is_retryable_transport_error(err: &CodexError) -> bool {
+    if err.is_recovery_exhausted() {
+        return false;
+    }
     if matches!(
         err.detail.as_deref(),
         Some(HTTP_RESPONSE_HEADERS_DETAIL | HOSTED_TOOL_EXECUTED_DETAIL)

@@ -144,6 +144,9 @@ impl CodexHttpClient {
                                     .load(std::sync::atomic::Ordering::Acquire)
                                 && should_fallback_to_http(&err) =>
                         {
+                            if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
+                                return Err(CodexError::recovery_exhausted());
+                            }
                             let http_body = http_body.get_or_try_init(prepare_http_body).await?;
                             self.attempt_post_http(
                                 &auth,
@@ -166,7 +169,11 @@ impl CodexHttpClient {
                 && should_refresh_after_unauthorized(&result, auth_refresh_attempted, transport)
             {
                 auth_refresh_attempted = true;
+                ctx.recovery_budget.start();
                 auth = self.refreshed_auth(&auth).await.inspect_err(|error| {
+                    if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
+                        ctx.recovery_budget.cancel_unspent_start();
+                    }
                     if !sent_before_attempt
                         && result.as_ref().is_ok_and(|response| {
                             response.transport == ActualTransport::WebSocket
@@ -186,6 +193,9 @@ impl CodexHttpClient {
                             .store(false, std::sync::atomic::Ordering::Release);
                     }
                 })?;
+                if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
+                    return Err(CodexError::recovery_exhausted());
+                }
                 invalidate_live_continuation_pool(active_continuation.as_ref());
                 active_continuation = full_context_continuation(active_continuation.as_ref());
                 continue;
@@ -231,12 +241,24 @@ impl CodexHttpClient {
                         "upstream_event",
                         &failure.message,
                     );
+                    if !ctx
+                        .recovery_budget
+                        .try_retry(Duration::from_millis(delay.wait_ms), false)
+                    {
+                        return Err(CodexError::recovery_exhausted());
+                    }
                     transport_failures += 1;
                     active_continuation = full_context_continuation(active_continuation.as_ref());
                     sleep(delay.wait_ms).await;
+                    if ctx.recovery_budget.expired() {
+                        return Err(CodexError::recovery_exhausted());
+                    }
                     continue;
                 }
 
+                if replay_allowed && transport_failures >= MAX_BUFFERED_TRANSPORT_RETRIES {
+                    return Err(CodexError::recovery_exhausted());
+                }
                 log_buffered_retry_exhausted(
                     ctx,
                     transport,
@@ -306,9 +328,21 @@ impl CodexHttpClient {
                             "upstream",
                             "rate limited",
                         );
+                        if !ctx
+                            .recovery_budget
+                            .try_retry(Duration::from_millis(delay.wait_ms), false)
+                        {
+                            return Err(CodexError::recovery_exhausted());
+                        }
                         transport_failures += 1;
                         sleep(delay.wait_ms).await;
+                        if ctx.recovery_budget.expired() {
+                            return Err(CodexError::recovery_exhausted());
+                        }
                         continue;
+                    }
+                    if replay_allowed && transport_failures >= MAX_BUFFERED_TRANSPORT_RETRIES {
+                        return Err(CodexError::recovery_exhausted());
                     }
                     let detail = String::from_utf8_lossy(&response.body).to_string();
                     log_buffered_retry_exhausted(
@@ -347,9 +381,21 @@ impl CodexHttpClient {
                             "upstream",
                             "retryable upstream status",
                         );
+                        if !ctx
+                            .recovery_budget
+                            .try_retry(Duration::from_millis(delay.wait_ms), false)
+                        {
+                            return Err(CodexError::recovery_exhausted());
+                        }
                         transport_failures += 1;
                         sleep(delay.wait_ms).await;
+                        if ctx.recovery_budget.expired() {
+                            return Err(CodexError::recovery_exhausted());
+                        }
                         continue;
+                    }
+                    if replay_allowed && transport_failures >= MAX_BUFFERED_TRANSPORT_RETRIES {
+                        return Err(CodexError::recovery_exhausted());
                     }
                     log_buffered_retry_exhausted(
                         ctx,
@@ -367,11 +413,15 @@ impl CodexHttpClient {
                 Err(err)
                     if should_retry_without_continuation(&err, active_continuation.as_ref()) =>
                 {
+                    if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
+                        return Err(CodexError::recovery_exhausted());
+                    }
                     active_continuation = full_context_continuation(active_continuation.as_ref());
                     continue;
                 }
                 Err(err) => {
-                    let retryable = err.usage_limit.is_none()
+                    let retryable = !err.is_recovery_exhausted()
+                        && err.usage_limit.is_none()
                         && (is_retryable_transport_error(&err)
                             || (err.origin == CodexErrorOrigin::Http
                                 && should_retry_codex_status(err.status)));
@@ -390,9 +440,21 @@ impl CodexHttpClient {
                             codex_error_origin_name(err.origin),
                             &err.message,
                         );
+                        if !ctx
+                            .recovery_budget
+                            .try_retry(Duration::from_millis(delay.wait_ms), false)
+                        {
+                            return Err(CodexError::recovery_exhausted());
+                        }
                         transport_failures += 1;
                         sleep(delay.wait_ms).await;
+                        if ctx.recovery_budget.expired() {
+                            return Err(CodexError::recovery_exhausted());
+                        }
                         continue;
+                    }
+                    if retryable && transport_failures >= MAX_BUFFERED_TRANSPORT_RETRIES {
+                        return Err(CodexError::recovery_exhausted());
                     }
                     if retryable {
                         log_buffered_retry_exhausted(

@@ -40,6 +40,7 @@ pub(super) fn live_test_request(text: &str) -> translate::request::ResponsesRequ
 
 pub(super) fn live_test_context(session_id: &str) -> RequestContext {
     RequestContext {
+        recovery_budget: Default::default(),
         req_id: format!("request-{session_id}"),
         session_id: Some(session_id.to_string()),
         traffic: None,

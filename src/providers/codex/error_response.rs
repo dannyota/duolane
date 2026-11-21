@@ -95,7 +95,7 @@ pub(super) fn map_codex_error_to_response(err: &client::CodexError) -> Response 
     if is_context_window_overflow(message) {
         return map_codex_failure_to_response(message);
     }
-    if err.detail.as_deref() == Some(EMPTY_CODEX_COMPLETION_DETAIL) {
+    if err.is_recovery_exhausted() || err.detail.as_deref() == Some(EMPTY_CODEX_COMPLETION_DETAIL) {
         return (
             [(
                 HeaderName::from_static("x-should-retry"),
@@ -194,6 +194,15 @@ pub(super) fn codex_error_message(err: &client::CodexError) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_error_text_cannot_impersonate_recovery_exhaustion() {
+        let mut error = client::CodexError::new(400, "Bad request".to_string());
+        error.detail = Some("codex_recovery_exhausted".to_string());
+        let response = map_codex_error_to_response(&error);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!response.headers().contains_key("x-should-retry"));
+    }
 
     #[test]
     fn context_overflow_maps_to_prompt_too_long() {

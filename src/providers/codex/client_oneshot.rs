@@ -38,12 +38,19 @@ impl CodexHttpClient {
             let response = self.attempt_transcription(&url, &headers, input).await?;
             if response.status() == reqwest::StatusCode::UNAUTHORIZED && !refresh_attempted {
                 refresh_attempted = true;
+                ctx.recovery_budget.start();
                 drop(response);
                 auth = self
                     .auth_manager
                     .force_refresh(&auth.access)
                     .await
                     .map_err(auth_refresh_error)?;
+                if !ctx
+                    .recovery_budget
+                    .try_retry(std::time::Duration::ZERO, false)
+                {
+                    return Err(CodexError::recovery_exhausted());
+                }
                 continue;
             }
             return Ok(response);
@@ -142,12 +149,16 @@ impl CodexHttpClient {
                 .await?;
             if response.status() == reqwest::StatusCode::UNAUTHORIZED && !refresh_attempted {
                 refresh_attempted = true;
+                ctx.recovery_budget.start();
                 drop(response);
                 auth = self
                     .auth_manager
                     .force_refresh(&auth.access)
                     .await
                     .map_err(auth_refresh_error)?;
+                if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
+                    return Err(CodexError::recovery_exhausted());
+                }
                 continue;
             }
             return Ok(response);
@@ -229,8 +240,16 @@ impl CodexHttpClient {
             let status = response.status().as_u16();
             if status == 401 && !refresh_attempted {
                 refresh_attempted = true;
+                ctx.recovery_budget.start();
                 drop(response);
-                auth = self.refreshed_auth(&auth).await?;
+                auth = self.refreshed_auth(&auth).await.inspect_err(|error| {
+                    if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
+                        ctx.recovery_budget.cancel_unspent_start();
+                    }
+                })?;
+                if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
+                    return Err(CodexError::recovery_exhausted());
+                }
                 continue;
             }
 
@@ -306,11 +325,15 @@ impl CodexHttpClient {
                 .await?;
             if response.status == 401 && !auth_refresh_attempted {
                 auth_refresh_attempted = true;
+                ctx.recovery_budget.start();
                 auth = self
                     .auth_manager
                     .force_refresh(&auth.access)
                     .await
                     .map_err(auth_refresh_error)?;
+                if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
+                    return Err(CodexError::recovery_exhausted());
+                }
                 continue;
             }
             if should_retry_codex_status(response.status)
@@ -325,9 +348,23 @@ impl CodexHttpClient {
                 if delay.exceeds_budget {
                     return Err(codex_status_error(response));
                 }
+                if !ctx
+                    .recovery_budget
+                    .try_retry(std::time::Duration::from_millis(delay.wait_ms), false)
+                {
+                    return Err(CodexError::recovery_exhausted());
+                }
                 retries += 1;
                 sleep(delay.wait_ms).await;
+                if ctx.recovery_budget.expired() {
+                    return Err(CodexError::recovery_exhausted());
+                }
                 continue;
+            }
+            if should_retry_codex_status(response.status)
+                && retries >= MAX_BUFFERED_TRANSPORT_RETRIES
+            {
+                return Err(CodexError::recovery_exhausted());
             }
             if !(200..300).contains(&response.status) {
                 return Err(codex_status_error(response));
@@ -422,6 +459,58 @@ mod tests {
 
     use super::super::client_test_support::*;
     use super::*;
+
+    #[tokio::test]
+    async fn search_refresh_and_failures_share_four_attempt_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let server_client = client.clone();
+        let server = tokio::spawn(async move {
+            for attempt in 0..4 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = read_http_request(&mut stream).await;
+                let response = if attempt == 0 {
+                    let mut auth = http_test_auth();
+                    auth.access = "rotated-test".into();
+                    server_client.auth_manager().set_test_auth(auth);
+                    b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .as_slice()
+                } else {
+                    b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nretry-after: 0\r\nconnection: close\r\n\r\n".as_slice()
+                };
+                stream.write_all(response).await.unwrap();
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let request = super::super::search::SearchRequest {
+            id: "session".into(),
+            model: "gpt-5.6-luna".into(),
+            reasoning: None,
+            input: None,
+            commands: super::super::search::SearchCommands {
+                search_query: vec![super::super::search::SearchQuery { q: "query".into() }],
+            },
+            settings: super::super::search::SearchSettings {
+                filters: None,
+                allowed_callers: vec!["direct"],
+                external_web_access: true,
+            },
+            max_output_tokens: 2500,
+        };
+        let error = client
+            .post_search(&request, &http_test_context())
+            .await
+            .unwrap_err();
+        assert!(error.is_recovery_exhausted());
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn image_request_refreshes_once_after_unauthorized() {

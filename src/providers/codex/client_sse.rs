@@ -270,6 +270,12 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_recovery_is_not_retryable() {
+        let error = CodexError::recovery_exhausted();
+        assert!(!retryable_http_stream_error(&error));
+    }
+
+    #[test]
     fn http_sse_size_limit_is_not_retryable() {
         assert!(!retryable_http_stream_error(&http_sse_error(
             "Codex SSE frame exceeds the size limit",

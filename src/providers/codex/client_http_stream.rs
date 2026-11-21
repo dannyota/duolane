@@ -45,14 +45,23 @@ impl CodexHttpClient {
                 Ok(attempt) => break attempt,
                 Err(error) if retryable_http_stream_error(&error) => {
                     if retries >= MAX_BUFFERED_TRANSPORT_RETRIES {
-                        return Err(error);
+                        return Err(CodexError::recovery_exhausted());
                     }
                     let delay = compute_backoff_delay(retries, error.retry_after.as_deref());
                     if delay.exceeds_budget {
                         return Err(error);
                     }
+                    if !ctx
+                        .recovery_budget
+                        .try_retry(Duration::from_millis(delay.wait_ms), false)
+                    {
+                        return Err(CodexError::recovery_exhausted());
+                    }
                     retries += 1;
                     sleep(delay.wait_ms).await;
+                    if ctx.recovery_budget.expired() {
+                        return Err(CodexError::recovery_exhausted());
+                    }
                 }
                 Err(error) => return Err(error),
             }
@@ -98,7 +107,15 @@ impl CodexHttpClient {
 
             if resp.status().as_u16() == 401 && !*auth_refresh_attempted {
                 *auth_refresh_attempted = true;
-                *auth = self.refreshed_auth(auth).await?;
+                ctx.recovery_budget.start();
+                *auth = self.refreshed_auth(auth).await.inspect_err(|error| {
+                    if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
+                        ctx.recovery_budget.cancel_unspent_start();
+                    }
+                })?;
+                if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
+                    return Err(CodexError::recovery_exhausted());
+                }
                 continue;
             }
 
@@ -165,6 +182,9 @@ impl CodexHttpClient {
                         .load(std::sync::atomic::Ordering::Acquire)
                     && should_fallback_to_http(&err) =>
             {
+                if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
+                    return Err(CodexError::recovery_exhausted());
+                }
                 self.stream_codex_http_events_for_owner(body, ctx, http_body)
                     .await
             }
@@ -501,7 +521,7 @@ impl CodexHttpClient {
                 drop(pending_events);
                 loop {
                     if retries >= MAX_BUFFERED_TRANSPORT_RETRIES {
-                        let _ = tx.send(Err(retry_error)).await;
+                        let _ = tx.send(Err(CodexError::recovery_exhausted())).await;
                         return;
                     }
                     let delay = compute_backoff_delay(retries, retry_error.retry_after.as_deref());
@@ -509,10 +529,21 @@ impl CodexHttpClient {
                         let _ = tx.send(Err(retry_error)).await;
                         return;
                     }
+                    if !ctx
+                        .recovery_budget
+                        .try_retry(Duration::from_millis(delay.wait_ms), false)
+                    {
+                        let _ = tx.send(Err(CodexError::recovery_exhausted())).await;
+                        return;
+                    }
                     retries += 1;
                     tokio::select! {
                         _ = tx.closed() => return,
                         _ = sleep(delay.wait_ms) => {}
+                    }
+                    if ctx.recovery_budget.expired() {
+                        let _ = tx.send(Err(CodexError::recovery_exhausted())).await;
+                        return;
                     }
 
                     let next_attempt = tokio::select! {
@@ -713,6 +744,58 @@ mod tests {
             }
         }
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_fallback_obeys_shared_budget_for_live_and_buffered_requests() {
+        for live in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                assert!(read_http_request(&mut socket).await.starts_with(b"GET "));
+                socket.write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                        .await
+                        .is_err()
+                );
+            });
+            let client = Arc::new(authenticated_http_test_client(format!(
+                "http://{addr}/responses"
+            )));
+            let ctx = http_test_context();
+            for _ in 0..3 {
+                assert!(ctx.recovery_budget.try_retry(Duration::ZERO, false));
+            }
+            let request = buffered_test_request();
+            let cache = CodexHttpBodyCache::new();
+            let error = if live {
+                match client
+                    .stream_codex_auto_events_for_owner(&request, &ctx, &cache, None, true)
+                    .await
+                {
+                    Err(error) => error,
+                    Ok(_) => panic!("fallback must stop"),
+                }
+            } else {
+                match client
+                    .post_codex_with_transport(
+                        &request,
+                        &ctx,
+                        None,
+                        crate::config::CodexTransport::Auto,
+                        &cache,
+                    )
+                    .await
+                {
+                    Err(error) => error,
+                    Ok(_) => panic!("fallback must stop"),
+                }
+            };
+            assert!(error.is_recovery_exhausted());
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

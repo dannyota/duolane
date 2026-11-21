@@ -785,6 +785,7 @@ mod tests {
             }
         });
         let context = RequestContext {
+            recovery_budget: Default::default(),
             req_id: "terminal-order-request".to_string(),
             session_id: Some("header-session-is-not-pool-owner".to_string()),
             traffic: None,
