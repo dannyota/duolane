@@ -82,7 +82,7 @@ jobs:
           github-token: ${{ github.token }}
           run-id: ${{ steps.release.outputs.run-id }}
           path: ${{ steps.resolve.outputs.artifacts }}
-          pattern: '{darwin,linux,windows}-{amd64,arm64}'
+          pattern: '{darwin-arm64,linux-amd64,linux-arm64,windows-amd64}'
           merge-multiple: false
       - name: Read registry metadata
         env:

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Releases no longer include prebuilt binaries for Intel Macs or Windows on Arm.
+  Install on those platforms with `cargo install duolane --locked`.
+
 ## 0.2.1
 
 ### Added
