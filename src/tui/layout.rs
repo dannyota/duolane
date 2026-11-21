@@ -28,14 +28,21 @@ pub enum LayoutTier {
 }
 
 impl LayoutTier {
-    pub fn for_outer_width(width: u16) -> Self {
-        match width.saturating_sub(2) {
-            0..=75 => Self::Emergency,
-            76..=87 => Self::Narrow,
-            88..=117 => Self::Medium,
-            118..=151 => Self::Expanded,
-            _ => Self::Wide,
+    pub fn minimum_outer_width(self) -> u16 {
+        match self {
+            Self::Emergency => 0,
+            Self::Narrow => 76 + 2,
+            Self::Medium => 88 + 2,
+            Self::Expanded => 118 + 2,
+            Self::Wide => 152 + 2,
         }
+    }
+
+    pub fn for_outer_width(width: u16) -> Self {
+        [Self::Wide, Self::Expanded, Self::Medium, Self::Narrow]
+            .into_iter()
+            .find(|tier| width >= tier.minimum_outer_width())
+            .unwrap_or(Self::Emergency)
     }
 }
 
@@ -86,6 +93,21 @@ mod tests {
 
     #[test]
     fn layout_tiers_cover_conventional_terminal_widths() {
+        for tier in [
+            LayoutTier::Narrow,
+            LayoutTier::Medium,
+            LayoutTier::Expanded,
+            LayoutTier::Wide,
+        ] {
+            assert_eq!(
+                LayoutTier::for_outer_width(tier.minimum_outer_width()),
+                tier
+            );
+            assert_ne!(
+                LayoutTier::for_outer_width(tier.minimum_outer_width() - 1),
+                tier
+            );
+        }
         assert_eq!(LayoutTier::for_outer_width(77), LayoutTier::Emergency);
         assert_eq!(LayoutTier::for_outer_width(78), LayoutTier::Narrow);
         assert_eq!(LayoutTier::for_outer_width(90), LayoutTier::Medium);

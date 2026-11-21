@@ -507,7 +507,7 @@ fn render(
     state: &MonitorSnapshot,
 ) -> MouseTargets {
     let area = frame.area();
-    let terminal_state = &state.for_terminal();
+    let terminal_state = &cells::dashboard_snapshot(state);
     frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
     let root = Layout::default()
