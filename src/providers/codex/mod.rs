@@ -354,6 +354,7 @@ impl CodexProvider {
             previous_response_id_enabled,
         );
         let turn_id = continuation.turn_id();
+        let configured_transport = summary_transport(configured_transport, compact_boundary);
         let transport = configured_transport.as_str();
         let upstream_started_at = Instant::now();
         let log = create_logger("codex");
@@ -1230,3 +1231,6 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }
+
+#[cfg(test)]
+mod compact_transport_tests;

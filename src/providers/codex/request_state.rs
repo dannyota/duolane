@@ -112,6 +112,17 @@ impl Drop for LiveRequestStateCleanup {
     }
 }
 
+pub(super) fn summary_transport(
+    transport: crate::config::CodexTransport,
+    compact: bool,
+) -> crate::config::CodexTransport {
+    if compact && transport == crate::config::CodexTransport::Auto {
+        crate::config::CodexTransport::Http
+    } else {
+        transport
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use translate::request::ServiceTier;
