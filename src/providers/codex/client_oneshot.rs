@@ -232,11 +232,7 @@ impl CodexHttpClient {
             if status == 401 && !refresh_attempted {
                 refresh_attempted = true;
                 drop(response);
-                auth = self
-                    .auth_manager
-                    .force_refresh(&auth.access)
-                    .await
-                    .map_err(auth_refresh_error)?;
+                auth = self.refreshed_auth(&auth).await?;
                 continue;
             }
 
@@ -623,7 +619,7 @@ mod tests {
                     server_client.auth_manager().set_test_auth(StoredAuth {
                         access: "rotated".into(),
                         refresh: "rotated-refresh".into(),
-                        account_id: Some("acct-rotated".into()),
+                        account_id: Some("acct".into()),
                         expires: u64::MAX,
                     });
                     stream
@@ -634,7 +630,7 @@ mod tests {
                         .unwrap();
                 } else {
                     assert!(request.contains("authorization: Bearer rotated"));
-                    assert!(request.contains("chatgpt-account-id: acct-rotated"));
+                    assert!(request.contains("chatgpt-account-id: acct"));
                     stream
                         .write_all(
                             b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
@@ -657,6 +653,49 @@ mod tests {
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.bytes().await.unwrap(), b"{}".as_slice());
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_responses_does_not_resend_after_account_change() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/v1/responses"
+        )));
+        let server_client = client.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request(&mut stream).await;
+            server_client.auth_manager().set_test_auth(StoredAuth {
+                access: "rotated".into(),
+                refresh: "rotated-refresh".into(),
+                account_id: Some("other-account".into()),
+                expires: u64::MAX,
+            });
+            stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            drop(stream);
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_ok()
+        });
+
+        let payload =
+            serde_json::json!({"model":"gpt-5.4","previous_response_id":"resp_first_account"});
+        let result = client
+            .post_native_responses(&payload, &http_test_context(), false, false)
+            .await;
+        assert!(
+            !server.await.unwrap(),
+            "native Responses tried another account"
+        );
+        let error = result.unwrap_err();
+        assert_eq!(error.status, 409);
+        assert_eq!(error.detail.as_deref(), Some(CODEX_ACCOUNT_CHANGED_DETAIL));
     }
 
     #[tokio::test]

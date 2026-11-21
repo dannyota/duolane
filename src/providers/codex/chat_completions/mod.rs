@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::provider::{MAX_BUFFERED_RESPONSE_BYTES, RequestContext};
 
-use super::client::{CodexError, CodexHttpClient};
+use super::client::{CODEX_ACCOUNT_CHANGED_DETAIL, CodexError, CodexHttpClient};
 use request::TranslatedRequest;
 
 pub struct ChatCompletionsBackend {
@@ -265,6 +265,9 @@ impl ChatError {
     }
 
     fn from_codex(error: CodexError) -> Self {
+        if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
+            return Self::new(StatusCode::CONFLICT, "api_error", error.message, None, None);
+        }
         let status = match error.status {
             401 => StatusCode::UNAUTHORIZED,
             403 => StatusCode::FORBIDDEN,
