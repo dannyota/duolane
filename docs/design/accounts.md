@@ -78,6 +78,48 @@ leaves the body byte-exact. `POST /v1/messages` falls back.
 `POST /v1/messages/count_tokens` relays through the selected account without
 fallback, because counting does not spend quota.
 
+## Claude login location
+
+Claude Code keeps one OAuth login per config directory. On macOS it is a
+Keychain generic password whose service is `Claude Code-credentials-` followed
+by the first 8 hex digits of the SHA-256 of the directory path as spelled in
+`claude-accounts.json`, with any trailing slash removed; the resolved path is
+not used. On other Unix systems it is `.credentials.json` inside the directory.
+Both hold a JSON object whose `claudeAiOauth.accessToken` is the bearer key and
+whose `claudeAiOauth.expiresAt` is its expiry in Unix milliseconds. duolane only
+reads the login; Claude Code refreshes it. An expired key is reported as expired
+and is never refreshed or sent by duolane.
+
+## Usage
+
+`duolane claude-accounts usage` prints every account in pool order with the
+share of its 5-hour and 7-day windows already used and when each resets, in
+local time. For each account it reads the login as above and sends
+`GET https://api.anthropic.com/api/oauth/usage` with that bearer key and
+`anthropic-beta: oauth-2025-04-20`. The endpoint is fixed: the relay's
+`DUOLANE_ANTHROPIC_BASE_URL` override does not apply, and only tests substitute
+a mock endpoint, always with toy logins.
+
+Only `five_hour` and `seven_day`, each with a numeric `utilization` and an RFC
+3339 `resets_at`, are read. Every other field is ignored, and a missing or
+unparsable window prints as `?`. Output contains only account names, rounded
+percentages, and reset times duolane formats itself; no upstream string is
+echoed.
+
+The command reads a snapshot of the store and is independent of the selection.
+With no store or an empty one it reads no login and sends nothing. An unsafe or
+invalid store fails the whole command. A valid selection marks its account with
+`*`; an invalid selection only drops the marker and prints a warning to stderr.
+Accounts are queried concurrently and printed in order. A failure for one
+account prints one fixed reason for that account and does not stop the others:
+login not found, login unreadable, login expired, Keychain access denied,
+Keychain timed out, usage request failed, usage request failed with HTTP
+`<status>`, or usage response invalid. Per-account failures still exit 0. On
+non-Unix systems the command reports that Claude accounts are not supported.
+
+Usage is display only: it never changes the selection, and fallback still
+advances only on a quota signal. `list` stays offline.
+
 ## Reasoning and conversation
 
 Switching accounts mid-conversation moves a thinking signature from one account
@@ -93,6 +135,3 @@ strips earlier thinking, as it does after a backend switch.
   subscription window.
 - Whether a Claude account switch mid-conversation is rejected, and how Claude
   Code recovers.
-- Where Claude Code stores a config directory's login on each platform (a
-  `.credentials.json` file vs the macOS Keychain entry keyed to the directory)
-  and how duolane reads it.

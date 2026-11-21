@@ -136,6 +136,32 @@ Rejections use the Anthropic error shape and never echo request values:
   `Authorization: Bearer <token>`. The key is never logged or captured; the
   shared credential matcher redacts the header before it reaches logs and
   traffic captures.
+- The macOS Keychain login is read by executing `/usr/bin/security` directly,
+  without a shell, with the fixed arguments
+  `find-generic-password -s <service> -w`, an environment cleared except
+  `PATH=/usr/bin:/bin`, stdin closed, and stderr discarded. Standard output is
+  read up to 64 KiB, and more is an error. The child gets 30 seconds, after
+  which it is killed and reaped and the account reports a timeout. A non-zero
+  exit, including a denied or dismissed access prompt, fails only that account.
+  duolane does not require or ask for "Always Allow".
+- On other Unix systems `.credentials.json` is opened with `openat` on the
+  descriptor of the account directory that passed the ownership and ancestor
+  checks, with `O_NOFOLLOW`, `O_NOCTTY`, and `O_NONBLOCK`. It must be a regular
+  file owned by the user and not readable or writable by group or others, and
+  more than 64 KiB is an error. duolane never writes either login store.
+- The usage query sends a bearer key only to the fixed
+  `https://api.anthropic.com/api/oauth/usage`, with redirects disabled, a
+  15-second connect timeout, and a 30-second overall timeout. It honors
+  `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY`, except that a proxy whose host is
+  loopback and whose port is duolane's intercept port is skipped, so a run
+  inside an intercepted Claude Code session never routes a key through duolane's
+  own intercept listener. Other proxies are used as configured, and a proxy
+  failure is never retried directly. The response body is read up to 64 KiB and
+  more is an error. A token is held in a type whose debug form is redacted.
+  Messages use the fixed per-account reasons the
+  [accounts design](accounts.md#usage) lists, with only the numeric HTTP status
+  added; keys, login contents, response bodies, child output, and library error
+  text are never printed or logged.
 - The `claude-account` selection in the state directory is written atomically,
   flushed, and readable only by the user, exactly like the `codex-profile`
   selection.
