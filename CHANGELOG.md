@@ -9,6 +9,10 @@
   the intercept model picker.
 - `luna` and `anthropic-luna` select the newest listed Luna model.
 
+### Changed
+
+- The monitor shows rate, input, and output tokens for Claude requests.
+
 ## 0.1.1
 
 ### Added

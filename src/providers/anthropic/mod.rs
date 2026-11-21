@@ -23,6 +23,10 @@ use crate::providers::codex::translate::reasoning_signature::{
 use crate::providers::translate_shared::wrap_reasoning;
 use crate::registry::ANTHROPIC_STYLE_ALIASES;
 
+mod usage;
+#[cfg(test)]
+pub(crate) use usage::observe as observe_usage_for_test;
+
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -397,7 +401,7 @@ impl AnthropicProvider {
         }
     }
 
-    async fn relay(&self, ctx: RequestContext) -> Response {
+    async fn relay(&self, ctx: RequestContext, count_tokens: bool) -> Response {
         let RequestContext {
             req_id,
             monitor,
@@ -454,7 +458,18 @@ impl AnthropicProvider {
                     }
                     out_headers.append(name.clone(), value.clone());
                 }
+                let content_type = upstream
+                    .headers()
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                let is_sse = content_type
+                    .split(';')
+                    .next()
+                    .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"));
+                let observe = status.is_success() && !count_tokens && monitor.is_some();
                 let body = idle_limited(upstream.bytes_stream(), self.idle_timeout);
+                let body = usage::observe(body, monitor.filter(|_| observe), req_id, is_sse);
                 let mut response = Response::new(Body::from_stream(body));
                 *response.status_mut() = status;
                 *response.headers_mut() = out_headers;
@@ -519,11 +534,11 @@ impl Provider for AnthropicProvider {
     }
 
     async fn handle_messages(&self, _body: MessagesRequest, ctx: RequestContext) -> Response {
-        self.relay(ctx).await
+        self.relay(ctx, false).await
     }
 
     async fn handle_count_tokens(&self, _body: MessagesRequest, ctx: RequestContext) -> Response {
-        self.relay(ctx).await
+        self.relay(ctx, true).await
     }
 }
 
@@ -551,6 +566,9 @@ impl CliHandlers for AnthropicCli {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod usage_tests;
 
 #[cfg(test)]
 mod tests {
@@ -775,7 +793,7 @@ mod tests {
         let silent = stalled_upstream(b"").await;
         let provider = AnthropicProvider::with_timeouts(silent, short, Duration::from_secs(60));
         let started = std::time::Instant::now();
-        let response = provider.relay(passthrough_context()).await;
+        let response = provider.relay(passthrough_context(), false).await;
         assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
         assert!(started.elapsed() < Duration::from_secs(10));
 
@@ -784,7 +802,7 @@ mod tests {
         )
         .await;
         let provider = AnthropicProvider::with_timeouts(stalling, Duration::from_secs(60), short);
-        let response = provider.relay(passthrough_context()).await;
+        let response = provider.relay(passthrough_context(), false).await;
         assert_eq!(response.status(), StatusCode::OK);
         let mut body = response.into_body().into_data_stream();
         assert_eq!(
