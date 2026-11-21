@@ -1,7 +1,8 @@
 use super::cells::{
-    column_header, compact_tokens, display_session_id, ellipsize, model_cell, number_cell, panel,
-    project_constraints, provider_cell, rate_cell, render_empty_table_state, status_cell,
-    table_column_width, target_cell, text_cell, token_sparkline_line,
+    column_constraints, column_header, compact_tokens, content_constraint, display_session_id,
+    ellipsize, model_cell, number_cell, panel, project_constraints_from, provider_cell, rate_cell,
+    render_empty_table_state, status_cell, table_column_width, target_cell, text_cell,
+    token_sparkline_line,
 };
 use super::layout::{
     COUNT_WIDTH, ColumnSpec, EFFORT_WIDTH, ID_WIDTH, LayoutTier, MODEL_NARROW_WIDTH,
@@ -121,11 +122,31 @@ pub(super) fn render_sessions(
     let columns = session_columns(tier, show_full_sparkline);
     let minimum_width = if show_full_sparkline {
         SESSION_SPARKLINE_MIN_WIDTH
+    } else if matches!(tier, LayoutTier::Expanded | LayoutTier::Wide) {
+        LayoutTier::Expanded.minimum_outer_width()
     } else {
         tier.minimum_outer_width()
     };
-    let widths = project_constraints(
+    let mut widths = column_constraints(&columns);
+    if matches!(tier, LayoutTier::Expanded | LayoutTier::Wide) {
+        let activity = columns
+            .iter()
+            .position(|column| column.key == SessionColumn::Activity)
+            .unwrap_or(0);
+        let minimum_flex = table_column_width(Rect::new(0, 0, minimum_width, 1), &widths, activity);
+        content_constraint(
+            &columns,
+            &mut widths,
+            SessionColumn::Model,
+            area,
+            MODEL_WIDE_WIDTH,
+            minimum_flex,
+            sessions.iter().map(|session| session.model.as_deref()),
+        );
+    }
+    let widths = project_constraints_from(
         &columns,
+        widths,
         SessionColumn::Project,
         area,
         minimum_width,
@@ -240,7 +261,7 @@ mod tests {
         let name = "ｶﾞ".repeat(20);
         let wide = render_project(&name, 280);
         assert_eq!(wide.matches("ｶﾞ").count(), 20);
-        let narrow = render_project(&name, SESSION_SPARKLINE_MIN_WIDTH + 1);
+        let narrow = render_project(&"ｶﾞ".repeat(30), SESSION_SPARKLINE_MIN_WIDTH + 1);
         let row = narrow.lines().find(|line| line.contains("ｶﾞ")).unwrap();
         assert!(row.contains('…'));
     }
@@ -271,7 +292,114 @@ mod tests {
             .lines()
             .find(|line| line.contains("Tokens/10s"))
             .unwrap();
-        assert!(flex(near_header) >= flex(baseline_header));
+        let columns = session_columns(LayoutTier::Wide, true);
+        let activity = columns
+            .iter()
+            .position(|column| column.key == SessionColumn::Activity)
+            .unwrap();
+        let floor = table_column_width(
+            Rect::new(0, 0, SESSION_SPARKLINE_MIN_WIDTH, 1),
+            &column_constraints(&columns),
+            activity,
+        );
+        assert!(flex(near_header) > floor);
+    }
+
+    #[test]
+    fn compact_session_model_is_stable_at_wide_boundary() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started(
+            "request-1",
+            Some("session-1".into()),
+            Some(1),
+            EndpointKind::Messages,
+        );
+        monitor.provider_selected("request-1", "codex", "terra → gpt-6.1-terra", None);
+        let snapshot: MonitorSnapshot = monitor.snapshot().into();
+        let snapshot = crate::tui::cells::dashboard_snapshot(&snapshot);
+        for width in [153, 154] {
+            let text = buffer_text(&draw(width, 8, |frame| {
+                render_sessions(
+                    frame,
+                    frame.area(),
+                    &snapshot.sessions,
+                    0,
+                    true,
+                    snapshot.snapshot_at,
+                );
+            }));
+            assert!(text.contains("terra → gpt-6.1-terra"));
+        }
+    }
+
+    #[test]
+    fn session_model_and_project_share_available_space() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started(
+            "request-1",
+            Some("session-1".into()),
+            Some(1),
+            EndpointKind::Messages,
+        );
+        monitor.project_resolved("request-1", "p".repeat(32));
+        monitor.provider_selected("request-1", "codex", "short", None);
+        let snapshot: MonitorSnapshot = monitor.snapshot().into();
+        let snapshot = crate::tui::cells::dashboard_snapshot(&snapshot);
+        let text = buffer_text(&draw(180, 8, |frame| {
+            render_sessions(
+                frame,
+                frame.area(),
+                &snapshot.sessions,
+                0,
+                true,
+                snapshot.snapshot_at,
+            );
+        }));
+        assert!(text.contains(&"p".repeat(32)));
+
+        let mut sessions = snapshot.sessions.clone();
+        sessions[0].project = None;
+        sessions[0].model = Some("terra → gpt-6.1-terra".into());
+        let text = buffer_text(&draw(160, 8, |frame| {
+            render_sessions(
+                frame,
+                frame.area(),
+                &sessions,
+                0,
+                true,
+                snapshot.snapshot_at,
+            );
+        }));
+        assert!(text.contains("terra → gpt-6.1-terra"));
+    }
+
+    #[test]
+    fn wide_session_model_fits_visible_content() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started(
+            "request-1",
+            Some("session-1".into()),
+            Some(1),
+            EndpointKind::Messages,
+        );
+        monitor.provider_selected("request-1", "codex", "terra → gpt-6.1-terra", None);
+        let snapshot: MonitorSnapshot = monitor.snapshot().into();
+        let snapshot = crate::tui::cells::dashboard_snapshot(&snapshot);
+        let text = buffer_text(&draw(180, 8, |frame| {
+            render_sessions(
+                frame,
+                frame.area(),
+                &snapshot.sessions,
+                0,
+                true,
+                snapshot.snapshot_at,
+            );
+        }));
+        let header = text.lines().find(|line| line.contains("Model")).unwrap();
+        assert_eq!(
+            header.find("Effort").unwrap() - header.find("Model").unwrap(),
+            22
+        );
     }
 
     #[test]
