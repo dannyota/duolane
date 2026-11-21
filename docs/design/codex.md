@@ -196,8 +196,9 @@ become an empty turn.
 ## Profiles
 
 A profile names a Codex home, so one duolane can serve more than one ChatGPT
-login. The owner switches profiles by command; duolane never switches on its
-own, for example when a usage limit is reached.
+login. The owner can switch by command, and duolane switches in the configured
+order when the active account reaches its usage limit. It never balances load
+across profiles.
 
 - `codex-profiles.json` in the duolane config directory maps profile names to
   absolute Codex home directories. Names are 1 to 32 characters from
@@ -232,8 +233,22 @@ own, for example when a usage limit is reached.
   profile, model, catalog snapshot, search owner, and recovery budget, and
   builds a new request body; a compressed body from the earlier translation is
   never reused. Native Responses answers 409 instead of resending.
-- When more than one profile is defined, the usage limit answer names
-  `duolane codex auth use` as a way to continue.
+- Ordered switching: the order is `default` first, then named profiles in the
+  order they appear in `codex-profiles.json`. When Codex answers a request with
+  `usage_limit_reached`, duolane marks that ChatGPT account limited until the
+  reset time in the error and selects the next eligible profile after the active
+  one, writing the selection as `auth use` does. Only new requests use it. The
+  request that hit the limit still gets the usage limit answer; it is not
+  replayed, and in-flight requests keep their profile.
+- A profile is eligible when its login loads, has an account id, and that
+  account is not marked limited. Profiles that share an account share its limit,
+  as accounts are told apart by ChatGPT account id, which also separates
+  workspaces. Other 429 answers, rate limit events, and errors never switch. If
+  no profile is eligible, the selection stays and the usage limit answer is
+  unchanged. Limit marks live in memory and end at their reset time or restart.
+- A switch is logged with the profile names only, and the usage limit answer
+  names the profile selected next, or `duolane codex auth use` when none is
+  eligible.
 
 ## Usage limits
 
