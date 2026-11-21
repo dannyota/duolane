@@ -40,7 +40,22 @@ impl CodexHttpClient {
         continuation: Option<&super::continuation::ContinuationReservation>,
         websocket_sent: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
-        let auth = self.auth_for(&body.reasoning_account).await?;
+        self.stream_codex_websocket_events_prepared(body, ctx, continuation, websocket_sent, None)
+            .await
+    }
+
+    pub(super) async fn stream_codex_websocket_events_prepared(
+        self: &Arc<Self>,
+        body: &ResponsesRequest,
+        ctx: &RequestContext,
+        continuation: Option<&super::continuation::ContinuationReservation>,
+        websocket_sent: Arc<std::sync::atomic::AtomicBool>,
+        prepared: Option<(StoredAuth, super::websocket::ReadyWebSocket)>,
+    ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
+        let (auth, ready) = match prepared {
+            Some((auth, ready)) => (auth, Some(ready)),
+            None => (self.auth_for(&body.reasoning_account).await?, None),
+        };
 
         let turn_id = continuation.and_then(super::continuation::ContinuationReservation::turn_id);
         if should_reset_websocket_pool(continuation)
@@ -65,6 +80,7 @@ impl CodexHttpClient {
                     tx,
                     socket_id_publisher,
                     websocket_sent,
+                    ready,
                 )
                 .await;
         });
@@ -82,6 +98,7 @@ impl CodexHttpClient {
         tx: tokio::sync::mpsc::Sender<Result<serde_json::Value, CodexError>>,
         socket_id_publisher: super::websocket::CodexWebSocketSocketIdPublisher,
         websocket_sent: Arc<std::sync::atomic::AtomicBool>,
+        mut ready: Option<super::websocket::ReadyWebSocket>,
     ) {
         let mut auth_refresh_attempted = false;
         let mut continuation_retry_available = continuation
@@ -113,7 +130,8 @@ impl CodexHttpClient {
                     .as_ref()
                     .map(super::continuation::ContinuationReservation::candidate),
             );
-            let start = super::websocket::codex_websocket_event_stream(
+            let start = super::websocket::codex_websocket_event_stream_prepared(
+                ready.take(),
                 &self.websocket_client,
                 &self.websocket_proxy_config,
                 &self.base_url,

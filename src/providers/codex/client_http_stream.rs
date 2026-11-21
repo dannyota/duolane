@@ -166,12 +166,70 @@ impl CodexHttpClient {
                 .stream_codex_http_events_for_owner(body, ctx, http_body)
                 .await;
         }
+        let mut prepared = None;
+        if allow_size_routing
+            && !http_body
+                .websocket_sent
+                .load(std::sync::atomic::Ordering::Acquire)
+            && self.auto_http_fallback_enabled
+            && self.request_compression == crate::config::CodexRequestCompression::Gzip
+            && self.auto_ws_max_bytes != 0
+            && continuation.is_some_and(|c| c.candidate().previous_response_id.is_some())
+        {
+            let auth = self.auth_for(&body.reasoning_account).await?;
+            if super::client_live::should_reset_websocket_pool(continuation)
+                && let Some(owner) = super::client_live::websocket_pool_owner(continuation)
+            {
+                super::websocket::invalidate_codex_websocket_pool_turn_for_owner(
+                    owner,
+                    continuation.and_then(super::continuation::ContinuationReservation::turn_id),
+                );
+            }
+            let headers = build_codex_headers(&auth, ctx, body.client_metadata.is_some())?;
+            let headers = super::websocket::codex_websocket_headers(&headers);
+            match super::websocket::prepare_codex_websocket(
+                &self.websocket_client,
+                &self.websocket_proxy_config,
+                &self.base_url,
+                &headers,
+                ctx.traffic.clone(),
+                continuation,
+                super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
+                super::websocket::WEBSOCKET_IDLE_TIMEOUT_MS,
+                &ctx.recovery_budget,
+            )
+            .await
+            {
+                Ok(ready) => prepared = Some((auth, ready)),
+                Err(error)
+                    if error.detail.as_deref()
+                        == Some(super::websocket::WEBSOCKET_CONTINUATION_SOCKET_MISSING_DETAIL) =>
+                {
+                    if self
+                        .auto_large_full_context(body, ctx, None, http_body)
+                        .await?
+                    {
+                        if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
+                            return Err(CodexError::recovery_exhausted());
+                        }
+                        http_body
+                            .size_http_selected
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        return self
+                            .stream_codex_http_events_for_owner(body, ctx, http_body)
+                            .await;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
         let mut websocket = self
-            .stream_codex_websocket_events_tracked(
+            .stream_codex_websocket_events_prepared(
                 body,
                 ctx,
                 continuation,
                 http_body.websocket_sent.clone(),
+                prepared,
             )
             .await?;
         match websocket.recv().await {
@@ -700,6 +758,294 @@ mod tests {
         assert_eq!(limit.resets_at, Some(1789466238));
         assert_eq!(limit.window, Some(CodexLimitWindow::SevenDay));
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_missing_socket_stream_uses_gzip_http() {
+        let _registry =
+            super::super::continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        let owner =
+            crate::request_identity::ConversationIdentity::Main("stream-missing-large".into());
+        let long_text = "x".repeat(2048);
+        let request = buffered_request_with_texts(&[&long_text, "two"]);
+        let reserved = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            true,
+        );
+        let continuation = super::super::continuation::ContinuationReservation::new(
+            super::super::continuation::ContinuationCandidate {
+                turn_id: reserved.turn_id(),
+                previous_response_id: Some("old".into()),
+                input_delta: Some(vec![request.input.last().unwrap().clone()]),
+                input_delta_count: 1,
+                disabled_reason: None,
+            },
+            Some(owner),
+            Some(u64::MAX),
+        );
+        let expected = serde_json::to_vec(&request).unwrap();
+        let delta_bytes = serde_json::to_vec(&build_websocket_request(
+            &request,
+            Some(continuation.candidate()),
+        ))
+        .unwrap()
+        .len();
+        assert!(delta_bytes < expected.len());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let wire = read_http_request(&mut stream).await;
+            assert!(wire.starts_with(b"POST "));
+            assert_wire_json(&wire, &expected, true);
+            let body = b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+        });
+        let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        client.request_compression = crate::config::CodexRequestCompression::Gzip;
+        client.auto_ws_max_bytes = delta_bytes;
+        let client = Arc::new(client);
+        let exhausted = http_test_context();
+        for _ in 0..3 {
+            assert!(exhausted.recovery_budget.try_retry(Duration::ZERO, false));
+        }
+        let error = match client
+            .stream_codex_auto_events_for_owner(
+                &request,
+                &exhausted,
+                &CodexHttpBodyCache::new(),
+                Some(&continuation),
+                true,
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("exhausted continuation recovery must stop"),
+        };
+        assert!(error.is_recovery_exhausted());
+        let mut events = client
+            .stream_codex_auto_events_for_owner(
+                &request,
+                &http_test_context(),
+                &CodexHttpBodyCache::new(),
+                Some(&continuation),
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(events.is_http());
+        while let Some(event) = events.recv().await {
+            event.unwrap();
+        }
+        server.await.unwrap();
+        super::super::continuation::abort_continuation_for_owner(&reserved);
+    }
+
+    #[tokio::test]
+    async fn auto_stream_routes_dead_small_and_live_continuations() {
+        let _registry =
+            super::super::continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        for (dead, live) in [(true, false), (false, false), (false, true)] {
+            let owner = crate::request_identity::ConversationIdentity::Main(format!(
+                "stream-route-{dead}-{live}"
+            ));
+            let long_text = "x".repeat(2048);
+            let first = buffered_request_with_texts(&[&long_text]);
+            let request = buffered_request_with_texts(&[&long_text, "two"]);
+            let expected = serde_json::to_vec(&request).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _ = next_websocket_json(&mut ws).await;
+                send_completed_websocket_response(&mut ws, "resp_old").await;
+                if dead {
+                    drop(ws);
+                    let _ = closed_tx.send(());
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let wire = read_http_request(&mut stream).await;
+                    assert!(wire.starts_with(b"POST "));
+                    assert_wire_json(&wire, &expected, true);
+                    let body = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"visible\",\"output_index\":0,\"content_index\":0}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_http\",\"status\":\"completed\",\"output\":[]}}\n\n";
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(headers.as_bytes()).await.unwrap();
+                    stream.write_all(body).await.unwrap();
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut next_ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    let payload = next_websocket_json(&mut next_ws).await;
+                    assert!(payload.get("previous_response_id").is_none());
+                    assert_eq!(payload["input"].as_array().unwrap().len(), 3);
+                    use futures_util::SinkExt;
+                    next_ws.send(tokio_tungstenite::tungstenite::Message::text(
+                        serde_json::json!({"type":"response.output_text.delta", "delta":"next", "output_index":0, "content_index":0}).to_string()
+                    )).await.unwrap();
+                    send_completed_websocket_response(&mut next_ws, "resp_next").await;
+                } else if live {
+                    let _ = closed_tx.send(());
+                    let payload = next_websocket_json(&mut ws).await;
+                    assert_eq!(payload["previous_response_id"], "resp_old");
+                    assert_eq!(payload["input"].as_array().unwrap().len(), 1);
+                    send_completed_websocket_response(&mut ws, "resp_delta").await;
+                } else {
+                    let _ = closed_tx.send(());
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut next_ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    let payload = next_websocket_json(&mut next_ws).await;
+                    assert!(payload.get("previous_response_id").is_none());
+                    assert_eq!(payload["input"].as_array().unwrap().len(), 2);
+                    send_completed_websocket_response(&mut next_ws, "resp_full").await;
+                }
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                        .await
+                        .is_err()
+                );
+            });
+            let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
+            let ctx = http_test_context();
+            let initial = super::super::continuation::continuation_candidate_for_owner(
+                Some(&owner),
+                &first,
+                true,
+            );
+            let response = client
+                .post_codex_with_transport(
+                    &first,
+                    &ctx,
+                    Some(&initial),
+                    crate::config::CodexTransport::WebSocket,
+                    &CodexHttpBodyCache::new(),
+                )
+                .await
+                .unwrap();
+            super::super::update_continuation_from_upstream(
+                None,
+                &initial,
+                None,
+                &first,
+                &response.body,
+                response.socket_id,
+                false,
+            );
+            closed_rx.await.unwrap();
+            let continuation = super::super::continuation::continuation_candidate_for_owner(
+                Some(&owner),
+                &request,
+                true,
+            );
+            assert_eq!(
+                continuation.candidate().previous_response_id.as_deref(),
+                Some("resp_old")
+            );
+            if !dead && !live {
+                super::super::websocket::invalidate_codex_websocket_pool_owner(&owner);
+            }
+            client.request_compression = crate::config::CodexRequestCompression::Gzip;
+            let delta_bytes = serde_json::to_vec(&build_websocket_request(
+                &request,
+                Some(continuation.candidate()),
+            ))
+            .unwrap()
+            .len();
+            assert!(delta_bytes < serde_json::to_vec(&request).unwrap().len());
+            client.auto_ws_max_bytes = if !dead && !live { 100_000 } else { delta_bytes };
+            let client = Arc::new(client);
+            if dead {
+                let model = request.model.clone();
+                let response = super::super::live_response::live_stream_response(
+                    client.clone(),
+                    "message".into(),
+                    &model,
+                    ctx.clone(),
+                    request.clone(),
+                    continuation,
+                    super::super::live_response::LiveStreamCompaction {
+                        compact_boundary: false,
+                        attempt: None,
+                    },
+                    crate::config::CodexTransport::Auto,
+                    false,
+                    Arc::default(),
+                )
+                .await;
+                assert_eq!(response.status(), http::StatusCode::OK);
+                let output = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert!(
+                    output
+                        .windows(b"visible".len())
+                        .any(|window| window == b"visible")
+                );
+                let next_request = buffered_request_with_texts(&[&long_text, "two", "three"]);
+                let next = super::super::continuation::continuation_candidate_for_owner(
+                    Some(&owner),
+                    &next_request,
+                    true,
+                );
+                assert!(next.candidate().previous_response_id.is_none());
+                let mut next_client =
+                    authenticated_http_test_client(format!("http://{addr}/responses"));
+                next_client.request_compression = crate::config::CodexRequestCompression::Gzip;
+                next_client.auto_ws_max_bytes = 100_000;
+                let next_response = super::super::live_response::live_stream_response(
+                    Arc::new(next_client),
+                    "message-next".into(),
+                    &model,
+                    ctx.clone(),
+                    next_request,
+                    next,
+                    super::super::live_response::LiveStreamCompaction {
+                        compact_boundary: false,
+                        attempt: None,
+                    },
+                    crate::config::CodexTransport::Auto,
+                    false,
+                    Arc::default(),
+                )
+                .await;
+                assert_eq!(next_response.status(), http::StatusCode::OK);
+                let output = axum::body::to_bytes(next_response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert!(
+                    output
+                        .windows(b"next".len())
+                        .any(|window| window == b"next")
+                );
+            } else {
+                let mut events = client
+                    .stream_codex_auto_events_for_owner(
+                        &request,
+                        &ctx,
+                        &CodexHttpBodyCache::new(),
+                        Some(&continuation),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+                assert!(!events.is_http());
+                while let Some(event) = events.recv().await {
+                    event.unwrap();
+                }
+                super::super::continuation::abort_continuation_for_owner(&continuation);
+            }
+            server.await.unwrap();
+            super::super::websocket::invalidate_codex_websocket_pool_owner(&owner);
+        }
     }
 
     #[tokio::test]
