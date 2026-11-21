@@ -2,6 +2,7 @@ pub mod auth;
 pub mod chat_completions;
 mod cli;
 pub mod client;
+mod client_body;
 mod client_buffered;
 mod client_capture;
 mod client_error;
@@ -400,9 +401,10 @@ impl CodexProvider {
         let mut continuation = Some(continuation);
         let mut attempt = 0_u32;
         let successful_tool_tail = tail_is_successful_tool_result(body);
+        let http_body = client_body::CodexHttpBodyCache::new();
         let upstream = loop {
             let response = match client
-                .post_codex_for_owner(&translated, &ctx, continuation.as_ref())
+                .post_codex_for_owner(&translated, &ctx, continuation.as_ref(), &http_body)
                 .await
             {
                 Ok(r) => r,

@@ -7,6 +7,7 @@ use crate::retry::{compute_backoff_delay, sleep};
 
 use super::auth::token_store::StoredAuth;
 use super::client::*;
+use super::client_body::CodexHttpBody;
 use super::client_capture::*;
 use super::search::{SearchRequest, SearchResponse};
 
@@ -196,14 +197,13 @@ impl CodexHttpClient {
         use_responses_lite: bool,
         stream: bool,
     ) -> Result<reqwest::Response, CodexError> {
-        let body_json = serde_json::to_string(body).map_err(|err| CodexError {
-            status: 500,
-            message: "Failed to serialize native Responses request".to_string(),
-            detail: Some(err.to_string()),
-            retry_after: None,
-            usage_limit: None,
-            origin: CodexErrorOrigin::Http,
-        })?;
+        let http_body = self
+            .prepare_http_body(
+                body,
+                ctx.traffic.is_some(),
+                "Failed to serialize native Responses request",
+            )
+            .await?;
         let mut auth = self
             .auth_manager
             .get_auth()
@@ -222,21 +222,15 @@ impl CodexHttpClient {
             let started_at = Instant::now();
             let headers = build_native_codex_headers(&auth, ctx, use_responses_lite, stream)?;
             if let Some(traffic) = ctx.traffic.as_deref() {
-                write_codex_http_request_capture(traffic, &self.base_url, &headers, &body_json);
+                http_body.capture(traffic, &self.base_url, &headers);
             }
 
-            let response = self
-                .attempt_native_responses(&headers, body_json.clone())
-                .await?;
+            let response = self.attempt_native_responses(&headers, &http_body).await?;
             let status = response.status().as_u16();
             if status == 401 && !refresh_attempted {
                 refresh_attempted = true;
                 drop(response);
-                auth = self
-                    .auth_manager
-                    .force_refresh(&auth.access)
-                    .await
-                    .map_err(auth_refresh_error)?;
+                auth = self.refreshed_auth(&auth).await?;
                 continue;
             }
 
@@ -250,7 +244,7 @@ impl CodexHttpClient {
     async fn attempt_native_responses(
         &self,
         headers: &http::HeaderMap,
-        body_json: String,
+        http_body: &CodexHttpBody,
     ) -> Result<reqwest::Response, CodexError> {
         let mut request = self.native_client.post(&self.base_url);
         for (key, value) in headers {
@@ -259,7 +253,7 @@ impl CodexHttpClient {
 
         tokio::time::timeout(
             Duration::from_millis(self.header_timeout_ms),
-            request.body(body_json).send(),
+            http_body.apply(request).send(),
         )
         .await
         .map_err(|_| CodexError {
@@ -296,20 +290,19 @@ impl CodexHttpClient {
             usage_limit: None,
             origin: CodexErrorOrigin::Auth,
         })?;
-        let body_json = serde_json::to_string(body).map_err(|e| CodexError {
-            status: 500,
-            message: "Failed to serialize search request".to_string(),
-            detail: Some(e.to_string()),
-            retry_after: None,
-            usage_limit: None,
-            origin: CodexErrorOrigin::Http,
-        })?;
+        let http_body = self
+            .prepare_http_body(
+                body,
+                ctx.traffic.is_some(),
+                "Failed to serialize search request",
+            )
+            .await?;
         let mut auth_refresh_attempted = false;
         let mut retries = 0_u32;
 
         loop {
             let response = self
-                .attempt_post_search(&auth, &body_json, ctx, &body.id)
+                .attempt_post_search(&auth, &http_body, ctx, &body.id)
                 .await?;
             if response.status == 401 && !auth_refresh_attempted {
                 auth_refresh_attempted = true;
@@ -353,7 +346,7 @@ impl CodexHttpClient {
     async fn attempt_post_search(
         &self,
         auth: &StoredAuth,
-        body_json: &str,
+        http_body: &CodexHttpBody,
         ctx: &RequestContext,
         owner: &str,
     ) -> Result<CodexResponse, CodexError> {
@@ -361,7 +354,7 @@ impl CodexHttpClient {
         let headers = build_codex_search_headers(auth, ctx, owner)?;
 
         if let Some(traffic) = ctx.traffic.as_deref() {
-            write_codex_http_request_capture(traffic, &url, &headers, body_json);
+            http_body.capture(traffic, &url, &headers);
         }
 
         let mut request = self.client.post(&url);
@@ -371,7 +364,7 @@ impl CodexHttpClient {
         let started_at = Instant::now();
         let mut response = tokio::time::timeout(
             Duration::from_millis(self.header_timeout_ms),
-            request.body(body_json.to_string()).send(),
+            http_body.apply(request).send(),
         )
         .await
         .map_err(|_| CodexError {
@@ -563,15 +556,21 @@ mod tests {
     async fn native_responses_replaces_auth_and_preserves_json_body() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let payload = serde_json::json!({
+            "model": "gpt-5.4",
+            "input": "hello",
+            "stream": false,
+            "extra": {"kept": true}
+        });
+        let expected = serde_json::to_vec(&payload).unwrap();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0_u8; 16 * 1024];
-            let read = stream.read(&mut request).await.unwrap();
-            let request = String::from_utf8_lossy(&request[..read]);
+            let request = read_http_request(&mut stream).await;
+            assert_wire_json(&request, &expected, false);
+            let request = String::from_utf8_lossy(&request);
             assert!(request.contains("authorization: Bearer test"));
             assert!(request.contains("chatgpt-account-id: acct"));
             assert!(request.contains("accept: application/json"));
-            assert!(request.contains(r#""extra":{"kept":true}"#));
             let body = br#"{"id":"resp_native","object":"response"}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -583,17 +582,7 @@ mod tests {
 
         let client = authenticated_http_test_client(format!("http://{addr}/v1/responses"));
         let response = client
-            .post_native_responses(
-                &serde_json::json!({
-                    "model": "gpt-5.4",
-                    "input": "hello",
-                    "stream": false,
-                    "extra": {"kept": true}
-                }),
-                &http_test_context(),
-                false,
-                false,
-            )
+            .post_native_responses(&payload, &http_test_context(), false, false)
             .await
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
@@ -608,22 +597,24 @@ mod tests {
     async fn native_responses_refreshes_once_before_returning_body() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let client = Arc::new(authenticated_http_test_client(format!(
-            "http://{addr}/v1/responses"
-        )));
+        let mut client = authenticated_http_test_client(format!("http://{addr}/v1/responses"));
+        client.request_compression = crate::config::CodexRequestCompression::Gzip;
+        let client = Arc::new(client);
+        let payload = serde_json::json!({"model":"gpt-5.4","input":"hello"});
+        let expected = serde_json::to_vec(&payload).unwrap();
         let server_client = client.clone();
         let server = tokio::spawn(async move {
             for attempt in 0..2 {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = [0_u8; 16 * 1024];
-                let read = stream.read(&mut request).await.unwrap();
-                let request = String::from_utf8_lossy(&request[..read]);
+                let request = read_http_request(&mut stream).await;
+                assert_wire_json(&request, &expected, true);
+                let request = String::from_utf8_lossy(&request);
                 if attempt == 0 {
                     assert!(request.contains("authorization: Bearer test"));
                     server_client.auth_manager().set_test_auth(StoredAuth {
                         access: "rotated".into(),
                         refresh: "rotated-refresh".into(),
-                        account_id: Some("acct-rotated".into()),
+                        account_id: Some("acct".into()),
                         expires: u64::MAX,
                     });
                     stream
@@ -634,7 +625,7 @@ mod tests {
                         .unwrap();
                 } else {
                     assert!(request.contains("authorization: Bearer rotated"));
-                    assert!(request.contains("chatgpt-account-id: acct-rotated"));
+                    assert!(request.contains("chatgpt-account-id: acct"));
                     stream
                         .write_all(
                             b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
@@ -646,17 +637,55 @@ mod tests {
         });
 
         let response = client
-            .post_native_responses(
-                &serde_json::json!({"model":"gpt-5.4","input":"hello"}),
-                &http_test_context(),
-                false,
-                false,
-            )
+            .post_native_responses(&payload, &http_test_context(), false, false)
             .await
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.bytes().await.unwrap(), b"{}".as_slice());
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_responses_does_not_resend_after_account_change() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/v1/responses"
+        )));
+        let server_client = client.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request(&mut stream).await;
+            server_client.auth_manager().set_test_auth(StoredAuth {
+                access: "rotated".into(),
+                refresh: "rotated-refresh".into(),
+                account_id: Some("other-account".into()),
+                expires: u64::MAX,
+            });
+            stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            drop(stream);
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_ok()
+        });
+
+        let payload =
+            serde_json::json!({"model":"gpt-5.4","previous_response_id":"resp_first_account"});
+        let result = client
+            .post_native_responses(&payload, &http_test_context(), false, false)
+            .await;
+        assert!(
+            !server.await.unwrap(),
+            "native Responses tried another account"
+        );
+        let error = result.unwrap_err();
+        assert_eq!(error.status, 409);
+        assert_eq!(error.detail.as_deref(), Some(CODEX_ACCOUNT_CHANGED_DETAIL));
     }
 
     #[tokio::test]

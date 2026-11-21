@@ -107,6 +107,15 @@ below the cap keeps its effort.
 - `DUOLANE_CODEX_TRANSPORT` selects `http`, `websocket`, or `auto`. `auto`
   prefers WebSocket and falls back to HTTP only when WebSocket failed before the
   request was sent.
+- `DUOLANE_CODEX_REQUEST_COMPRESSION` overrides `codex.requestCompression`. Use
+  `gzip` to compress Responses and search requests sent over HTTP, or `off`
+  (default) to send raw JSON. Invalid values fall through to the next source.
+  Media endpoints, WebSocket selection, and traffic capture are unchanged.
+- Gzip reuses one encoded body across retries, with at most two compression jobs
+  off the async workers. Serialization stops at 64 MiB, the largest existing
+  request body limit, and an oversized request receives HTTP 413. `flate2`
+  provides gzip through its pure-Rust backend without enabling response
+  decompression.
 - Codex sends response headers only after the model produces its first output,
   so the wait depends on how much reasoning a request needs.
   `DUOLANE_CODEX_HEADER_TIMEOUT_MS` sets the wait; the default is in
@@ -201,6 +210,7 @@ first-party source confirms them, so recheck them during live verification.
   `web_search`, the regular expression dialect, the `session-id` header,
   response headers after first output, `usage_limit_reached` and its headers,
   and `codex.rate_limits` with remaining credits.
+- Whether the live Codex endpoints accept gzip request bodies.
 - Claude Code: the compaction markers, `DeferredToolPlaceholder`, repeating a
   `thinking_tokens`, the subagent counter, the `anthropic-ratelimit-unified-*`
   headers it reads, and sleeping for the full `Retry-After` value.

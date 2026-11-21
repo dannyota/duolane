@@ -209,3 +209,32 @@ pub(super) fn loopback_tls() -> (tokio_rustls::TlsAcceptor, reqwest::Client) {
         client,
     )
 }
+
+pub(super) fn assert_wire_json(request: &[u8], expected: &[u8], gzip: bool) -> Vec<u8> {
+    use std::io::Read;
+
+    let header_end = request
+        .windows(4)
+        .position(|part| part == b"\r\n\r\n")
+        .unwrap();
+    let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+    let encoding = headers
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(name, value)| {
+            name.eq_ignore_ascii_case("content-encoding")
+                .then(|| value.trim())
+        });
+    assert_eq!(encoding, gzip.then_some("gzip"));
+    let body = &request[header_end + 4..];
+    if gzip {
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(body)
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert!(decoded == expected, "decoded JSON changed");
+    } else {
+        assert!(body == expected, "raw JSON changed");
+    }
+    body.to_vec()
+}

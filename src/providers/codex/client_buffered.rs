@@ -7,6 +7,7 @@ use crate::retry::{compute_backoff_delay, sleep};
 
 use super::auth::token_store::StoredAuth;
 use super::client::*;
+use super::client_body::{CodexHttpBody, CodexHttpBodyCache};
 use super::client_capture::*;
 use super::client_live::*;
 use super::translate::request::ResponsesRequest;
@@ -18,6 +19,7 @@ impl CodexHttpClient {
         ctx: &RequestContext,
         continuation: Option<&super::continuation::ContinuationReservation>,
         transport: crate::config::CodexTransport,
+        http_body: &CodexHttpBodyCache,
     ) -> Result<OwnerAwareCodexResponse, CodexError> {
         use crate::config::CodexTransport;
 
@@ -33,21 +35,16 @@ impl CodexHttpClient {
             );
         }
 
+        let prepare_http_body =
+            || self.prepare_http_body(body, ctx.traffic.is_some(), "Failed to serialize request");
         let mut active_continuation = continuation.cloned();
         let mut auth_refresh_attempted = false;
         let mut transport_failures = 0u32;
         loop {
             let result = match transport {
                 CodexTransport::Http => {
-                    let body_json = serde_json::to_string(body).map_err(|e| CodexError {
-                        status: 500,
-                        message: "Failed to serialize request".to_string(),
-                        detail: Some(e.to_string()),
-                        retry_after: None,
-                        usage_limit: None,
-                        origin: CodexErrorOrigin::Http,
-                    })?;
-                    self.attempt_post_http(&auth, &body_json, ctx, body.client_metadata.is_some())
+                    let http_body = http_body.get_or_try_init(prepare_http_body).await?;
+                    self.attempt_post_http(&auth, http_body, ctx, body.client_metadata.is_some())
                         .await
                         .map(|response| OwnerAwareCodexResponse::new(response, None))
                 }
@@ -114,18 +111,10 @@ impl CodexHttpClient {
                         Err(err)
                             if self.auto_http_fallback_enabled && should_fallback_to_http(&err) =>
                         {
-                            let body_json =
-                                serde_json::to_string(body).map_err(|e| CodexError {
-                                    status: 500,
-                                    message: "Failed to serialize request".to_string(),
-                                    detail: Some(e.to_string()),
-                                    retry_after: None,
-                                    usage_limit: None,
-                                    origin: CodexErrorOrigin::Http,
-                                })?;
+                            let http_body = http_body.get_or_try_init(prepare_http_body).await?;
                             self.attempt_post_http(
                                 &auth,
-                                &body_json,
+                                http_body,
                                 ctx,
                                 body.client_metadata.is_some(),
                             )
@@ -371,12 +360,12 @@ impl CodexHttpClient {
     async fn attempt_post_http(
         &self,
         auth: &StoredAuth,
-        body_json: &str,
+        http_body: &CodexHttpBody,
         ctx: &RequestContext,
         use_responses_lite: bool,
     ) -> Result<CodexResponse, CodexError> {
         let (resp, started_at) = self
-            .start_post_http(auth, body_json, ctx, use_responses_lite)
+            .start_post_http(auth, http_body, ctx, use_responses_lite)
             .await?;
         self.collect_http_response(resp, started_at, ctx).await
     }
@@ -384,7 +373,7 @@ impl CodexHttpClient {
     pub(super) async fn start_post_http(
         &self,
         auth: &StoredAuth,
-        body_json: &str,
+        http_body: &CodexHttpBody,
         ctx: &RequestContext,
         use_responses_lite: bool,
     ) -> Result<(reqwest::Response, Instant), CodexError> {
@@ -392,7 +381,7 @@ impl CodexHttpClient {
         let headers = build_codex_headers(auth, ctx, use_responses_lite)?;
 
         if let Some(traffic) = ctx.traffic.as_deref() {
-            write_codex_http_request_capture(traffic, url, &headers, body_json);
+            http_body.capture(traffic, url, &headers);
         }
 
         let mut req_builder = self.client.post(url);
@@ -401,7 +390,7 @@ impl CodexHttpClient {
         }
 
         let started_at = Instant::now();
-        let send_fut = req_builder.body(body_json.to_string()).send();
+        let send_fut = http_body.apply(req_builder).send();
         let header_timeout_dur = Duration::from_millis(self.header_timeout_ms);
 
         let resp = tokio::time::timeout(header_timeout_dur, send_fut)
@@ -595,6 +584,7 @@ mod tests {
                 &context,
                 Some(&first_candidate),
                 crate::config::CodexTransport::WebSocket,
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -625,6 +615,7 @@ mod tests {
                 &context,
                 Some(&second_candidate),
                 crate::config::CodexTransport::WebSocket,
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -659,6 +650,7 @@ mod tests {
                 &context,
                 Some(&third_candidate),
                 crate::config::CodexTransport::WebSocket,
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -731,6 +723,7 @@ mod tests {
                 &context,
                 Some(&first_candidate),
                 crate::config::CodexTransport::WebSocket,
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -760,6 +753,7 @@ mod tests {
                 &context,
                 Some(&second_candidate),
                 crate::config::CodexTransport::WebSocket,
+                &Default::default(),
             )
             .await
         {
@@ -858,6 +852,7 @@ mod tests {
                 &http_test_context(),
                 Some(&continuation),
                 crate::config::CodexTransport::Auto,
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -886,6 +881,7 @@ mod tests {
                         &http_test_context(),
                         None,
                         crate::config::CodexTransport::WebSocket,
+                        &Default::default(),
                     )
                     .await
                 {
@@ -918,6 +914,7 @@ mod tests {
         };
         let request = buffered_test_request();
         let context = http_test_context();
+        let http_body = CodexHttpBodyCache::new();
         let response = tokio::time::timeout(Duration::from_secs(10), async {
             tokio::select! {
                 _ = server => None,
@@ -926,6 +923,7 @@ mod tests {
                     &context,
                     None,
                     crate::config::CodexTransport::Http,
+                    &http_body,
                 ) => Some(result),
             }
         })
@@ -936,7 +934,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn buffered_http_retries_retryable_status() {
+    async fn buffered_http_reuses_gzip_after_retryable_status() {
         check_buffered_http_retries_retryable_status(false).await;
     }
 
@@ -948,10 +946,19 @@ mod tests {
     async fn check_buffered_http_retries_retryable_status(truncate_error_body: bool) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let request = buffered_request_with_texts(&[&"long conversation ".repeat(500)]);
+        let expected = serde_json::to_vec(&request).unwrap();
         let server = tokio::spawn(async move {
+            let mut first = None;
             for attempt in 0..2 {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                read_http_request(&mut stream).await;
+                let request = read_http_request(&mut stream).await;
+                let body = assert_wire_json(&request, &expected, true);
+                if let Some(first) = &first {
+                    assert!(first == &body, "retry changed gzip bytes");
+                } else {
+                    first = Some(body);
+                }
                 let (status, body): (&str, &[u8]) = if attempt == 0 {
                     ("503 Service Unavailable", b"retry")
                 } else {
@@ -966,18 +973,43 @@ mod tests {
             }
         });
 
-        let response = authenticated_http_test_client(format!("http://{addr}/responses"))
+        let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        client.request_compression = crate::config::CodexRequestCompression::Gzip;
+        let capture_dir = tempfile::TempDir::new().unwrap();
+        let mut ctx = http_test_context();
+        ctx.traffic = Some(std::sync::Arc::new(crate::traffic::test_capture(
+            capture_dir.path().to_path_buf(),
+        )));
+        let response = client
             .post_codex_with_transport(
-                &buffered_test_request(),
-                &http_test_context(),
+                &request,
+                &ctx,
                 None,
                 crate::config::CodexTransport::Http,
+                &Default::default(),
             )
             .await
             .unwrap();
         server.await.unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"data: keep\n\n");
+        let capture: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(capture_dir.path().join("001-020-upstream-request.json")).unwrap(),
+        )
+        .unwrap();
+        let expected = serde_json::to_value(&request).unwrap();
+        assert!(capture == expected, "captured JSON changed");
+        let metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                capture_dir
+                    .path()
+                    .join("002-021-upstream-request-metadata.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(metadata["headers"].get("content-encoding").is_none());
+        assert!(metadata["size"].get("compressedBytes").is_none());
     }
 
     #[tokio::test]
@@ -1021,6 +1053,7 @@ mod tests {
                 &http_test_context(),
                 None,
                 crate::config::CodexTransport::Auto,
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -1052,6 +1085,7 @@ mod tests {
                 &http_test_context(),
                 None,
                 crate::config::CodexTransport::Http,
+                &Default::default(),
             )
             .await
         {
@@ -1086,6 +1120,7 @@ mod tests {
                 &http_test_context(),
                 None,
                 crate::config::CodexTransport::Http,
+                &Default::default(),
             )
             .await;
         server.await.unwrap();
@@ -1097,6 +1132,13 @@ mod tests {
         assert_eq!(error.status, 404);
         assert_eq!(error.detail.as_deref(), Some("Model not found gpt-test"));
         assert_eq!(error.origin, CodexErrorOrigin::BufferedHttp);
+    }
+
+    async fn empty_http_body(client: &CodexHttpClient) -> CodexHttpBody {
+        client
+            .prepare_http_body(&serde_json::json!({}), false, "serialize test request")
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -1122,8 +1164,10 @@ mod tests {
             stream.write_all(b"0\r\n\r\n").await.unwrap();
         });
 
-        let response = http_test_client(format!("http://{addr}/responses"), 80)
-            .attempt_post_http(&http_test_auth(), "{}", &http_test_context(), false)
+        let client = http_test_client(format!("http://{addr}/responses"), 80);
+        let body = empty_http_body(&client).await;
+        let response = client
+            .attempt_post_http(&http_test_auth(), &body, &http_test_context(), false)
             .await
             .expect("active body should not hit a whole-request timeout");
         server.await.unwrap();
@@ -1146,8 +1190,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         });
 
-        let result = http_test_client(format!("http://{addr}/responses"), 30)
-            .attempt_post_http(&http_test_auth(), "{}", &http_test_context(), false)
+        let client = http_test_client(format!("http://{addr}/responses"), 30);
+        let body = empty_http_body(&client).await;
+        let result = client
+            .attempt_post_http(&http_test_auth(), &body, &http_test_context(), false)
             .await;
         server.await.unwrap();
         let error = result.err().expect("stalled body should time out");
@@ -1170,8 +1216,10 @@ mod tests {
                 .unwrap();
         });
 
-        let result = http_test_client(format!("http://{addr}/responses"), 100)
-            .attempt_post_http(&http_test_auth(), "{}", &http_test_context(), false)
+        let client = http_test_client(format!("http://{addr}/responses"), 100);
+        let body = empty_http_body(&client).await;
+        let result = client
+            .attempt_post_http(&http_test_auth(), &body, &http_test_context(), false)
             .await;
         server.await.unwrap();
         let error = result.err().expect("truncated body should fail");

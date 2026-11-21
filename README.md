@@ -183,6 +183,10 @@ File settings live in `~/.config/duolane/config.json`, and logs in
 `%LOCALAPPDATA%\duolane`. `DUOLANE_CONFIG_DIR` and `DUOLANE_STATE_DIR` move
 them.
 
+Set `DUOLANE_CODEX_REQUEST_COMPRESSION=gzip` or set `codex.requestCompression`
+to `"gzip"` in the config file to compress Codex Responses and search requests
+sent over HTTP. The default is `off`; WebSocket requests are unchanged.
+
 ### Reaching the proxy from another machine
 
 The proxy speaks plain HTTP, including your token and Claude login. Bind beyond

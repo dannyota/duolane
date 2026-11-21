@@ -1,3 +1,10 @@
+mod codex_transport;
+
+pub use codex_transport::{
+    CODEX_DEFAULT_HEADER_TIMEOUT_MS, CODEX_MIN_HEADER_TIMEOUT_MS, CodexRequestCompression,
+    CodexTransport, codex_header_timeout_ms, codex_request_compression, codex_transport,
+};
+
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
@@ -81,6 +88,8 @@ struct CodexConfig {
     #[serde(rename = "model")]
     pub model: Option<String>,
     pub transport: Option<String>,
+    #[serde(rename = "requestCompression")]
+    pub request_compression: Option<String>,
     #[serde(rename = "headerTimeoutMs")]
     pub header_timeout_ms: Option<u64>,
 }
@@ -250,6 +259,7 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     if env.contains_key("DUOLANE_CODEX_RESPONSES_API") {
         out.push("codex.responsesApi (env)".to_string());
     }
+    out.extend(codex_transport::compression_env_source(&env));
     if env.contains_key("DUOLANE_CODEX_FULL_LANE") {
         out.push("codex.fullLane (env)".to_string());
     }
@@ -314,6 +324,9 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
             if codex.responses_api == Some(true) {
                 out.push("codex.responsesApi: true".to_string());
             }
+            out.extend(codex_transport::compression_file_source(
+                codex.request_compression.as_deref(),
+            ));
             if codex.full_lane == Some(true) {
                 out.push("codex.fullLane: true".to_string());
             }
@@ -627,73 +640,6 @@ pub fn auto_review_model() -> Option<String> {
         .filter(|model| !model.is_empty())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodexTransport {
-    Http,
-    WebSocket,
-    Auto,
-}
-
-impl CodexTransport {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CodexTransport::Http => "http",
-            CodexTransport::WebSocket => "websocket",
-            CodexTransport::Auto => "auto",
-        }
-    }
-}
-
-fn parse_codex_transport(raw: &str) -> Option<CodexTransport> {
-    match raw {
-        "http" => Some(CodexTransport::Http),
-        "websocket" => Some(CodexTransport::WebSocket),
-        "auto" => Some(CodexTransport::Auto),
-        _ => None,
-    }
-}
-
-pub fn codex_transport() -> CodexTransport {
-    let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(raw) = env.get("DUOLANE_CODEX_TRANSPORT")
-        && let Some(transport) = parse_codex_transport(raw)
-    {
-        return transport;
-    }
-    let config_dir = paths::config_dir();
-    if let Some(file) = read_file_config(&config_dir)
-        && let Some(codex) = file.codex
-        && let Some(transport) = codex.transport.as_deref().and_then(parse_codex_transport)
-    {
-        return transport;
-    }
-    CodexTransport::Auto
-}
-
-pub const CODEX_DEFAULT_HEADER_TIMEOUT_MS: u64 = 300_000;
-pub const CODEX_MIN_HEADER_TIMEOUT_MS: u64 = 1_000;
-
-pub fn codex_header_timeout_ms() -> u64 {
-    let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(ms) = env
-        .get("DUOLANE_CODEX_HEADER_TIMEOUT_MS")
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .filter(|ms| *ms >= CODEX_MIN_HEADER_TIMEOUT_MS)
-    {
-        return ms;
-    }
-    let config_dir = paths::config_dir();
-    if let Some(file) = read_file_config(&config_dir)
-        && let Some(codex) = file.codex
-        && let Some(ms) = codex
-            .header_timeout_ms
-            .filter(|ms| *ms >= CODEX_MIN_HEADER_TIMEOUT_MS)
-    {
-        return ms;
-    }
-    CODEX_DEFAULT_HEADER_TIMEOUT_MS
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,6 +652,7 @@ mod tests {
         let mut guards = vec![
             EnvGuard::unset("DUOLANE_BIND_ADDRESS"),
             EnvGuard::unset("DUOLANE_CODEX_TRANSPORT"),
+            EnvGuard::unset("DUOLANE_CODEX_REQUEST_COMPRESSION"),
             EnvGuard::unset("DUOLANE_LOG_VERBOSE"),
             EnvGuard::unset("DUOLANE_LOG_STDERR"),
             EnvGuard::unset("DUOLANE_CODEX_REASONING_SUMMARY"),
@@ -875,6 +822,64 @@ mod tests {
     }
 
     #[test]
+    fn codex_request_compression_reads_file_and_env_precedence() {
+        use CodexRequestCompression::{Gzip, Off};
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        assert_eq!(codex_request_compression(), Off);
+        for (file, env, expected) in [
+            ("gzip", "invalid", Gzip),
+            ("gzip", "off", Off),
+            ("off", "gzip", Gzip),
+            ("invalid", "", Off),
+        ] {
+            std::fs::write(
+                config.path().join("config.json"),
+                serde_json::json!({"codex":{"requestCompression":file}}).to_string(),
+            )
+            .unwrap();
+            let _compression = EnvGuard::set("DUOLANE_CODEX_REQUEST_COMPRESSION", env);
+            assert_eq!(codex_request_compression(), expected);
+            assert_eq!(codex_transport(), CodexTransport::Auto);
+        }
+    }
+
+    #[test]
+    fn codex_request_compression_reports_config_sources() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"requestCompression":"gzip"}}"#,
+        )
+        .unwrap();
+        {
+            let _compression = EnvGuard::set("DUOLANE_CODEX_REQUEST_COMPRESSION", "gzpi");
+            let sources = config_override_summary_lines(&load_config());
+            assert!(
+                !sources
+                    .iter()
+                    .any(|line| line == "codex.requestCompression (env)")
+            );
+        }
+        let _compression = EnvGuard::set("DUOLANE_CODEX_REQUEST_COMPRESSION", "off");
+        let sources = config_override_summary_lines(&load_config());
+        assert!(
+            sources
+                .iter()
+                .any(|line| line == "codex.requestCompression: gzip")
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|line| line == "codex.requestCompression (env)")
+        );
+    }
+
+    #[test]
     fn codex_transport_invalid_or_empty_file_falls_back_to_auto() {
         let _guard = ENV_LOCK.lock().unwrap();
         let config = tempfile::TempDir::new().unwrap();
@@ -914,26 +919,6 @@ mod tests {
         assert_eq!(codex_header_timeout_ms(), CODEX_DEFAULT_HEADER_TIMEOUT_MS);
         let _timeout_env = EnvGuard::set("DUOLANE_CODEX_HEADER_TIMEOUT_MS", "0");
         assert_eq!(codex_header_timeout_ms(), CODEX_DEFAULT_HEADER_TIMEOUT_MS);
-    }
-
-    #[test]
-    fn parse_codex_transport_variants() {
-        assert_eq!(parse_codex_transport("http"), Some(CodexTransport::Http));
-        assert_eq!(
-            parse_codex_transport("websocket"),
-            Some(CodexTransport::WebSocket)
-        );
-        assert_eq!(parse_codex_transport("auto"), Some(CodexTransport::Auto));
-        assert_eq!(parse_codex_transport(""), None);
-        assert_eq!(parse_codex_transport("HTTP"), None);
-        assert_eq!(parse_codex_transport("ws"), None);
-    }
-
-    #[test]
-    fn codex_transport_as_str() {
-        assert_eq!(CodexTransport::Http.as_str(), "http");
-        assert_eq!(CodexTransport::WebSocket.as_str(), "websocket");
-        assert_eq!(CodexTransport::Auto.as_str(), "auto");
     }
 
     #[test]

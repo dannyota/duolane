@@ -21,6 +21,7 @@ pub struct CodexError {
 pub(crate) const CODEX_ACCOUNT_CHANGED_DETAIL: &str = "codex_account_changed";
 pub(super) const TRANSPORT_UNEXPECTED_EOF_DETAIL: &str = "transport_unexpected_eof";
 const HOSTED_TOOL_EXECUTED_DETAIL: &str = "hosted_tool_executed";
+const CODEX_GZIP_INPUT_LIMIT_DETAIL: &str = "codex_gzip_input_limit";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexErrorOrigin {
@@ -47,6 +48,20 @@ impl CodexError {
             usage_limit: None,
             origin: CodexErrorOrigin::Http,
         }
+    }
+
+    pub(super) fn gzip_input_limit() -> Self {
+        Self {
+            detail: Some(CODEX_GZIP_INPUT_LIMIT_DETAIL.to_string()),
+            ..Self::new(
+                413,
+                "Codex HTTP request exceeds the 64 MiB gzip input limit".to_string(),
+            )
+        }
+    }
+
+    pub(super) fn is_gzip_input_limit(&self) -> bool {
+        self.status == 413 && self.detail.as_deref() == Some(CODEX_GZIP_INPUT_LIMIT_DETAIL)
     }
 }
 

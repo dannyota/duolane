@@ -74,12 +74,13 @@ pub(super) async fn live_stream_response(
     );
     let mut attempt = 0_u32;
     let mut continuation = Some(continuation);
+    let http_body = client_body::CodexHttpBodyCache::new();
 
     loop {
         let upstream_events = match transport {
             config::CodexTransport::Http => {
                 client
-                    .stream_codex_http_events_for_owner(&request_body, &ctx)
+                    .stream_codex_http_events_for_owner(&request_body, &ctx, &http_body)
                     .await
             }
             config::CodexTransport::WebSocket => {
@@ -93,7 +94,12 @@ pub(super) async fn live_stream_response(
             }
             config::CodexTransport::Auto => {
                 client
-                    .stream_codex_auto_events_for_owner(&request_body, &ctx, continuation.as_ref())
+                    .stream_codex_auto_events_for_owner(
+                        &request_body,
+                        &ctx,
+                        &http_body,
+                        continuation.as_ref(),
+                    )
                     .await
             }
         };

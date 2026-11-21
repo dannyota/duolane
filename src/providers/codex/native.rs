@@ -18,7 +18,7 @@ use crate::traffic::{
     MAX_STREAM_CAPTURE_FRAME_BYTES,
 };
 
-use super::client::{CodexError, CodexHttpClient};
+use super::client::{CODEX_ACCOUNT_CHANGED_DETAIL, CodexError, CodexHttpClient};
 use super::translate::model_allowlist::{
     ResolvedModel, alias_target, allowed_models_display, full_lane_web_search_model,
     resolve_family, resolve_tier_model_alias, service_tier_for_model,
@@ -171,6 +171,18 @@ fn has_native_hosted_web_search(object: &Map<String, Value>) -> bool {
 }
 
 fn local_codex_error(error: CodexError) -> Response {
+    if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
+        return openai_error(StatusCode::CONFLICT, "api_error", error.message, None, None);
+    }
+    if error.is_gzip_input_limit() {
+        return openai_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_request_error",
+            error.message,
+            None,
+            Some("request_too_large"),
+        );
+    }
     let status = match error.status {
         401 => StatusCode::UNAUTHORIZED,
         403 => StatusCode::FORBIDDEN,

@@ -84,6 +84,13 @@ pub(super) fn map_codex_error_to_response(err: &client::CodexError) -> Response 
         response.extensions_mut().insert(CodexAccountChanged);
         return response;
     }
+    if err.is_gzip_input_limit() {
+        return json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request_too_large",
+            &err.message,
+        );
+    }
     let message = codex_error_message(err);
     if is_context_window_overflow(message) {
         return map_codex_failure_to_response(message);
@@ -177,7 +184,7 @@ fn is_context_window_overflow(message: &str) -> bool {
 }
 
 pub(super) fn codex_error_message(err: &client::CodexError) -> &str {
-    if err.status == 0 {
+    if err.status == 0 || err.is_gzip_input_limit() {
         err.message.as_str()
     } else {
         err.detail.as_deref().unwrap_or("Upstream error")
@@ -217,6 +224,21 @@ mod tests {
             response.headers().get(http::header::RETRY_AFTER).unwrap(),
             "7"
         );
+    }
+
+    #[tokio::test]
+    async fn local_gzip_input_limit_returns_request_too_large() {
+        let message = "Codex HTTP request exceeds the 64 MiB gzip input limit";
+        let err = client::CodexError::gzip_input_limit();
+        assert_eq!(codex_error_message(&err), message);
+        let response = map_codex_error_to_response(&err);
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"].as_str(), Some("request_too_large"));
+        assert_eq!(body["error"]["message"].as_str(), Some(message));
     }
 
     #[tokio::test]

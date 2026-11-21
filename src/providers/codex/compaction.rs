@@ -85,7 +85,7 @@ pub async fn request_compaction(
     compaction_request.include = Some(vec!["reasoning.encrypted_content".to_string()]);
 
     let response = client
-        .post_codex_for_owner(&compaction_request, ctx, None)
+        .post_codex_for_owner(&compaction_request, ctx, None, &Default::default())
         .await
         .map_err(CompactionError::Upstream)?;
     let compaction = parse_compaction_response(&response.body)?;

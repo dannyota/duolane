@@ -258,6 +258,7 @@ mod tests {
                 &http_test_context(),
                 None,
                 crate::config::CodexTransport::Http,
+                &Default::default(),
             )
             .await;
         server.await.unwrap();
