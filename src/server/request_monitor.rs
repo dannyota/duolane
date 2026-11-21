@@ -281,6 +281,28 @@ mod request_id_header_tests {
         RequestMonitorGuard::new(None, req_id.to_string())
     }
 
+    #[tokio::test]
+    async fn completed_stream_retains_anthropic_usage() {
+        use crate::monitor::{EndpointKind, MonitorHandle};
+        use crate::providers::anthropic::observe_usage_for_test;
+        use bytes::Bytes;
+
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("req", Some("session".into()), None, EndpointKind::Messages);
+        let input = Bytes::from_static(b"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":12,\"output_tokens\":8}}\n\n");
+        let stream = futures_util::stream::iter(vec![Ok(input)]);
+        let stream = observe_usage_for_test(stream, Some(monitor.clone()), "req".into(), true);
+        let response = Response::new(Body::from_stream(stream));
+        let guard = RequestMonitorGuard::new(Some(monitor.clone()), "req".into());
+        let response = monitor_response_body(response, guard);
+        let _ = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let snapshot = monitor.snapshot();
+        assert_eq!(snapshot.recent[0].input_tokens, Some(12));
+        assert_eq!(snapshot.recent[0].output_tokens, Some(8));
+    }
+
     #[test]
     fn stamps_the_request_id_on_a_response() {
         let response = Response::builder()

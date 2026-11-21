@@ -1,12 +1,12 @@
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
-use serde_json::Value;
+use serde::Deserialize;
 
 use crate::monitor::MonitorHandle;
 
 const MAX_BUFFER: usize = 1024 * 1024;
 
-pub(super) fn observe(
+pub(crate) fn observe(
     stream: impl Stream<Item = std::io::Result<Bytes>> + Send + 'static,
     monitor: Option<MonitorHandle>,
     request_id: String,
@@ -17,6 +17,9 @@ pub(super) fn observe(
         request_id,
         is_sse,
         buffer: Vec::new(),
+        line_start: 0,
+        after_cr: false,
+        has_data: false,
         stopped: false,
         started: false,
         input: None,
@@ -48,11 +51,44 @@ pub(super) fn observe(
     )
 }
 
+#[derive(Deserialize)]
+struct Document<'a> {
+    #[serde(rename = "type")]
+    kind: Option<&'a str>,
+    usage: Option<Usage>,
+    message: Option<Message>,
+}
+
+#[derive(Deserialize)]
+struct Message {
+    usage: Option<Usage>,
+}
+
+#[derive(Deserialize)]
+struct Usage {
+    input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+}
+
+fn data_value(line: &[u8]) -> Option<&[u8]> {
+    if line == b"data" {
+        Some(&[])
+    } else {
+        line.strip_prefix(b"data:")
+            .map(|value| value.strip_prefix(b" ").unwrap_or(value))
+    }
+}
+
 struct Observer {
     monitor: MonitorHandle,
     request_id: String,
     is_sse: bool,
     buffer: Vec<u8>,
+    line_start: usize,
+    after_cr: bool,
+    has_data: bool,
     stopped: bool,
     started: bool,
     input: Option<u64>,
@@ -71,19 +107,42 @@ impl Observer {
             self.started = true;
         }
         if self.is_sse {
-            for part in chunk.split_inclusive(|byte| *byte == b'\n') {
-                if !self.append(part) {
-                    return;
+            let mut events = 0u64;
+            for &byte in chunk {
+                if self.after_cr {
+                    self.after_cr = false;
+                    if byte == b'\n' {
+                        continue;
+                    }
                 }
-                if part.ends_with(b"\n") {
-                    let line = std::mem::take(&mut self.buffer);
-                    self.line(&line);
+                if byte == b'\r' || byte == b'\n' {
+                    let line = &self.buffer[self.line_start..];
+                    if line.is_empty() {
+                        if self.has_data {
+                            events = events.saturating_add(1);
+                            self.dispatch();
+                        }
+                        self.buffer.clear();
+                        self.line_start = 0;
+                        self.has_data = false;
+                    } else {
+                        if line == b"data" || line.starts_with(b"data:") {
+                            self.has_data = true;
+                        }
+                        if !self.append(b"\n") {
+                            break;
+                        }
+                        self.line_start = self.buffer.len();
+                    }
+                    self.after_cr = byte == b'\r';
+                } else if !self.append(&[byte]) {
+                    break;
                 }
             }
             self.monitor.stream_progress(
                 &self.request_id,
                 chunk.len() as u64,
-                1,
+                events,
                 self.total_input(),
                 self.output,
             );
@@ -94,7 +153,7 @@ impl Observer {
 
     fn append(&mut self, bytes: &[u8]) -> bool {
         if bytes.len() > MAX_BUFFER.saturating_sub(self.buffer.len()) {
-            self.buffer.clear();
+            self.buffer = Vec::new();
             self.stopped = true;
             return false;
         }
@@ -102,38 +161,44 @@ impl Observer {
         true
     }
 
-    fn line(&mut self, line: &[u8]) {
-        let Some(data) = line.strip_prefix(b"data:") else {
+    fn dispatch(&mut self) {
+        let values = || {
+            self.buffer
+                .split(|byte| *byte == b'\n')
+                .filter_map(data_value)
+        };
+        if !values().any(|value| value.windows(7).any(|bytes| bytes == b"\"usage\"")) {
             return;
-        };
-        let Ok(value) = serde_json::from_slice::<Value>(data) else {
-            return;
-        };
-        let usage = match value.get("type").and_then(Value::as_str) {
-            Some("message_start") => value.pointer("/message/usage"),
-            Some("message_delta") => value.get("usage"),
-            _ => None,
-        };
-        if let Some(usage) = usage {
-            self.update(usage);
+        }
+        let mut data = Vec::with_capacity(self.buffer.len());
+        for value in values() {
+            data.extend_from_slice(value);
+            data.push(b'\n');
+        }
+        if let Ok(document) = serde_json::from_slice::<Document<'_>>(&data) {
+            let usage = match document.kind {
+                Some("message_start") => document.message.and_then(|message| message.usage),
+                Some("message_delta") => document.usage,
+                _ => None,
+            };
+            if let Some(usage) = usage {
+                self.update(usage);
+            }
         }
     }
 
-    fn update(&mut self, usage: &Value) {
-        if let Some(value) = usage.get("input_tokens").and_then(Value::as_u64) {
-            self.input = Some(value);
+    fn update(&mut self, usage: Usage) {
+        if usage.input_tokens.is_some() {
+            self.input = usage.input_tokens;
         }
-        if let Some(value) = usage
-            .get("cache_creation_input_tokens")
-            .and_then(Value::as_u64)
-        {
-            self.cache_creation = Some(value);
+        if usage.cache_creation_input_tokens.is_some() {
+            self.cache_creation = usage.cache_creation_input_tokens;
         }
-        if let Some(value) = usage.get("cache_read_input_tokens").and_then(Value::as_u64) {
-            self.cache_read = Some(value);
+        if usage.cache_read_input_tokens.is_some() {
+            self.cache_read = usage.cache_read_input_tokens;
         }
-        if let Some(value) = usage.get("output_tokens").and_then(Value::as_u64) {
-            self.output = Some(value);
+        if usage.output_tokens.is_some() {
+            self.output = usage.output_tokens;
         }
     }
 
@@ -150,11 +215,12 @@ impl Observer {
     }
 
     fn finish(&mut self) {
-        if self.stopped || self.is_sse {
+        if self.stopped || self.is_sse || !self.buffer.windows(7).any(|bytes| bytes == b"\"usage\"")
+        {
             return;
         }
-        if let Ok(value) = serde_json::from_slice::<Value>(&self.buffer)
-            && let Some(usage) = value.get("usage")
+        if let Ok(document) = serde_json::from_slice::<Document<'_>>(&self.buffer)
+            && let Some(usage) = document.usage
         {
             self.update(usage);
             self.monitor

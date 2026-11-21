@@ -24,6 +24,8 @@ use crate::providers::translate_shared::wrap_reasoning;
 use crate::registry::ANTHROPIC_STYLE_ALIASES;
 
 mod usage;
+#[cfg(test)]
+pub(crate) use usage::observe as observe_usage_for_test;
 
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(15 * 60);

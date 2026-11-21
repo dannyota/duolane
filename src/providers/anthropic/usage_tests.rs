@@ -69,6 +69,16 @@ data: {"type":"message_delta","usage":{"output_tokens":8}}
 }
 
 #[tokio::test]
+async fn sse_dispatches_only_complete_events_with_all_line_endings() {
+    let body = b"data: {\"type\":\"message_delta\",\rdata: \"usage\":{\"output_tokens\":8}}\r\rdata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":99}}\n";
+    let (received, monitor) = relay_chunks("text/event-stream", vec![body.to_vec()]).await;
+    assert!(received == body);
+    let snapshot = monitor.snapshot();
+    assert_eq!(snapshot.recent[0].output_tokens, Some(8));
+    assert_eq!(snapshot.recent[0].stream_chunks, 1);
+}
+
+#[tokio::test]
 async fn json_usage_is_reported() {
     let body = br#"{"usage":{"input_tokens":10,"cache_read_input_tokens":3,"output_tokens":8}}"#;
     let (received, monitor) = relay_chunks("application/json", vec![body.to_vec()]).await;
