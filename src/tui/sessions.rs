@@ -1,6 +1,6 @@
 use super::cells::{
-    column_constraints, column_header, compact_tokens, display_session_id, ellipsize, model_cell,
-    number_cell, panel, provider_cell, rate_cell, render_empty_table_state, status_cell,
+    column_header, compact_tokens, display_session_id, ellipsize, model_cell, number_cell, panel,
+    project_constraints, provider_cell, rate_cell, render_empty_table_state, status_cell,
     table_column_width, target_cell, text_cell, token_sparkline_line,
 };
 use super::layout::{
@@ -119,7 +119,18 @@ pub(super) fn render_sessions(
     let tier = LayoutTier::for_outer_width(area.width);
     let show_full_sparkline = tier == LayoutTier::Wide && area.width >= SESSION_SPARKLINE_MIN_WIDTH;
     let columns = session_columns(tier, show_full_sparkline);
-    let widths = column_constraints(&columns);
+    let minimum_width = if show_full_sparkline {
+        SESSION_SPARKLINE_MIN_WIDTH
+    } else {
+        tier.minimum_outer_width()
+    };
+    let widths = project_constraints(
+        &columns,
+        SessionColumn::Project,
+        area,
+        minimum_width,
+        sessions.iter().map(|session| session.project.as_deref()),
+    );
     let rows = sessions.iter().enumerate().map(|(index, session)| {
         let cells = columns
             .iter()
@@ -192,6 +203,95 @@ mod tests {
     use crate::tui::cells::token_sparkline;
     use crate::tui::tests::{buffer_text, draw};
     use std::time::{Duration, SystemTime};
+
+    fn render_project(project: &str, width: u16) -> String {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started(
+            "request-1",
+            Some("session-1".into()),
+            Some(1),
+            EndpointKind::Messages,
+        );
+        monitor.project_resolved("request-1", project);
+        monitor.provider_selected("request-1", "anthropic", "model", None);
+        let snapshot: MonitorSnapshot = monitor.snapshot().into();
+        let snapshot = crate::tui::cells::dashboard_snapshot(&snapshot);
+        buffer_text(&draw(width, 8, |frame| {
+            render_sessions(
+                frame,
+                frame.area(),
+                &snapshot.sessions,
+                0,
+                true,
+                snapshot.snapshot_at,
+            )
+        }))
+    }
+
+    #[test]
+    fn project_width_matches_character_count() {
+        let columns = session_columns(LayoutTier::Wide, true);
+        let project = columns
+            .iter()
+            .position(|column| column.key == SessionColumn::Project)
+            .unwrap();
+        let name = "界".repeat(20);
+        let widths = project_constraints(
+            &columns,
+            SessionColumn::Project,
+            Rect::new(0, 0, 280, 8),
+            170,
+            [Some(name.as_str())].into_iter(),
+        );
+        assert_eq!(widths[project], ratatui::layout::Constraint::Length(20));
+    }
+
+    #[test]
+    fn wide_session_displays_full_project() {
+        assert!(render_project("iam-policy-automation", 280).contains("iam-policy-automation"));
+    }
+
+    #[test]
+    fn wide_session_caps_project_and_preserves_sparkline() {
+        let text = render_project(&"x".repeat(200), 280);
+        assert!(text.contains(&format!("{}…", "x".repeat(39))));
+        assert!(!text.contains(&"x".repeat(40)));
+        let header = text
+            .lines()
+            .find(|line| line.contains("Tokens/10s"))
+            .unwrap();
+        let baseline = render_project("short", 170);
+        let baseline_header = baseline
+            .lines()
+            .find(|line| line.contains("Tokens/10s"))
+            .unwrap();
+        let flex = |line: &str| line.find("Status").unwrap() - line.find("Tokens/10s").unwrap();
+        assert!(flex(header) >= flex(baseline_header));
+    }
+
+    #[test]
+    fn wide_session_displays_claude_provider() {
+        assert!(render_project("short", 280).contains("claude"));
+    }
+
+    #[test]
+    fn session_detail_displays_claude_provider() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started(
+            "request-1",
+            Some("session-1".into()),
+            Some(1),
+            EndpointKind::Messages,
+        );
+        monitor.provider_selected("request-1", "anthropic", "model", None);
+        let snapshot: MonitorSnapshot = monitor.snapshot().into();
+        let dashboard = crate::tui::cells::dashboard_snapshot(&snapshot);
+        let text = buffer_text(&draw(80, 20, |frame| {
+            crate::tui::detail::render_session_detail(frame, frame.area(), &dashboard, 0)
+        }));
+        assert!(text.contains("claude"));
+        assert_eq!(snapshot.sessions[0].provider.as_deref(), Some("anthropic"));
+    }
 
     #[test]
     fn activity_graph_ignores_positive_viewer_clock_skew() {

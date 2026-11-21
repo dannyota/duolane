@@ -1,7 +1,7 @@
 use super::cells::{
-    column_constraints, column_header, detail_cell, display_session_id, ellipsize, error_indicator,
-    format_duration, format_system_time, http_code_cell, model_cell, muted_cell, number_cell,
-    panel, provider_cell, rate_cell, render_empty_table_state, spinner, status_style,
+    column_header, detail_cell, display_session_id, ellipsize, error_indicator, format_duration,
+    format_system_time, http_code_cell, model_cell, muted_cell, number_cell, panel,
+    project_constraints, provider_cell, rate_cell, render_empty_table_state, spinner, status_style,
     table_column_width, target_cell, text_cell, token_value,
 };
 use super::layout::{
@@ -102,8 +102,16 @@ pub(super) fn render_active(
         return;
     }
 
-    let columns = active_columns(LayoutTier::for_outer_width(area.width));
-    let widths = column_constraints(&columns);
+    let tier = LayoutTier::for_outer_width(area.width);
+    let columns = active_columns(tier);
+    let minimum_width = tier.minimum_outer_width();
+    let widths = project_constraints(
+        &columns,
+        ActiveColumn::Project,
+        area,
+        minimum_width,
+        active.iter().map(|request| request.project.as_deref()),
+    );
     let rows = active.iter().map(|request| {
         let status = if request.status == crate::monitor::RequestStatus::Compacting {
             format!("{}{}", spinner(tick), request.status.label())
@@ -251,8 +259,16 @@ pub(super) fn render_recent(
         return VisibleRows::default();
     }
 
-    let columns = recent_columns(LayoutTier::for_outer_width(area.width));
-    let widths = column_constraints(&columns);
+    let tier = LayoutTier::for_outer_width(area.width);
+    let columns = recent_columns(tier);
+    let minimum_width = tier.minimum_outer_width();
+    let widths = project_constraints(
+        &columns,
+        RecentColumn::Project,
+        area,
+        minimum_width,
+        recent.iter().map(|request| request.project.as_deref()),
+    );
     let rows = recent.iter().enumerate().map(|(index, request)| {
         let cells = columns
             .iter()
@@ -385,8 +401,16 @@ pub(super) fn render_events(
         return VisibleRows::default();
     }
 
-    let columns = event_columns(LayoutTier::for_outer_width(area.width));
-    let widths = column_constraints(&columns);
+    let tier = LayoutTier::for_outer_width(area.width);
+    let columns = event_columns(tier);
+    let minimum_width = tier.minimum_outer_width();
+    let widths = project_constraints(
+        &columns,
+        EventColumn::Project,
+        area,
+        minimum_width,
+        events.iter().map(|(_, request)| request.project.as_deref()),
+    );
     let rows = events.iter().map(|(_, request)| {
         let message = request
             .error

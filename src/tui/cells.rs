@@ -1,10 +1,10 @@
-use super::layout::ColumnSpec;
+use super::layout::{ColumnSpec, ColumnWidth, LayoutTier};
 use super::{
     BLUE, DIM, DIM_WHITE, GREEN, PANEL_BG, PURPLE, RED, SEPARATOR, SESSION_SPARKLINE_MAX_TOKENS,
     TEAL, YELLOW,
 };
 use crate::monitor::SESSION_TOKEN_BUCKET_SECS;
-use crate::monitor::snapshot::CompletedSnapshot;
+use crate::monitor::snapshot::{CompletedSnapshot, MonitorSnapshot};
 use jiff::tz::TimeZone;
 use jiff::{Timestamp, Zoned};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -97,6 +97,45 @@ pub(super) fn table_column_width(area: Rect, widths: &[Constraint], column: usiz
         .map_or(0, |rect| usize::from(rect.width))
 }
 
+pub(super) fn project_constraints<'a, K: PartialEq>(
+    columns: &[ColumnSpec<K>],
+    project_key: K,
+    area: Rect,
+    minimum_width: u16,
+    projects: impl Iterator<Item = Option<&'a str>>,
+) -> Vec<Constraint> {
+    let mut widths = column_constraints(columns);
+    if !matches!(
+        LayoutTier::for_outer_width(area.width),
+        LayoutTier::Expanded | LayoutTier::Wide
+    ) {
+        return widths;
+    }
+    let Some(project) = columns.iter().position(|column| column.key == project_key) else {
+        return widths;
+    };
+    let Some(flex) = columns
+        .iter()
+        .position(|column| matches!(column.width, ColumnWidth::Flex(_)))
+    else {
+        return widths;
+    };
+    let ColumnWidth::Fixed(base) = columns[project].width else {
+        return widths;
+    };
+    let desired = projects
+        .map(|value| value.unwrap_or("-").chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(columns[project].header.len())
+        .clamp(usize::from(base), 40);
+    let minimum_flex = table_column_width(Rect::new(0, 0, minimum_width, 1), &widths, flex);
+    let available = table_column_width(area, &widths, flex).saturating_sub(minimum_flex);
+    widths[project] =
+        Constraint::Length(base + (desired - usize::from(base)).min(available) as u16);
+    widths
+}
+
 pub(super) fn ellipsize(value: &str, width: usize) -> String {
     if value.chars().count() <= width {
         return value.to_string();
@@ -178,10 +217,37 @@ pub(super) fn rate_cell(value: String) -> Cell<'static> {
     )
 }
 
+pub(super) fn dashboard_snapshot(state: &MonitorSnapshot) -> MonitorSnapshot {
+    let mut terminal_state = state.for_terminal();
+    for provider in terminal_state
+        .sessions
+        .iter_mut()
+        .map(|row| &mut row.provider)
+        .chain(
+            terminal_state
+                .active
+                .iter_mut()
+                .map(|row| &mut row.provider),
+        )
+        .chain(
+            terminal_state
+                .recent
+                .iter_mut()
+                .map(|row| &mut row.provider),
+        )
+    {
+        if provider.as_deref() == Some("anthropic") {
+            *provider = Some("claude".to_string());
+        }
+    }
+    terminal_state
+}
+
 pub(super) fn provider_cell(value: Option<&str>) -> Cell<'static> {
     let value = value.unwrap_or("-");
     let color = match value {
         "codex" => TEAL,
+        "claude" => PURPLE,
         "-" => DIM,
         _ => DIM_WHITE,
     };

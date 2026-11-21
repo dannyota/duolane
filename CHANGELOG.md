@@ -12,6 +12,8 @@
 ### Changed
 
 - The monitor shows rate, input, and output tokens for Claude requests.
+- The monitor widens the Project column on wide terminals and labels the Claude
+  provider `claude`.
 
 ## 0.1.1
 
