@@ -51,10 +51,7 @@ mod unix {
             .unwrap();
 
         assert!(output.status.success());
-        assert_eq!(
-            String::from_utf8(output.stdout).unwrap(),
-            "  missing   login not found\n  unsafe    login unreadable\n"
-        );
+        assert!(output.stdout == b"  missing   login not found\n  unsafe    login unreadable\n");
         assert!(output.stderr.is_empty());
     }
 }

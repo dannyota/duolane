@@ -160,6 +160,10 @@ fn normalize_proxy(raw: &str) -> Option<url::Url> {
     {
         return None;
     }
+    let uri: http::Uri = parsed.as_str().parse().ok()?;
+    if uri.host().is_none_or(str::is_empty) {
+        return None;
+    }
     Some(parsed)
 }
 

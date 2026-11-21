@@ -376,6 +376,10 @@ fn proxies_skip_the_intercept_listener_and_keep_the_rest() {
         vec![(Kind::Https, "http://127.0.0.1:3128/".to_string())]
     );
     assert_eq!(
+        proxies("socks5h://proxy.example:1080", "").unwrap(),
+        vec![(Kind::Https, "socks5h://proxy.example:1080".to_string())]
+    );
+    assert_eq!(
         proxies("http://proxy.example:8080", "socks5://other.example:1080").unwrap(),
         vec![
             (Kind::Https, "http://proxy.example:8080/".to_string()),
@@ -390,6 +394,8 @@ async fn an_unsupported_proxy_fails_every_account_without_sending() {
         ("ftp://proxy.example:21", ""),
         ("", "ftp://proxy.example:21"),
         ("http://", ""),
+        ("socks5h://прокси.example:1080", ""),
+        ("", "socks5h://прокси.example:1080"),
     ] {
         assert_eq!(proxies(https, all).unwrap_err(), Reason::RequestFailed);
     }
