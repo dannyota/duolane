@@ -26,7 +26,9 @@ pub(super) enum Reason {
     LoginNotFound,
     LoginUnreadable,
     LoginExpired,
+    #[cfg(any(target_os = "macos", test))]
     KeychainDenied,
+    #[cfg(any(target_os = "macos", test))]
     KeychainTimedOut,
     RequestFailed,
     HttpStatus(u16),
@@ -41,7 +43,9 @@ impl fmt::Display for Reason {
             Self::LoginExpired => {
                 formatter.write_str("login expired; open Claude Code with this account")
             }
+            #[cfg(any(target_os = "macos", test))]
             Self::KeychainDenied => formatter.write_str("Keychain access denied"),
+            #[cfg(any(target_os = "macos", test))]
             Self::KeychainTimedOut => formatter.write_str("Keychain timed out"),
             Self::RequestFailed => formatter.write_str("usage request failed"),
             Self::HttpStatus(status) => write!(formatter, "usage request failed: HTTP {status}"),
@@ -159,33 +163,38 @@ fn normalize_proxy(raw: &str) -> Option<url::Url> {
     Some(parsed)
 }
 
+fn reaches_intercept_listener(url: &url::Url, intercept_port: u16) -> bool {
+    let local = crate::upstream_url::is_loopback_host(url)
+        || match url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_unspecified(),
+            Some(url::Host::Ipv6(ip)) => ip.to_canonical().is_unspecified(),
+            _ => false,
+        };
+    local && url.port_or_known_default() == Some(intercept_port)
+}
+
 pub(super) fn usage_proxies(
     env: &impl Fn(&str) -> Option<String>,
     intercept_port: u16,
-) -> Vec<(Kind, String)> {
-    [
+) -> Result<Vec<(Kind, String)>, Reason> {
+    let mut proxies = Vec::new();
+    for (kind, upper, lower) in [
         (Kind::Https, "HTTPS_PROXY", "https_proxy"),
         (Kind::All, "ALL_PROXY", "all_proxy"),
-    ]
-    .into_iter()
-    .filter_map(|(kind, upper, lower)| {
-        let raw = env(upper).or_else(|| env(lower))?;
+    ] {
+        let Some(raw) = env(upper).or_else(|| env(lower)) else {
+            continue;
+        };
         let raw = raw.trim();
         if raw.is_empty() {
-            return None;
+            continue;
         }
-        match normalize_proxy(raw) {
-            Some(url)
-                if crate::upstream_url::is_loopback_host(&url)
-                    && url.port_or_known_default() == Some(intercept_port) =>
-            {
-                None
-            }
-            Some(url) => Some((kind, url.to_string())),
-            None => Some((kind, raw.to_string())),
+        let url = normalize_proxy(raw).ok_or(Reason::RequestFailed)?;
+        if !reaches_intercept_listener(&url, intercept_port) {
+            proxies.push((kind, url.to_string()));
         }
-    })
-    .collect()
+    }
+    Ok(proxies)
 }
 
 pub(super) fn build_client(proxies: Vec<(Kind, String)>) -> Result<reqwest::Client, Reason> {
@@ -270,7 +279,7 @@ impl Query {
         let env = |name: &str| std::env::var(name).ok();
         Self {
             reader: system_reader(),
-            client: build_client(usage_proxies(&env, crate::intercept::port())),
+            client: usage_proxies(&env, crate::intercept::port()).and_then(build_client),
             endpoint: production_usage_endpoint(&env).to_string(),
         }
     }

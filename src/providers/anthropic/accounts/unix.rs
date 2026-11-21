@@ -139,10 +139,10 @@ pub fn list() -> Result<Vec<(String, bool)>> {
 }
 
 pub async fn usage() -> Result<UsageReport> {
-    usage_with(usage_query::Query::production()).await
+    usage_with(usage_query::Query::production).await
 }
 
-async fn usage_with(query: usage_query::Query) -> Result<UsageReport> {
+async fn usage_with(make_query: impl FnOnce() -> usage_query::Query) -> Result<UsageReport> {
     let accounts = accounts()?;
     if accounts.is_empty() {
         return Ok(UsageReport {
@@ -166,7 +166,7 @@ async fn usage_with(query: usage_query::Query) -> Result<UsageReport> {
             },
         })
         .collect();
-    let rows = query.collect(targets).await;
+    let rows = make_query().collect(targets).await;
     Ok(UsageReport {
         lines: usage_query::render(&rows, selected.as_deref(), &jiff::Zoned::now()),
         warning: selection_invalid.then_some(SELECTION_WARNING),
@@ -296,8 +296,15 @@ mod tests {
         let reader = Arc::new(CountingReader(AtomicUsize::new(0)));
         let _ = std::fs::remove_file(config.join("claude-accounts.json"));
 
-        let report = usage_with(offline_query(reader.clone())).await.unwrap();
+        let built = std::sync::atomic::AtomicBool::new(false);
+        let report = usage_with(|| {
+            built.store(true, Ordering::SeqCst);
+            offline_query(reader.clone())
+        })
+        .await
+        .unwrap();
         assert!(report.lines.is_empty() && report.warning.is_none());
+        assert!(!built.load(Ordering::SeqCst));
         assert_eq!(reader.0.load(Ordering::SeqCst), 0);
 
         let work = config.join("work");
@@ -311,7 +318,7 @@ mod tests {
         std::fs::write(&selector, b"{").unwrap();
         std::fs::set_permissions(&selector, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-        let report = usage_with(offline_query(reader.clone())).await.unwrap();
+        let report = usage_with(|| offline_query(reader.clone())).await.unwrap();
         assert_eq!(report.warning, Some(SELECTION_WARNING));
         assert_eq!(report.lines.len(), 2);
         assert!(report.lines[0].starts_with("  work "));
@@ -325,7 +332,7 @@ mod tests {
         assert_eq!(reader.0.load(Ordering::SeqCst), 2);
 
         std::fs::write(&selector, valid).unwrap();
-        let report = usage_with(offline_query(reader.clone())).await.unwrap();
+        let report = usage_with(|| offline_query(reader.clone())).await.unwrap();
         assert!(report.warning.is_none());
         assert!(report.lines[0].starts_with("* work "));
         assert!(report.lines[1].starts_with("  personal "));
@@ -335,6 +342,13 @@ mod tests {
             std::fs::Permissions::from_mode(0o644),
         )
         .unwrap();
-        assert!(usage_with(offline_query(reader)).await.is_err());
+        built.store(false, Ordering::SeqCst);
+        let result = usage_with(|| {
+            built.store(true, Ordering::SeqCst);
+            offline_query(reader)
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(!built.load(Ordering::SeqCst));
     }
 }

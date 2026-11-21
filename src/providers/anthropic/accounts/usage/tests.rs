@@ -153,7 +153,7 @@ fn file_login_must_be_private_and_small() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let login = read().unwrap();
     assert!(login.expires_at > now_millis());
-    assert_eq!(login.token.expose(), "toy-token-1");
+    assert!(login.token.expose() == "toy-token-1");
     assert!(!format!("{login:?}").contains("toy-token-1"));
 
     let padded = format!(
@@ -187,10 +187,7 @@ fn keychain_child_is_bounded_and_its_status_is_classified() {
     let accepted = format!(
         "[ \"$1\" = find-generic-password ] && [ \"$2\" = -s ] && [ \"$3\" = \"Claude Code-credentials-dd1118a7\" ] && [ \"$4\" = -w ] && [ \"$PATH\" = /usr/bin:/bin ] && [ -z \"$HOME\" ] || exit 99\nprintf '%s\\n' '{json}'"
     );
-    assert_eq!(
-        run("ok", &accepted, patient).unwrap().token.expose(),
-        "toy-token-1"
-    );
+    assert!(run("ok", &accepted, patient).unwrap().token.expose() == "toy-token-1");
     assert_eq!(
         run("missing", "exit 44", patient).unwrap_err(),
         Reason::LoginNotFound
@@ -248,14 +245,14 @@ async fn usage_lines_follow_pool_order_with_isolated_failures() {
     let rows = query.collect(targets).await;
     let lines = render(&rows, Some("share-sec"), &fixed_now());
 
-    assert_eq!(
-        lines,
-        vec![
-            "* share-sec    5h   0% (resets 15:59)   week  18% (resets Nov 27 19:00)",
-            "  share-sec2   5h   5% (resets 15:59)   week  51% (resets Nov 27 19:00)",
-            "  acc3         usage request failed: HTTP 500",
-            "  acc4         login expired; open Claude Code with this account",
-        ]
+    assert!(
+        lines
+            == vec![
+                "* share-sec    5h   0% (resets 15:59)   week  18% (resets Nov 27 19:00)",
+                "  share-sec2   5h   5% (resets 15:59)   week  51% (resets Nov 27 19:00)",
+                "  acc3         usage request failed: HTTP 500",
+                "  acc4         login expired; open Claude Code with this account",
+            ]
     );
     assert!(lines.iter().all(|line| !line.contains("toy-token")));
     let hits = mock.hits.lock().unwrap();
@@ -295,14 +292,14 @@ async fn usage_response_is_lenient_about_windows_and_bounded_in_size() {
 
     let rows = query.collect(["a", "b", "c", "d"].map(target).into()).await;
 
-    assert_eq!(
-        render(&rows, None, &fixed_now()),
-        vec![
-            "  a   5h    ?   week  20% (resets 15:59)",
-            "  b   5h    ? (resets ?)   week    ?",
-            "  c   usage response invalid",
-            "  d   usage response invalid",
-        ]
+    assert!(
+        render(&rows, None, &fixed_now())
+            == vec![
+                "  a   5h    ?   week  20% (resets 15:59)",
+                "  b   5h    ? (resets ?)   week    ?",
+                "  c   usage response invalid",
+                "  d   usage response invalid",
+            ]
     );
 }
 
@@ -321,10 +318,7 @@ async fn usage_never_follows_a_redirect() {
 
     let rows = query.collect(vec![target("a")]).await;
 
-    assert_eq!(
-        render(&rows, None, &fixed_now()),
-        vec!["  a   usage request failed: HTTP 302"]
-    );
+    assert!(render(&rows, None, &fixed_now()) == vec!["  a   usage request failed: HTTP 302"]);
     assert!(
         tokio::time::timeout(Duration::from_millis(200), sink.accept())
             .await
@@ -347,32 +341,65 @@ fn production_endpoint_ignores_the_relay_base_url_override() {
     );
 }
 
+fn proxies(https: &str, all: &str) -> Result<Vec<(Kind, String)>, Reason> {
+    let https = https.to_string();
+    let all = all.to_string();
+    usage_proxies(
+        &move |name: &str| match name {
+            "HTTPS_PROXY" if !https.is_empty() => Some(https.clone()),
+            "all_proxy" if !all.is_empty() => Some(all.clone()),
+            _ => None,
+        },
+        18766,
+    )
+}
+
 #[test]
 fn proxies_skip_the_intercept_listener_and_keep_the_rest() {
-    let proxies = |https: &str, all: &str| {
-        let https = https.to_string();
-        let all = all.to_string();
-        usage_proxies(
-            &move |name: &str| match name {
-                "HTTPS_PROXY" if !https.is_empty() => Some(https.clone()),
-                "all_proxy" if !all.is_empty() => Some(all.clone()),
-                _ => None,
-            },
-            18766,
-        )
-    };
-
-    assert!(proxies("http://127.0.0.1:18766", "").is_empty());
-    assert!(proxies("", "localhost:18766").is_empty());
+    for alias in [
+        "http://127.0.0.1:18766",
+        "http://0.0.0.0:18766",
+        "http://[::]:18766",
+        "http://[::ffff:0.0.0.0]:18766",
+        "http://[::1]:18766",
+    ] {
+        assert!(proxies(alias, "").unwrap().is_empty());
+    }
+    assert!(proxies("", "localhost:18766").unwrap().is_empty());
+    assert!(proxies("", "0.0.0.0:18766").unwrap().is_empty());
     assert_eq!(
-        proxies("http://127.0.0.1:3128", ""),
+        proxies("http://0.0.0.0:3128", "").unwrap(),
+        vec![(Kind::Https, "http://0.0.0.0:3128/".to_string())]
+    );
+    assert_eq!(
+        proxies("http://127.0.0.1:3128", "").unwrap(),
         vec![(Kind::Https, "http://127.0.0.1:3128/".to_string())]
     );
     assert_eq!(
-        proxies("http://proxy.example:8080", "socks5://other.example:1080"),
+        proxies("http://proxy.example:8080", "socks5://other.example:1080").unwrap(),
         vec![
             (Kind::Https, "http://proxy.example:8080/".to_string()),
             (Kind::All, "socks5://other.example:1080".to_string())
         ]
     );
+}
+
+#[tokio::test]
+async fn an_unsupported_proxy_fails_every_account_without_sending() {
+    for (https, all) in [
+        ("ftp://proxy.example:21", ""),
+        ("", "ftp://proxy.example:21"),
+        ("http://", ""),
+    ] {
+        assert_eq!(proxies(https, all).unwrap_err(), Reason::RequestFailed);
+    }
+
+    let (endpoint, mock) = spawn_mock(&[("toy-token-1", 200, body("1", "2"))]).await;
+    let mut query = query(&[("a", "toy-token-1", future())], endpoint);
+    query.client = proxies("ftp://proxy.example:21", "").and_then(build_client);
+
+    let rows = query.collect(vec![target("a")]).await;
+
+    assert!(render(&rows, None, &fixed_now()) == vec!["  a   usage request failed"]);
+    assert!(mock.hits.lock().unwrap().is_empty());
 }

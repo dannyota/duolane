@@ -42,8 +42,10 @@ pub fn parse_accounts(bytes: &[u8]) -> anyhow::Result<Vec<(String, PathBuf)>> {
         "Claude accounts file exceeds 16 KiB"
     );
     let mut de = serde_json::Deserializer::from_slice(bytes);
-    let Accounts(accounts) = Accounts::deserialize(&mut de)?;
-    de.end()?;
+    let Ok(Accounts(accounts)) = Accounts::deserialize(&mut de) else {
+        anyhow::bail!("invalid Claude accounts file");
+    };
+    anyhow::ensure!(de.end().is_ok(), "invalid Claude accounts file");
     for (name, path) in &accounts {
         anyhow::ensure!(
             !name.is_empty()
@@ -106,6 +108,19 @@ mod tests {
         let accounts: std::collections::BTreeMap<_, _> =
             (0..17).map(|i| (format!("p{i}"), "/home/work")).collect();
         assert!(parse_accounts(&serde_json::to_vec(&accounts).unwrap()).is_err());
+    }
+
+    #[test]
+    fn account_configuration_errors_never_echo_file_contents() {
+        for input in [
+            br#""secret-value""#.as_slice(),
+            br#"{"work":["secret-value"]}"#,
+            br#"{"work":"/home/work"} secret-value"#,
+            br#"["secret-value"]"#,
+        ] {
+            let error = parse_accounts(input).unwrap_err();
+            assert!(!format!("{error:#}").contains("secret-value"));
+        }
     }
 
     #[test]

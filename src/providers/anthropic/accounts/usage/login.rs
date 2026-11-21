@@ -44,11 +44,10 @@ pub(in crate::providers::anthropic::accounts) use keychain::KeychainReader;
 mod keychain {
     use super::{LOGIN_LIMIT, Login, LoginReader, Reason, parse_login};
     use std::fs::File;
-    use std::io::Read;
+    use std::io::{ErrorKind, Read};
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
-    use std::process::{Child, Command, Stdio};
-    use std::sync::mpsc::{self, TryRecvError};
+    use std::process::{Child, ChildStdout, Command, Stdio};
     use std::time::{Duration, Instant};
 
     const SECURITY_PROGRAM: &str = "/usr/bin/security";
@@ -92,81 +91,75 @@ mod keychain {
         }
     }
 
-    fn reap(child: &mut Child) {
-        let _ = child.kill();
-        let _ = child.wait();
+    struct Reaper(Child);
+
+    impl Drop for Reaper {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    enum Drained {
+        Open,
+        Closed,
+    }
+
+    fn drain(stdout: &mut ChildStdout, data: &mut Vec<u8>) -> Result<Drained, Reason> {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) => return Ok(Drained::Closed),
+                Ok(read) => {
+                    data.extend_from_slice(&chunk[..read]);
+                    if data.len() as u64 > LOGIN_LIMIT {
+                        return Err(Reason::LoginUnreadable);
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(Drained::Open),
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(_) => return Err(Reason::LoginUnreadable),
+            }
+        }
     }
 
     fn run_child(program: &Path, args: &[String], deadline: Duration) -> Result<Vec<u8>, Reason> {
-        let mut child = Command::new(program)
-            .args(args)
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .stdout(Stdio::piped())
-            .spawn()
+        let mut child = Reaper(
+            Command::new(program)
+                .args(args)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .stdout(Stdio::piped())
+                .spawn()
+                .map_err(|_| Reason::LoginUnreadable)?,
+        );
+        let mut stdout = child.0.stdout.take().ok_or(Reason::LoginUnreadable)?;
+        let flags = rustix::fs::fcntl_getfl(&stdout).map_err(|_| Reason::LoginUnreadable)?;
+        rustix::fs::fcntl_setfl(&stdout, flags | rustix::fs::OFlags::NONBLOCK)
             .map_err(|_| Reason::LoginUnreadable)?;
-        let Some(stdout) = child.stdout.take() else {
-            reap(&mut child);
-            return Err(Reason::LoginUnreadable);
-        };
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut data = Vec::new();
-            let result = stdout.take(LOGIN_LIMIT + 1).read_to_end(&mut data);
-            let _ = sender.send(result.map(|_| data));
-        });
         let started = Instant::now();
-        let mut output: Option<Vec<u8>> = None;
+        let mut data = Vec::new();
         let status = loop {
-            if output.is_none() {
-                match receiver.try_recv() {
-                    Ok(Ok(data)) if data.len() as u64 > LOGIN_LIMIT => {
-                        reap(&mut child);
-                        return Err(Reason::LoginUnreadable);
-                    }
-                    Ok(Ok(data)) => output = Some(data),
-                    Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
-                        reap(&mut child);
-                        return Err(Reason::LoginUnreadable);
-                    }
-                    Err(TryRecvError::Empty) => {}
-                }
-            }
-            match child.try_wait() {
+            drain(&mut stdout, &mut data)?;
+            match child.0.try_wait() {
                 Ok(Some(status)) => break status,
                 Ok(None) => {}
-                Err(_) => {
-                    reap(&mut child);
-                    return Err(Reason::LoginUnreadable);
-                }
+                Err(_) => return Err(Reason::LoginUnreadable),
             }
             if started.elapsed() >= deadline {
-                reap(&mut child);
                 return Err(Reason::KeychainTimedOut);
             }
             std::thread::sleep(POLL_INTERVAL);
         };
         match status.code() {
             Some(0) => {}
-            Some(128) | Some(51) => return Err(Reason::KeychainDenied),
+            Some(128 | 51) => return Err(Reason::KeychainDenied),
             Some(44) => return Err(Reason::LoginNotFound),
             _ => return Err(Reason::LoginUnreadable),
         }
-        let data = match output {
-            Some(data) => data,
-            None => match receiver.recv_timeout(deadline.saturating_sub(started.elapsed())) {
-                Ok(Ok(data)) => data,
-                Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(Reason::LoginUnreadable);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => return Err(Reason::KeychainTimedOut),
-            },
-        };
-        if data.len() as u64 > LOGIN_LIMIT {
-            return Err(Reason::LoginUnreadable);
-        }
+        drain(&mut stdout, &mut data)?;
         Ok(data)
     }
 }
