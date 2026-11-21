@@ -43,6 +43,7 @@ pub fn parse_accounts(bytes: &[u8]) -> anyhow::Result<Vec<(String, PathBuf)>> {
     );
     let mut de = serde_json::Deserializer::from_slice(bytes);
     let Accounts(accounts) = Accounts::deserialize(&mut de)?;
+    de.end()?;
     for (name, path) in &accounts {
         anyhow::ensure!(
             !name.is_empty()
@@ -77,6 +78,7 @@ mod tests {
     #[test]
     fn account_configuration_rejects_invalid_entries() {
         assert!(parse_accounts(br#"{"work":"/home/work"}"#).is_ok());
+        assert!(parse_accounts(b"{\"work\":\"/home/work\"}\n  \n").is_ok());
         for input in [
             br#"{"bad name":"/home/work"}"#.as_slice(),
             br#"{"":"/home/work"}"#,
@@ -84,6 +86,8 @@ mod tests {
             br#"{"work":"relative"}"#,
             br#"{"work":"/home/../work"}"#,
             br#"{"work":"/home/work","work":"/home/other"}"#,
+            br#"{"work":"/home/work"}{"personal":"/home/personal"}"#,
+            br#"{"work":"/home/work"} x"#,
         ] {
             assert!(parse_accounts(input).is_err());
         }

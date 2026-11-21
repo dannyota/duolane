@@ -111,7 +111,10 @@ enum ClaudeAccountsCommand {
     #[command(about = "List Claude accounts")]
     List,
     #[command(about = "Select a Claude account")]
-    Use { name: String },
+    Use {
+        #[arg(allow_hyphen_values = true)]
+        name: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -544,6 +547,14 @@ mod tests {
             Some(Commands::ClaudeAccounts {
                 command: ClaudeAccountsCommand::Use { ref name }
             }) if name == "work"
+        ));
+
+        let cli = Cli::try_parse_from(["duolane", "claude-accounts", "use", "-work"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ClaudeAccounts {
+                command: ClaudeAccountsCommand::Use { ref name }
+            }) if name == "-work"
         ));
 
         assert!(Cli::try_parse_from(["duolane", "claude-accounts", "use"]).is_err());

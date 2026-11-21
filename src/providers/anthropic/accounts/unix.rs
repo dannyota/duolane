@@ -34,7 +34,11 @@ fn accounts() -> Result<Vec<(String, PathBuf)>> {
         Err(e) => return Err(e.into()),
     };
     let file = File::from(fd);
-    checked(&file, FileType::RegularFile, Mode::WGRP | Mode::WOTH)?;
+    checked(
+        &file,
+        FileType::RegularFile,
+        Mode::RGRP | Mode::WGRP | Mode::ROTH | Mode::WOTH,
+    )?;
     parse_accounts(&bounded(file, MAX_CONFIG_BYTES as u64)?)
 }
 
@@ -153,6 +157,25 @@ mod tests {
             list().unwrap(),
             vec![("work".to_string(), true), ("personal".to_string(), false)]
         );
+    }
+
+    #[test]
+    fn accounts_file_readable_by_others_is_rejected() {
+        let config = crate::paths::config_dir();
+        let work = config.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        write_accounts(&[("work", work)]);
+        let store = config.join("claude-accounts.json");
+
+        for mode in [0o644, 0o640, 0o604, 0o620] {
+            std::fs::set_permissions(&store, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(list().is_err());
+            assert!(select("work").is_err());
+        }
+
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(select("work").is_ok());
+        assert_eq!(list().unwrap(), vec![("work".to_string(), true)]);
     }
 
     #[test]

@@ -121,8 +121,9 @@ binding is available. duolane never switches profiles automatically.
 
 On Unix, add named Claude Code configuration directories to
 `claude-accounts.json` in the duolane configuration directory. Accounts keep the
-order they appear in the file. Paths must be absolute, and a directory itself
-must not be a symlink.
+order they appear in the file. The file must be readable only by you
+(`chmod 600`). Paths must be absolute, and a directory itself must not be a
+symlink.
 
 ```json
 {
