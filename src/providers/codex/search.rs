@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 use crate::anthropic::schema::MessagesRequest;
 use crate::anthropic::sse::encode_sse_event;
+use crate::request_identity::ConversationIdentity;
 use crate::traffic::TrafficCapture;
 
 use super::count_tokens::{approx_token_count, truncate_to_token_budget};
@@ -91,15 +92,31 @@ pub fn is_standalone_search_request(req: &MessagesRequest) -> bool {
 pub fn build_search_request(
     req: &MessagesRequest,
     model: &str,
-    session_id: Option<&str>,
+    identity: Option<&ConversationIdentity>,
 ) -> Result<(SearchRequest, String), anyhow::Error> {
     let query = extract_search_query(req)
         .ok_or_else(|| anyhow::anyhow!("web_search request does not contain a text query"))?;
     let input = search_input(req);
     let filters = search_filters(req);
-    let id = session_id
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("search-{}", uuid::Uuid::new_v4()));
+    let id = match identity {
+        Some(ConversationIdentity::Main(session)) => session.clone(),
+        Some(ConversationIdentity::Agent(session, agent)) => {
+            let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+            digest.update(b"duolane:search-agent:v1\0");
+            for value in [session, agent] {
+                digest.update(&(value.len() as u64).to_be_bytes());
+                digest.update(value.as_bytes());
+            }
+            let encoded: String = digest
+                .finish()
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!("search-agent-v1,{encoded}")
+        }
+        None => format!("search-{}", uuid::Uuid::new_v4()),
+    };
 
     Ok((
         SearchRequest {
@@ -529,8 +546,12 @@ mod tests {
 
     #[test]
     fn request_preserves_luna_and_omits_reasoning() {
-        let (request, query) =
-            build_search_request(&request(), "gpt-5.6-luna", Some("session-1")).unwrap();
+        let (request, query) = build_search_request(
+            &request(),
+            "gpt-5.6-luna",
+            Some(&ConversationIdentity::Main("session-1".into())),
+        )
+        .unwrap();
         assert_eq!(request.model, "gpt-5.6-luna");
         assert_eq!(request.reasoning, None);
         assert_eq!(request.id, "session-1");
@@ -541,6 +562,42 @@ mod tests {
             request.settings.filters.unwrap().allowed_domains,
             Some(vec!["openai.com".to_string()])
         );
+    }
+
+    #[test]
+    fn search_owners_follow_validated_conversations() {
+        use crate::request_identity::ConversationIdentity;
+        let identity = |agent: Option<&str>, invalid: bool| {
+            let mut headers = http::HeaderMap::new();
+            headers.insert(
+                "x-claude-code-session-id",
+                "parent-session".parse().unwrap(),
+            );
+            if let Some(agent) = agent {
+                headers.insert("x-claude-code-agent-id", agent.parse().unwrap());
+            }
+            if invalid {
+                headers.insert(
+                    "x-claude-code-parent-agent-id",
+                    "bad parent".parse().unwrap(),
+                );
+            }
+            ConversationIdentity::from_headers(&headers)
+        };
+        let owner = |identity: Option<ConversationIdentity>| {
+            build_search_request(&request(), "gpt-5.6-luna", identity.as_ref())
+                .unwrap()
+                .0
+                .id
+        };
+        let first = owner(identity(Some("agent-one"), false));
+        assert_eq!(first, owner(identity(Some("agent-one"), false)));
+        assert_ne!(first, owner(identity(Some("agent-two"), false)));
+        assert!(!first.contains("agent-one"));
+        assert_eq!(owner(identity(None, false)), "parent-session");
+        let invalid = owner(identity(Some("agent-one"), true));
+        assert_ne!(invalid, "parent-session");
+        assert_ne!(invalid, owner(None));
     }
 
     #[test]

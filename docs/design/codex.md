@@ -42,6 +42,12 @@ Codex serves two lanes: the full Responses API and Responses Lite.
   moves to its nearest full-lane model.
 - Lite rejects `parallel_tool_calls: true`, so duolane sends `false` there.
 
+Standalone search uses the validated conversation identity for its owner. Main
+keeps its session id; each Agent gets a stable SHA-256 owner from its session
+and Agent ids. Missing or invalid identity gets a fresh UUID. The body id and
+`session-id`, `x-client-request-id`, and `x-codex-window-id` headers share this
+owner, with `:0` appended to the window id. Agent ids are not sent upstream.
+
 ## Service tiers
 
 - The suffix `-fast` on an allowed exact Codex model id requests the priority
