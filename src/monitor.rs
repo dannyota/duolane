@@ -814,6 +814,106 @@ mod tests {
     }
 
     #[test]
+    fn session_identity_comes_from_largest_input_request() {
+        let mut opus = completed_request("opus", "s1", 0, Duration::from_secs(1), None);
+        opus.started_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        opus.input_tokens = Some(100);
+        opus.provider = Some("anthropic".into());
+        opus.model = Some("claude-opus-5-5".into());
+        opus.effort = Some("xhigh".into());
+        let mut haiku = opus.clone();
+        haiku.started_at += Duration::from_secs(1);
+        haiku.input_tokens = Some(10);
+        haiku.model = Some("claude-haiku-5-5".into());
+        haiku.effort = None;
+        let mut recent = VecDeque::from([haiku.clone(), opus.clone()]);
+        let session = &session_summaries_for_requests(&recent)[0];
+        assert_eq!(session.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(session.effort.as_deref(), Some("xhigh"));
+
+        haiku.input_tokens = Some(200);
+        haiku.provider = Some("other".into());
+        recent.push_front(haiku.clone());
+        let session = &session_summaries_for_requests(&recent)[0];
+        assert_eq!(session.provider.as_deref(), Some("other"));
+        assert_eq!(session.model.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(session.effort, None);
+
+        opus.input_tokens = None;
+        haiku.input_tokens = None;
+        let session = &session_summaries_for_requests(&VecDeque::from([haiku, opus]))[0];
+        assert_eq!(session.model.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(session.effort, None);
+    }
+
+    #[test]
+    fn unknown_input_prefers_latest_request_with_model_and_zero_is_known() {
+        let mut known_model = completed_request("model", "s1", 0, Duration::from_secs(1), None);
+        known_model.started_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        known_model.effort = Some("high".into());
+        let mut empty = known_model.clone();
+        empty.started_at += Duration::from_secs(1);
+        empty.provider = None;
+        empty.model = None;
+        empty.effort = None;
+        let recent = VecDeque::from([empty.clone(), known_model.clone()]);
+        let session = &session_summaries_for_requests(&recent)[0];
+        assert_eq!(session.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(session.effort.as_deref(), Some("high"));
+
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("active", Some("s1".into()), None, EndpointKind::Messages);
+        let mut active = monitor.snapshot().active.remove(0);
+        active.started_at = empty.started_at + Duration::from_secs(1);
+        let sessions = session_summaries(
+            &[active],
+            &recent,
+            &HashMap::new(),
+            &HashMap::new(),
+            SystemTime::now(),
+        );
+        assert_eq!(sessions[0].model.as_deref(), Some("gpt-5.6-sol"));
+
+        known_model.input_tokens = Some(0);
+        empty.model = Some("newer".into());
+        let session = &session_summaries_for_requests(&VecDeque::from([empty, known_model]))[0];
+        assert_eq!(session.model.as_deref(), Some("gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn session_identity_ties_use_latest_start_including_active_requests() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("active", Some("s1".into()), None, EndpointKind::Messages);
+        monitor.provider_selected("active", "new", "new-model", None);
+        monitor.usage_updated("active", Some(100), None);
+        let mut active = monitor.snapshot().active.remove(0);
+        active.started_at = SystemTime::UNIX_EPOCH + Duration::from_secs(2);
+        let mut completed = completed_request("old", "s1", 0, Duration::from_secs(10), None);
+        completed.started_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        completed.input_tokens = Some(100);
+        completed.effort = Some("high".into());
+        let recent = VecDeque::from([completed]);
+        let sessions = session_summaries(
+            &[active.clone()],
+            &recent,
+            &HashMap::new(),
+            &HashMap::new(),
+            SystemTime::now(),
+        );
+        assert_eq!(sessions[0].model.as_deref(), Some("new-model"));
+        assert_eq!(sessions[0].effort, None);
+        active.started_at = SystemTime::UNIX_EPOCH;
+        let sessions = session_summaries(
+            &[active],
+            &recent,
+            &HashMap::new(),
+            &HashMap::new(),
+            SystemTime::now(),
+        );
+        assert_eq!(sessions[0].model.as_deref(), Some("gpt-5.6-sol"));
+    }
+
+    #[test]
     fn completed_request_rate_uses_stream_interval_instead_of_request_latency() {
         let request = completed_request(
             "r1",
@@ -943,6 +1043,7 @@ mod tests {
             EndpointKind::Messages,
         );
         monitor.provider_selected("r2", "codex", "gpt-5.5", Some("xhigh".to_string()));
+        monitor.usage_updated("r2", Some(11), None);
         let state = monitor.snapshot();
         assert_eq!(state.sessions.len(), 1);
         assert_eq!(state.sessions[0].label(), "s1");

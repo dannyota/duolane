@@ -5,6 +5,11 @@ detail. Events opens the same request detail as Recent requests. The selected
 detail follows the clicked identity if new activity reorders rows; if it leaves
 the snapshot, show that it is no longer available.
 
+A session's provider, model, and effort come from its request with the largest
+known input token count, including active requests, with ties resolved by latest
+start time; if all counts are unknown, use the latest request with a model, or
+the latest request if none has a model.
+
 ## Approach
 
 Use the existing detail panes and add mouse input to the dashboard. Keeping
