@@ -131,11 +131,11 @@ Rejections use the Anthropic error shape and never echo request values:
   components, opened and read the same way as a Codex profile home, under the
   same ownership and `StrictModes` ancestor rules. The owner edits the store by
   hand, so duolane only reads it.
-- duolane reads the selected account's session key from its config directory's
-  credential store and attaches it to an upstream request as
-  `Authorization: Bearer <token>`. The key is never logged or captured; the
-  shared credential matcher redacts the header before it reaches logs and
-  traffic captures.
+- duolane reads the selected account's session key from the login store the
+  [accounts design](accounts.md#claude-login-location) names and attaches it to
+  an upstream request as `Authorization: Bearer <token>`. The key is never
+  logged or captured; the shared credential matcher redacts the header before it
+  reaches logs and traffic captures.
 - The macOS Keychain login is read by executing `/usr/bin/security` directly,
   without a shell, with the fixed arguments
   `find-generic-password -s <service> -w`, an environment cleared except

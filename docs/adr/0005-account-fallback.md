@@ -42,13 +42,15 @@ optional reset fields. The Claude route has no equivalent.
 ## Consequences
 
 - The Claude route is no longer pure passthrough when accounts are configured:
-  duolane reads the selected account's session key from its config directory and
-  rewrites the `Authorization` header. With no accounts configured it stays the
+  duolane reads the selected account's session key from its login and rewrites
+  the `Authorization` header. With no accounts configured it stays the
   byte-exact passthrough described in the
   [architecture](../design/architecture.md#claude-route).
-- duolane now reads Anthropic credentials from the selected account's config
-  directory, so the [security design](../design/security.md#credentials) gains a
-  rule for reading and attaching them.
+- duolane now reads Anthropic credentials from each account's login store, the
+  macOS Keychain entry or `.credentials.json` the
+  [accounts design](../design/accounts.md#claude-login-location) names, so the
+  [security design](../design/security.md#credentials) gains rules for reading
+  and attaching them.
 - A switch mid-conversation can send one account's thinking signature to
   another. This mirrors the existing Claude to Codex to Claude switch and its
   documented fallback, and stays unverified until a live check.

@@ -73,10 +73,11 @@ advancing, so concurrent requests cannot regress it to a spent account.
 With no Claude accounts configured, the Claude route is the byte-exact
 passthrough the [architecture](architecture.md#claude-route) describes. With
 accounts configured, duolane replaces the forwarded `Authorization` header with
-`Bearer <session key>` read from the selected account's config directory and
-leaves the body byte-exact. `POST /v1/messages` falls back.
-`POST /v1/messages/count_tokens` relays through the selected account without
-fallback, because counting does not spend quota.
+`Bearer <session key>` read from the selected account's login, as
+[Claude login location](#claude-login-location) defines, and leaves the body
+byte-exact. `POST /v1/messages` falls back. `POST /v1/messages/count_tokens`
+relays through the selected account without fallback, because counting does not
+spend quota.
 
 ## Claude login location
 
