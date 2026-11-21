@@ -98,3 +98,102 @@ async fn oversized_json_is_forwarded_without_usage() {
     assert_eq!(snapshot.recent[0].input_tokens, None);
     assert_eq!(snapshot.recent[0].output_tokens, None);
 }
+
+#[tokio::test]
+async fn leading_bom_is_ignored_for_sse_and_json() {
+    let event =
+        b"\xef\xbb\xbfdata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":8}}\n\n";
+    let (received, monitor) = relay_chunks(
+        "text/event-stream",
+        vec![event[..1].to_vec(), event[1..].to_vec()],
+    )
+    .await;
+    assert!(received == event);
+    assert_eq!(monitor.snapshot().recent[0].output_tokens, Some(8));
+    let body = b"\xef\xbb\xbf{\"usage\":{\"output_tokens\":9}}";
+    let (received, monitor) = relay_chunks("application/json", vec![body.to_vec()]).await;
+    assert!(received == body);
+    assert_eq!(monitor.snapshot().recent[0].output_tokens, Some(9));
+}
+
+#[tokio::test]
+async fn escaped_usage_key_is_recognized() {
+    let event = br#"data: {"type":"message_delta","\u0075sage":{"output_tokens":8}}
+
+"#;
+    let (received, monitor) = relay_chunks("text/event-stream", vec![event.to_vec()]).await;
+    assert!(received == event);
+    assert_eq!(monitor.snapshot().recent[0].output_tokens, Some(8));
+    let body = br#"{"\u0075sage":{"output_tokens":9}}"#;
+    let (received, monitor) = relay_chunks("application/json", vec![body.to_vec()]).await;
+    assert!(received == body);
+    assert_eq!(monitor.snapshot().recent[0].output_tokens, Some(9));
+}
+
+#[tokio::test]
+async fn near_limit_event_reports_usage() {
+    let mut event = b"data: {\"type\":\"message_delta\",\"padding\":\"".to_vec();
+    event.extend(std::iter::repeat_n(b'x', 1024 * 1024 - 128));
+    event.extend_from_slice(b"\",\"usage\":{\"output_tokens\":8}}\n\n");
+    let (received, monitor) = relay_chunks("text/event-stream", vec![event.clone()]).await;
+    assert!(received == event);
+    assert_eq!(monitor.snapshot().recent[0].output_tokens, Some(8));
+}
+
+#[tokio::test]
+async fn excessive_token_fields_are_ignored() {
+    let event = b"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":1000000000,\"output_tokens\":7}}\n\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":18446744073709551615,\"cache_read_input_tokens\":1000000001,\"output_tokens\":8}}\n\n";
+    let (received, monitor) = relay_chunks("text/event-stream", vec![event.to_vec()]).await;
+    assert!(received == event);
+    let snapshot = monitor.snapshot();
+    assert_eq!(snapshot.recent[0].input_tokens, Some(1_000_000_000));
+    assert_eq!(snapshot.recent[0].output_tokens, Some(8));
+}
+
+#[tokio::test]
+async fn invalid_numeric_fields_do_not_hide_valid_usage() {
+    let body = br#"{"usage":{"input_tokens":18446744073709551616,"cache_read_input_tokens":1.5,"output_tokens":8}}"#;
+    let (received, monitor) = relay_chunks("application/json", vec![body.to_vec()]).await;
+    assert!(received == body);
+    let snapshot = monitor.snapshot();
+    assert_eq!(snapshot.recent[0].input_tokens, None);
+    assert_eq!(snapshot.recent[0].output_tokens, Some(8));
+}
+
+#[tokio::test]
+async fn bom_does_not_count_toward_sse_buffer_limit() {
+    let mut body = b"\xef\xbb\xbfdata: {\"type\":\"message_delta\",\"padding\":\"".to_vec();
+    let tail = b"\",\"usage\":{\"output_tokens\":8}}";
+    body.extend(std::iter::repeat_n(
+        b'x',
+        1024 * 1024 - 1 - (body.len() - 3) - tail.len(),
+    ));
+    body.extend_from_slice(tail);
+    body.extend_from_slice(b"\n\n");
+    let (received, monitor) = relay_chunks("text/event-stream", vec![body.clone()]).await;
+    assert!(received == body);
+    assert_eq!(monitor.snapshot().recent[0].output_tokens, Some(8));
+}
+
+#[tokio::test]
+async fn incomplete_bom_prefix_remains_part_of_first_line() {
+    use futures_util::StreamExt;
+    let monitor = MonitorHandle::new(10);
+    monitor.request_started("req", Some("session".into()), None, EndpointKind::Messages);
+    let chunks = vec![Bytes::from_static(b"\xef"), Bytes::from_static(b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":8}}\n\n")];
+    let input = futures_util::stream::iter(chunks.clone().into_iter().map(Ok));
+    let mut stream = Box::pin(super::usage::observe(
+        input,
+        Some(monitor.clone()),
+        "req".into(),
+        true,
+    ));
+    for expected in chunks {
+        assert!(stream.next().await.unwrap().unwrap() == expected);
+    }
+    assert!(stream.next().await.is_none());
+    monitor.request_completed("req", 200, None, None);
+    let snapshot = monitor.snapshot();
+    assert_eq!(snapshot.recent[0].input_tokens, Some(8));
+    assert_eq!(snapshot.recent[0].output_tokens, None);
+}
