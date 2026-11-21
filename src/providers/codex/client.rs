@@ -211,16 +211,11 @@ impl CodexHttpClient {
         body: &ResponsesRequest,
         ctx: &RequestContext,
         continuation: Option<&super::continuation::ContinuationReservation>,
+        transport: crate::config::CodexTransport,
         http_body: &CodexHttpBodyCache,
     ) -> Result<OwnerAwareCodexResponse, CodexError> {
-        self.post_codex_with_transport(
-            body,
-            ctx,
-            continuation,
-            crate::config::codex_transport(),
-            http_body,
-        )
-        .await
+        self.post_codex_with_transport(body, ctx, continuation, transport, http_body)
+            .await
     }
 }
 

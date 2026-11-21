@@ -78,15 +78,21 @@ impl CodexHttpClient {
                     if !http_body
                         .websocket_sent
                         .load(std::sync::atomic::Ordering::Acquire)
-                        && self
-                            .auto_large_full_context(
-                                body,
-                                ctx,
-                                active_continuation.as_ref(),
-                                http_body,
-                            )
-                            .await? =>
+                        && (http_body
+                            .size_http_selected
+                            .load(std::sync::atomic::Ordering::Acquire)
+                            || self
+                                .auto_large_full_context(
+                                    body,
+                                    ctx,
+                                    active_continuation.as_ref(),
+                                    http_body,
+                                )
+                                .await?) =>
                 {
+                    http_body
+                        .size_http_selected
+                        .store(true, std::sync::atomic::Ordering::Release);
                     let http_body = http_body.get_or_try_init(prepare_http_body).await?;
                     self.attempt_post_http(&auth, http_body, ctx, body.client_metadata.is_some())
                         .await
@@ -1045,24 +1051,92 @@ mod tests {
         let request = buffered_request_with_texts(&[&"x".repeat(4 * 1024 * 1024)]);
         let expected = serde_json::to_vec(&request).unwrap();
         let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let wire = read_http_request(&mut stream).await;
-            assert_wire_json(&wire, &expected, true);
-            stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 12\r\nconnection: close\r\n\r\ndata: keep\n\n").await.unwrap();
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let wire = read_http_request(&mut stream).await;
+                assert_wire_json(&wire, &expected, true);
+                if attempt == 0 {
+                    stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nretry-after: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+                } else {
+                    stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 12\r\nconnection: close\r\n\r\ndata: keep\n\n").await.unwrap();
+                }
+            }
         });
         let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
         client.request_compression = crate::config::CodexRequestCompression::Gzip;
+        let cache = CodexHttpBodyCache::new();
         let response = client
             .post_codex_with_transport(
                 &request,
                 &http_test_context(),
                 None,
                 crate::config::CodexTransport::Auto,
-                &Default::default(),
+                &cache,
             )
             .await;
         server.await.unwrap();
         assert_eq!(response.unwrap().transport, ActualTransport::Http);
+        assert!(
+            cache
+                .size_http_selected
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert_eq!(
+            cache
+                .size_measurements
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_under_limit_measures_once_across_handshake_and_http_retries() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let request = buffered_test_request();
+        let expected = serde_json::to_vec(&request).unwrap();
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut ws, _) = listener.accept().await.unwrap();
+                let handshake = read_http_request(&mut ws).await;
+                assert!(handshake.starts_with(b"GET "));
+                ws.write_all(
+                    b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+                let (mut http, _) = listener.accept().await.unwrap();
+                assert_wire_json(&read_http_request(&mut http).await, &expected, true);
+                let response = if attempt == 0 {
+                    b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nretry-after: 0\r\nconnection: close\r\n\r\n".as_slice()
+                } else {
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 12\r\nconnection: close\r\n\r\ndata: keep\n\n".as_slice()
+                };
+                http.write_all(response).await.unwrap();
+            }
+        });
+        let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        client.request_compression = crate::config::CodexRequestCompression::Gzip;
+        client.auto_ws_max_bytes = 100_000;
+        let cache = CodexHttpBodyCache::new();
+        let response = client
+            .post_codex_with_transport(
+                &request,
+                &http_test_context(),
+                None,
+                crate::config::CodexTransport::Auto,
+                &cache,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.transport, ActualTransport::Http);
+        assert_eq!(
+            cache
+                .size_measurements
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -1305,6 +1379,61 @@ mod tests {
             super::super::websocket::invalidate_codex_websocket_pool_owner(&owner);
             super::super::continuation::abort_continuation_for_owner(&candidate);
         }
+    }
+
+    #[test]
+    fn buffered_turn_keeps_transport_when_config_changes() {
+        const CHILD: &str = "TEST_TRANSPORT_FREEZE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "providers::codex::client_buffered::tests::buffered_turn_keeps_transport_when_config_changes"])
+                .env(CHILD, "1")
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let config_dir = crate::paths::config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("config.json");
+        std::fs::write(&config_path, r#"{"codex":{"transport":"websocket"}}"#).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    let _ = next_websocket_json(&mut ws).await;
+                    send_completed_websocket_response(&mut ws, "resp_empty").await;
+                }
+            });
+            let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+            let request = buffered_test_request();
+            let ctx = http_test_context();
+            let cache = CodexHttpBodyCache::new();
+            let transport = crate::config::codex_transport();
+            assert_eq!(transport, crate::config::CodexTransport::WebSocket);
+            let first = client
+                .post_codex_for_owner(&request, &ctx, None, transport, &cache)
+                .await
+                .unwrap();
+            assert_eq!(first.transport, ActualTransport::WebSocket);
+            std::fs::write(&config_path, r#"{"codex":{"transport":"http"}}"#).unwrap();
+            assert_eq!(
+                crate::config::codex_transport(),
+                crate::config::CodexTransport::Http
+            );
+            let second = client
+                .post_codex_for_owner(&request, &ctx, None, transport, &cache)
+                .await
+                .unwrap();
+            assert_eq!(second.transport, ActualTransport::WebSocket);
+            server.await.unwrap();
+        });
     }
 
     #[tokio::test]

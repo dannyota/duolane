@@ -62,6 +62,7 @@ pub(super) async fn live_stream_response(
     compaction: LiveStreamCompaction,
     transport: config::CodexTransport,
     successful_tool_tail: bool,
+    websocket_sent: Arc<std::sync::atomic::AtomicBool>,
 ) -> Response {
     let model = model.to_string();
     let started_at = Instant::now();
@@ -74,7 +75,7 @@ pub(super) async fn live_stream_response(
     );
     let mut attempt = 0_u32;
     let mut continuation = Some(continuation);
-    let http_body = client_body::CodexHttpBodyCache::new();
+    let http_body = client_body::CodexHttpBodyCache::with_websocket_sent(websocket_sent);
 
     loop {
         let upstream_events = match transport {
@@ -85,10 +86,11 @@ pub(super) async fn live_stream_response(
             }
             config::CodexTransport::WebSocket => {
                 client
-                    .stream_codex_websocket_events_for_owner(
+                    .stream_codex_websocket_events_tracked(
                         &request_body,
                         &ctx,
                         continuation.as_ref(),
+                        http_body.websocket_sent.clone(),
                     )
                     .await
             }
@@ -1134,6 +1136,7 @@ mod tests {
                     },
                     config::CodexTransport::WebSocket,
                     false,
+                    Arc::default(),
                 )
                 .await
                 .status()
@@ -1212,6 +1215,7 @@ mod tests {
                 },
                 config::CodexTransport::WebSocket,
                 false,
+                Arc::default(),
             )
             .await;
             assert_eq!(response.status(), http::StatusCode::OK);
@@ -1286,6 +1290,7 @@ mod tests {
                 },
                 config::CodexTransport::WebSocket,
                 false,
+                Arc::default(),
             )
             .await
         });
@@ -1372,6 +1377,7 @@ mod tests {
                 },
                 config::CodexTransport::WebSocket,
                 false,
+                Arc::default(),
             ),
         )
         .await
@@ -1457,6 +1463,7 @@ mod tests {
                 },
                 config::CodexTransport::WebSocket,
                 false,
+                Arc::default(),
             )
             .await
         });

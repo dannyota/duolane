@@ -21,11 +21,21 @@ pub(super) struct CodexHttpBodyCache {
     body: OnceCell<CodexHttpBody>,
     pub(super) websocket_sent: std::sync::Arc<AtomicBool>,
     pub(super) size_http_selected: AtomicBool,
+    measured_over_limit: OnceCell<bool>,
+    #[cfg(test)]
+    pub(super) size_measurements: std::sync::atomic::AtomicUsize,
 }
 
 impl CodexHttpBodyCache {
     pub(super) fn new() -> Self {
         Self::default()
+    }
+
+    pub(super) fn with_websocket_sent(websocket_sent: std::sync::Arc<AtomicBool>) -> Self {
+        Self {
+            websocket_sent,
+            ..Self::default()
+        }
     }
 }
 
@@ -58,10 +68,20 @@ impl CodexHttpClient {
         {
             return Ok(false);
         }
-        let mut counter = JsonCounter(0);
-        serde_json::to_writer(&mut counter, body)
-            .map_err(|error| json_error("Failed to serialize request", error))?;
-        Ok(counter.0 > self.auto_ws_max_bytes)
+        let over_limit = _cache
+            .measured_over_limit
+            .get_or_try_init(|| async {
+                #[cfg(test)]
+                _cache
+                    .size_measurements
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut counter = JsonCounter(0);
+                serde_json::to_writer(&mut counter, body)
+                    .map_err(|error| json_error("Failed to serialize request", error))?;
+                Ok::<bool, CodexError>(counter.0 > self.auto_ws_max_bytes)
+            })
+            .await?;
+        Ok(*over_limit)
     }
 
     pub(super) async fn prepare_http_body(
