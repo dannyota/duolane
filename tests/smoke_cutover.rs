@@ -103,6 +103,99 @@ async fn call_messages_body(body: Value) -> Response {
         .unwrap()
 }
 
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn standalone_search_uses_conversation_owners_end_to_end() {
+    let _guard = env_lock();
+    let config = TempDir::new().unwrap();
+    let _auth = write_codex_auth(config.path());
+    let captured = Arc::new(Mutex::new(Vec::<[String; 4]>::new()));
+    let router = axum::Router::new().fallback({
+        let captured = captured.clone();
+        move |headers: http::HeaderMap, body: String| {
+            let captured = captured.clone();
+            async move {
+                let body: Value = serde_json::from_str(&body).unwrap();
+                let get = |name| headers.get(name).unwrap().to_str().unwrap().to_owned();
+                captured.lock().unwrap().push([
+                    body["id"].as_str().unwrap().to_owned(),
+                    get("session-id"),
+                    get("x-client-request-id"),
+                    get("x-codex-window-id"),
+                ]);
+                axum::Json(json!({"output": "ok", "results": []}))
+            }
+        }
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let _config = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base = EnvGuard::set("DUOLANE_CODEX_BASE_URL", format!("http://{addr}/responses"));
+    let _no_proxy = EnvGuard::set("NO_PROXY", "127.0.0.1,localhost");
+    let body = json!({
+        "model": "gpt-5.6-luna", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "Perform a web search for the query: hello"}],
+        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        "tool_choice": {"type": "tool", "name": "web_search"}
+    });
+    let cases = [
+        Some("agent-one"),
+        Some("agent-one"),
+        Some("agent-two"),
+        None,
+        Some("bad agent"),
+    ];
+    for agent in cases {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/messages")
+            .header("content-type", "application/json")
+            .header("x-claude-code-session-id", "parent-session");
+        if let Some(agent) = agent {
+            req = req.header("x-claude-code-agent-id", agent);
+        }
+        let response = app(Arc::new(Registry::with_default_alias()))
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let derived_owner = captured.lock().unwrap()[0][0].clone();
+    assert!(derived_owner.starts_with("search-agent-v1,"));
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .header("x-claude-code-session-id", &derived_owner)
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app(Arc::new(Registry::with_default_alias()))
+        .oneshot(request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    server.abort();
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), cases.len() + 1);
+    let replacement = &captured[cases.len()][0];
+    assert!(replacement != &derived_owner);
+    assert!(
+        replacement
+            .strip_prefix("search-")
+            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+    );
+    for values in captured.iter() {
+        assert!(values[0] == values[1] && values[0] == values[2]);
+        assert!(values[3] == format!("{}:0", values[0]));
+    }
+    assert!(captured[0][0] == captured[1][0]);
+    assert!(captured[0][0] != captured[2][0]);
+    assert!(!captured[0][0].contains("agent-one"));
+    assert!(captured[3][0] == "parent-session");
+    assert!(captured[4][0] != "parent-session");
+}
+
 async fn call_responses_body(body: Value) -> Response {
     let _no_proxy_env = EnvGuard::set("NO_PROXY", "127.0.0.1,localhost");
     app_with_options(Arc::new(Registry::with_default_alias()), None, true)

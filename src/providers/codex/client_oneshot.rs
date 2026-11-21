@@ -308,7 +308,9 @@ impl CodexHttpClient {
         let mut retries = 0_u32;
 
         loop {
-            let response = self.attempt_post_search(&auth, &body_json, ctx).await?;
+            let response = self
+                .attempt_post_search(&auth, &body_json, ctx, &body.id)
+                .await?;
             if response.status == 401 && !auth_refresh_attempted {
                 auth_refresh_attempted = true;
                 auth = self
@@ -353,9 +355,10 @@ impl CodexHttpClient {
         auth: &StoredAuth,
         body_json: &str,
         ctx: &RequestContext,
+        owner: &str,
     ) -> Result<CodexResponse, CodexError> {
         let url = search_endpoint(&self.base_url);
-        let headers = build_codex_search_headers(auth, ctx)?;
+        let headers = build_codex_search_headers(auth, ctx, owner)?;
 
         if let Some(traffic) = ctx.traffic.as_deref() {
             write_codex_http_request_capture(traffic, &url, &headers, body_json);
@@ -710,8 +713,12 @@ mod tests {
                     .contains("accept: application/json")
             );
             assert!(headers.contains("authorization: Bearer test"));
+            assert!(headers.contains("session-id: session"));
+            assert!(headers.contains("x-client-request-id: session"));
+            assert!(headers.contains("x-codex-window-id: session:0"));
             let body: serde_json::Value =
                 serde_json::from_slice(&request[header_end + 4..]).unwrap();
+            assert!(body["id"] == "session");
             assert_eq!(body["model"], "gpt-5.6-luna");
             assert!(body.get("reasoning").is_none());
             assert_eq!(body["commands"]["search_query"][0]["q"], "find Codex");

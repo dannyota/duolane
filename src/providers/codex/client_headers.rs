@@ -105,8 +105,18 @@ pub fn build_native_codex_headers(
 pub fn build_codex_search_headers(
     auth: &StoredAuth,
     ctx: &RequestContext,
+    owner: &str,
 ) -> Result<http::HeaderMap, CodexError> {
     let mut headers = build_codex_headers(auth, ctx, false)?;
+    headers.insert("session-id", header_value("session-id", owner)?);
+    headers.insert(
+        "x-client-request-id",
+        header_value("x-client-request-id", owner)?,
+    );
+    headers.insert(
+        "x-codex-window-id",
+        header_value("x-codex-window-id", &format!("{owner}:0"))?,
+    );
     headers.insert(
         http::header::ACCEPT,
         header_value("accept", "application/json")?,
