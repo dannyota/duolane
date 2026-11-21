@@ -247,6 +247,7 @@ pub(super) struct ReadyWebSocket {
     reservation: Option<ContinuationReservation>,
     traffic: Option<Arc<TrafficCapture>>,
     idle_timeout_ms: u64,
+    send_timeout_ms: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -310,6 +311,7 @@ pub(super) async fn prepare_codex_websocket(
         reservation: reservation.cloned(),
         traffic,
         idle_timeout_ms,
+        send_timeout_ms: connect_timeout_ms,
     })
 }
 
@@ -355,17 +357,31 @@ pub(super) fn start_codex_websocket_events(
             reservation,
             traffic,
             idle_timeout_ms,
+            send_timeout_ms,
         } = ready;
         let pool_owner = reservation_pool_owner(reservation.as_ref());
-        if let Err(error) = guard.send(Message::text(body_json)).await {
+        let send_result = tokio::select! {
+            biased;
+            _ = tx.closed() => None,
+            result = tokio::time::timeout(
+                Duration::from_millis(send_timeout_ms),
+                guard.send(Message::text(body_json)),
+            ) => Some(result),
+        };
+        if !matches!(send_result, Some(Ok(Ok(())))) {
             drop(guard);
             if let Some(owner) = &pool_owner {
                 pool_remove_entry(owner, &entry);
             }
             socket_id_publisher.publish(None);
-            let _ = tx
-                .send(Err(websocket_transport_error("send", &error)))
-                .await;
+            let error = match send_result {
+                Some(Ok(Err(error))) => Some(websocket_transport_error("send", &error)),
+                Some(Err(_)) => Some(websocket_stream_error("WebSocket send timed out")),
+                _ => None,
+            };
+            if let Some(error) = error {
+                let _ = tx.send(Err(error)).await;
+            }
             return;
         }
         let (reusable, terminal_item) =
@@ -576,6 +592,136 @@ mod tests {
         assert!(!captured.contains("poolKey"));
         assert!(!captured.contains("session-secret"));
         assert!(!captured.contains("agent-secret"));
+    }
+
+    #[tokio::test]
+    async fn disconnect_during_stalled_send_releases_and_closes_socket() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (drain_tx, drain_rx) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            drain_rx.await.unwrap();
+            let mut buffer = [0_u8; 65536];
+            loop {
+                match websocket.get_mut().read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+        let ready = prepare_codex_websocket(
+            &test_websocket_client(),
+            &WebSocketProxyConfig::direct(),
+            &format!("http://{addr}/responses"),
+            &HeaderMap::new(),
+            None,
+            None,
+            10_000,
+            10_000,
+        )
+        .await
+        .unwrap();
+        let weak_entry = Arc::downgrade(&ready.entry);
+        let events = start_codex_websocket_events(
+            ready,
+            &serde_json::Value::Null,
+            "x".repeat(32 * 1024 * 1024),
+            &HeaderMap::new(),
+            None,
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(weak_entry.upgrade().is_some());
+        drop(events);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while weak_entry.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drain_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), peer)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_send_hits_deadline_and_closes_unpooled_socket() {
+        use tokio::io::AsyncReadExt;
+
+        let _registry_guard =
+            super::super::continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = lock_codex_websocket_pool_for_tests().await;
+        let owner = agent_owner("send-deadline-session", "send-deadline-agent");
+        invalidate_codex_websocket_pool_owner(&owner);
+        let request = super::super::client_test_support::buffered_test_request();
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            true,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (drain_tx, drain_rx) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            drain_rx.await.unwrap();
+            let mut buffer = [0_u8; 65536];
+            loop {
+                match websocket.get_mut().read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+        let mut ready = prepare_codex_websocket(
+            &test_websocket_client(),
+            &WebSocketProxyConfig::direct(),
+            &format!("http://{addr}/responses"),
+            &HeaderMap::new(),
+            None,
+            Some(&reservation),
+            1_000,
+            10_000,
+        )
+        .await
+        .unwrap();
+        ready.send_timeout_ms = 200;
+        let weak_entry = Arc::downgrade(&ready.entry);
+        let mut events = start_codex_websocket_events(
+            ready,
+            &serde_json::Value::Null,
+            "x".repeat(32 * 1024 * 1024),
+            &HeaderMap::new(),
+            Some(&reservation),
+        );
+        let error = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.message, "WebSocket send timed out");
+        assert_eq!(events.socket_id(), None);
+        assert_eq!(pooled_socket_id_for_tests(&owner), None);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while weak_entry.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drain_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), peer)
+            .await
+            .unwrap()
+            .unwrap();
+        super::super::continuation::clear_continuation_for_owner(Some(&owner));
     }
 
     #[tokio::test]

@@ -140,6 +140,11 @@ below the cap keeps its effort.
   without `close_notify`, is retryable before output. Streaming requests and
   buffered WebSockets also stop retrying once Codex reports that a hosted web
   search is in progress or has completed, even before client output.
+- After a full-context WebSocket retry, a repeated missing origin fails fast;
+  transient failures still use the normal retry budget subject to the same
+  no-replay rules.
+- A streaming WebSocket send has a deadline and stops when the downstream
+  disconnects. The socket is removed from the pool and closed.
 - A failed read of an HTTP error body preserves the status from the headers,
   which still governs retries.
 - The HTTP reader runs its own bounded retries. They are not multiplied by the

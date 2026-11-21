@@ -166,7 +166,7 @@ pub(super) async fn live_stream_response(
                     empty_completion_attempts = 0;
                 }
                 let dropped = drop_live_continuation_for_retry(&mut continuation);
-                if full_context_retry_attempted && client::is_continuation_retry_error(&error) {
+                if full_context_retry_attempted && is_missing_previous_response_error(&error) {
                     cleanup.abort();
                     return map_codex_error_to_response(&error);
                 }
