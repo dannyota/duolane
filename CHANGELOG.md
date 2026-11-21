@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+
+- `DUOLANE_AUTO_REVIEW_EFFORT` or `autoReviewEffort` sets the reasoning effort
+  for Claude Code auto-review requests that go to Codex.
+
+### Changed
+
+- A Codex request makes at most three recovery retries, within 60 seconds of the
+  first retry. When they run out, duolane answers 503 with
+  `x-should-retry: false`.
+- With `Auto` transport, Claude Code's compaction summary goes to Codex over
+  HTTP.
+- New Codex WebSocket connections no longer wait behind one another. Spacing
+  grows after a Codex 403 on upgrade and shrinks again after successes.
+- The monitor sizes Model, Endpoint, and Project to their content on wide
+  terminals, so the numbers sit next to the text.
+- The default branch is now `master`.
+
+### Fixed
+
+- With gzip on, an oversized streaming request whose WebSocket was lost goes
+  over HTTP, as buffered requests already did.
+- The monitor no longer shows `name)` as the project after Claude Code reports a
+  changed working directory.
+
 ## 0.3.0
 
 ### Added
