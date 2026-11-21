@@ -283,7 +283,7 @@ mod request_id_header_tests {
 
     #[tokio::test]
     async fn completed_stream_retains_anthropic_usage() {
-        use crate::monitor::{EndpointKind, MonitorHandle};
+        use crate::monitor::{EndpointKind, MonitorHandle, RequestStatus};
         use crate::providers::anthropic::observe_usage_for_test;
         use bytes::Bytes;
 
@@ -299,6 +299,7 @@ mod request_id_header_tests {
             .await
             .unwrap();
         let snapshot = monitor.snapshot();
+        assert_eq!(snapshot.recent[0].status, RequestStatus::Completed);
         assert_eq!(snapshot.recent[0].input_tokens, Some(12));
         assert_eq!(snapshot.recent[0].output_tokens, Some(8));
     }

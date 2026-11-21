@@ -18,6 +18,7 @@ pub(crate) fn observe(
         is_sse,
         buffer: Vec::new(),
         line_start: 0,
+        bom_matched: 0,
         after_cr: false,
         has_data: false,
         stopped: false,
@@ -66,10 +67,10 @@ struct Message {
 
 #[derive(Deserialize)]
 struct Usage {
-    input_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,
-    cache_read_input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
+    input_tokens: Option<serde_json::Number>,
+    cache_creation_input_tokens: Option<serde_json::Number>,
+    cache_read_input_tokens: Option<serde_json::Number>,
+    output_tokens: Option<serde_json::Number>,
 }
 
 fn data_value(line: &[u8]) -> Option<&[u8]> {
@@ -81,12 +82,18 @@ fn data_value(line: &[u8]) -> Option<&[u8]> {
     }
 }
 
+fn may_contain_usage(bytes: &[u8]) -> bool {
+    bytes.windows(7).any(|window| window == b"\"usage\"")
+        || bytes.windows(2).any(|window| window == b"\\u")
+}
+
 struct Observer {
     monitor: MonitorHandle,
     request_id: String,
     is_sse: bool,
     buffer: Vec<u8>,
     line_start: usize,
+    bom_matched: usize,
     after_cr: bool,
     has_data: bool,
     stopped: bool,
@@ -109,6 +116,18 @@ impl Observer {
         if self.is_sse {
             let mut events = 0u64;
             for &byte in chunk {
+                const BOM: &[u8] = b"\xef\xbb\xbf";
+                if self.bom_matched < BOM.len() {
+                    if byte == BOM[self.bom_matched] {
+                        self.bom_matched += 1;
+                        continue;
+                    }
+                    let matched = self.bom_matched;
+                    self.bom_matched = BOM.len();
+                    if !self.append(&BOM[..matched]) {
+                        break;
+                    }
+                }
                 if self.after_cr {
                     self.after_cr = false;
                     if byte == b'\n' {
@@ -162,20 +181,27 @@ impl Observer {
     }
 
     fn dispatch(&mut self) {
-        let values = || {
-            self.buffer
-                .split(|byte| *byte == b'\n')
-                .filter_map(data_value)
-        };
-        if !values().any(|value| value.windows(7).any(|bytes| bytes == b"\"usage\"")) {
+        if !may_contain_usage(&self.buffer) {
             return;
         }
-        let mut data = Vec::with_capacity(self.buffer.len());
-        for value in values() {
-            data.extend_from_slice(value);
-            data.push(b'\n');
+        let mut read = 0;
+        let mut write = 0;
+        while read < self.buffer.len() {
+            let end = self.buffer[read..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(self.buffer.len(), |offset| read + offset);
+            if let Some(value) = data_value(&self.buffer[read..end]) {
+                let len = value.len();
+                let start = end - len;
+                self.buffer.copy_within(start..end, write);
+                write += len;
+                self.buffer[write] = b'\n';
+                write += 1;
+            }
+            read = end + 1;
         }
-        if let Ok(document) = serde_json::from_slice::<Document<'_>>(&data) {
+        if let Ok(document) = serde_json::from_slice::<Document<'_>>(&self.buffer[..write]) {
             let usage = match document.kind {
                 Some("message_start") => document.message.and_then(|message| message.usage),
                 Some("message_delta") => document.usage,
@@ -188,17 +214,22 @@ impl Observer {
     }
 
     fn update(&mut self, usage: Usage) {
-        if usage.input_tokens.is_some() {
-            self.input = usage.input_tokens;
+        let valid = |value: Option<serde_json::Number>| {
+            value
+                .and_then(|number| number.as_u64())
+                .filter(|count| *count <= 1_000_000_000)
+        };
+        if let Some(value) = valid(usage.input_tokens) {
+            self.input = Some(value);
         }
-        if usage.cache_creation_input_tokens.is_some() {
-            self.cache_creation = usage.cache_creation_input_tokens;
+        if let Some(value) = valid(usage.cache_creation_input_tokens) {
+            self.cache_creation = Some(value);
         }
-        if usage.cache_read_input_tokens.is_some() {
-            self.cache_read = usage.cache_read_input_tokens;
+        if let Some(value) = valid(usage.cache_read_input_tokens) {
+            self.cache_read = Some(value);
         }
-        if usage.output_tokens.is_some() {
-            self.output = usage.output_tokens;
+        if let Some(value) = valid(usage.output_tokens) {
+            self.output = Some(value);
         }
     }
 
@@ -215,12 +246,14 @@ impl Observer {
     }
 
     fn finish(&mut self) {
-        if self.stopped || self.is_sse || !self.buffer.windows(7).any(|bytes| bytes == b"\"usage\"")
-        {
+        if self.stopped || self.is_sse || !may_contain_usage(&self.buffer) {
             return;
         }
-        if let Ok(document) = serde_json::from_slice::<Document<'_>>(&self.buffer)
-            && let Some(usage) = document.usage
+        if let Ok(document) = serde_json::from_slice::<Document<'_>>(
+            self.buffer
+                .strip_prefix(b"\xef\xbb\xbf")
+                .unwrap_or(&self.buffer),
+        ) && let Some(usage) = document.usage
         {
             self.update(usage);
             self.monitor
