@@ -29,6 +29,17 @@ impl CodexHttpClient {
         ctx: &RequestContext,
         continuation: Option<&super::continuation::ContinuationReservation>,
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
+        self.stream_codex_websocket_events_tracked(body, ctx, continuation, Arc::default())
+            .await
+    }
+
+    pub(super) async fn stream_codex_websocket_events_tracked(
+        self: &Arc<Self>,
+        body: &ResponsesRequest,
+        ctx: &RequestContext,
+        continuation: Option<&super::continuation::ContinuationReservation>,
+        websocket_sent: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
         let auth = self.auth_for(&body.reasoning_account).await?;
 
         let turn_id = continuation.and_then(super::continuation::ContinuationReservation::turn_id);
@@ -53,6 +64,7 @@ impl CodexHttpClient {
                     auth,
                     tx,
                     socket_id_publisher,
+                    websocket_sent,
                 )
                 .await;
         });
@@ -69,6 +81,7 @@ impl CodexHttpClient {
         mut auth: StoredAuth,
         tx: tokio::sync::mpsc::Sender<Result<serde_json::Value, CodexError>>,
         socket_id_publisher: super::websocket::CodexWebSocketSocketIdPublisher,
+        websocket_sent: Arc<std::sync::atomic::AtomicBool>,
     ) {
         let mut auth_refresh_attempted = false;
         let mut continuation_retry_available = continuation
@@ -79,6 +92,7 @@ impl CodexHttpClient {
         let mut hosted_tool_executed = false;
 
         'attempt: loop {
+            let sent_before_attempt = websocket_sent.load(std::sync::atomic::Ordering::Acquire);
             socket_id_publisher.publish(None);
             let ws_headers = match build_codex_headers(&auth, &ctx, body.client_metadata.is_some())
             {
@@ -110,6 +124,7 @@ impl CodexHttpClient {
                 super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
                 super::websocket::WEBSOCKET_IDLE_TIMEOUT_MS,
                 continuation.as_ref(),
+                websocket_sent.clone(),
             );
             let mut stream = tokio::select! {
                 biased;
@@ -239,6 +254,12 @@ impl CodexHttpClient {
                             auth
                         }
                         Err(refresh_err) => {
+                            if !sent_before_attempt
+                                && refresh_err.detail.as_deref()
+                                    == Some(CODEX_ACCOUNT_CHANGED_DETAIL)
+                            {
+                                websocket_sent.store(false, std::sync::atomic::Ordering::Release);
+                            }
                             if tx.send(Err(refresh_err)).await.is_err() {
                                 if let Some(reservation) = continuation.as_ref() {
                                     super::websocket::invalidate_codex_websocket_pool_socket(

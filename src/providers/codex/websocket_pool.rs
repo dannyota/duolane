@@ -802,6 +802,7 @@ mod tests {
             1_000,
             1_000,
             Some(&continuation),
+            Arc::default(),
         )
         .await
         .unwrap();
@@ -892,6 +893,7 @@ mod tests {
             serde_json::to_string(&body).unwrap(),
             &headers,
             Some(&continuation),
+            Arc::default(),
         );
 
         request_seen_rx.await.unwrap();

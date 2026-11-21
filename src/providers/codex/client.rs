@@ -77,6 +77,7 @@ pub struct CodexHttpClient {
     pub(super) header_timeout_ms: u64,
     pub(super) body_idle_timeout_ms: u64,
     pub(super) request_compression: config::CodexRequestCompression,
+    pub(super) auto_ws_max_bytes: usize,
 }
 
 impl Default for CodexHttpClient {
@@ -100,6 +101,7 @@ impl CodexHttpClient {
             header_timeout_ms: timeout_ms,
             body_idle_timeout_ms: HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS,
             request_compression: config::codex_request_compression(),
+            auto_ws_max_bytes: config::codex_auto_ws_max_bytes(),
         }
     }
 
@@ -123,6 +125,7 @@ impl CodexHttpClient {
             header_timeout_ms: config::codex_header_timeout_ms(),
             body_idle_timeout_ms: HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS,
             request_compression: config::codex_request_compression(),
+            auto_ws_max_bytes: config::codex_auto_ws_max_bytes(),
         }
     }
 
@@ -144,6 +147,7 @@ impl CodexHttpClient {
             header_timeout_ms,
             body_idle_timeout_ms,
             request_compression: config::CodexRequestCompression::Off,
+            auto_ws_max_bytes: 4 * 1024 * 1024,
         }
     }
 
@@ -207,16 +211,11 @@ impl CodexHttpClient {
         body: &ResponsesRequest,
         ctx: &RequestContext,
         continuation: Option<&super::continuation::ContinuationReservation>,
+        transport: crate::config::CodexTransport,
         http_body: &CodexHttpBodyCache,
     ) -> Result<OwnerAwareCodexResponse, CodexError> {
-        self.post_codex_with_transport(
-            body,
-            ctx,
-            continuation,
-            crate::config::codex_transport(),
-            http_body,
-        )
-        .await
+        self.post_codex_with_transport(body, ctx, continuation, transport, http_body)
+            .await
     }
 }
 

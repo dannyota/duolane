@@ -185,7 +185,10 @@ them.
 
 Set `DUOLANE_CODEX_REQUEST_COMPRESSION=gzip` or set `codex.requestCompression`
 to `"gzip"` in the config file to compress Codex Responses and search requests
-sent over HTTP. The default is `off`; WebSocket requests are unchanged.
+sent over HTTP. The default is `off`. With gzip enabled, Auto sends full-context
+requests over 4 MiB via HTTP before attempting WebSocket. Set
+`DUOLANE_CODEX_AUTO_WS_MAX_BYTES` or `codex.autoWebSocketMaxBytes` to change the
+byte limit, or set it to `0` to disable this routing.
 
 ### Reaching the proxy from another machine
 

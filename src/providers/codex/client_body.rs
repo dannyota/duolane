@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::sync::atomic::AtomicBool;
 
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
@@ -15,7 +16,35 @@ use super::client_capture::write_codex_http_request_capture;
 
 static GZIP_SLOTS: Semaphore = Semaphore::const_new(2);
 
-pub(super) type CodexHttpBodyCache = OnceCell<CodexHttpBody>;
+#[derive(Default)]
+pub(super) struct CodexHttpBodyCache {
+    body: OnceCell<CodexHttpBody>,
+    pub(super) websocket_sent: std::sync::Arc<AtomicBool>,
+    pub(super) size_http_selected: AtomicBool,
+    measured_over_limit: OnceCell<bool>,
+    #[cfg(test)]
+    pub(super) size_measurements: std::sync::atomic::AtomicUsize,
+}
+
+impl CodexHttpBodyCache {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(super) fn with_websocket_sent(websocket_sent: std::sync::Arc<AtomicBool>) -> Self {
+        Self {
+            websocket_sent,
+            ..Self::default()
+        }
+    }
+}
+
+impl std::ops::Deref for CodexHttpBodyCache {
+    type Target = OnceCell<CodexHttpBody>;
+    fn deref(&self) -> &Self::Target {
+        &self.body
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct CodexHttpBody {
@@ -25,6 +54,36 @@ pub(super) struct CodexHttpBody {
 }
 
 impl CodexHttpClient {
+    pub(super) async fn auto_large_full_context(
+        &self,
+        body: &super::translate::request::ResponsesRequest,
+        _ctx: &crate::provider::RequestContext,
+        continuation: Option<&super::continuation::ContinuationReservation>,
+        _cache: &CodexHttpBodyCache,
+    ) -> Result<bool, CodexError> {
+        if !self.auto_http_fallback_enabled
+            || self.request_compression != CodexRequestCompression::Gzip
+            || self.auto_ws_max_bytes == 0
+            || continuation.is_some_and(|c| c.candidate().previous_response_id.is_some())
+        {
+            return Ok(false);
+        }
+        let over_limit = _cache
+            .measured_over_limit
+            .get_or_try_init(|| async {
+                #[cfg(test)]
+                _cache
+                    .size_measurements
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut counter = JsonCounter(0);
+                serde_json::to_writer(&mut counter, body)
+                    .map_err(|error| json_error("Failed to serialize request", error))?;
+                Ok::<bool, CodexError>(counter.0 > self.auto_ws_max_bytes)
+            })
+            .await?;
+        Ok(*over_limit)
+    }
+
     pub(super) async fn prepare_http_body(
         &self,
         value: &impl Serialize,
@@ -56,6 +115,18 @@ impl CodexHttpClient {
         .await
         .map_err(compression_error)?
         .map_err(compression_error::<io::Error>)
+    }
+}
+
+struct JsonCounter(usize);
+
+impl Write for JsonCounter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0 = self.0.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -136,6 +207,32 @@ fn compression_error<E: std::error::Error>(_: E) -> CodexError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn under_threshold_does_not_prepare_gzip_or_enforce_http_body_limit() {
+        let mut client = super::super::client_test_support::http_test_client(
+            "http://127.0.0.1:1".to_string(),
+            100,
+        );
+        client.request_compression = CodexRequestCompression::Gzip;
+        client.auto_ws_max_bytes = 128 * 1024 * 1024;
+        let request = super::super::client_test_support::buffered_request_with_texts(&[
+            &"x".repeat(65 * 1024 * 1024)
+        ]);
+        let cache = CodexHttpBodyCache::new();
+        assert!(
+            !client
+                .auto_large_full_context(
+                    &request,
+                    &super::super::client_test_support::http_test_context(),
+                    None,
+                    &cache
+                )
+                .await
+                .unwrap()
+        );
+        assert!(cache.get().is_none());
+    }
 
     #[test]
     fn gzip_serialization_rejects_writes_over_the_input_limit() {

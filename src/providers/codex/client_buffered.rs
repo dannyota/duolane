@@ -41,6 +41,9 @@ impl CodexHttpClient {
         let mut auth_refresh_attempted = false;
         let mut transport_failures = 0u32;
         loop {
+            let sent_before_attempt = http_body
+                .websocket_sent
+                .load(std::sync::atomic::Ordering::Acquire);
             let result = match transport {
                 CodexTransport::Http => {
                     let http_body = http_body.get_or_try_init(prepare_http_body).await?;
@@ -70,8 +73,33 @@ impl CodexHttpClient {
                         super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
                         super::websocket::WEBSOCKET_IDLE_TIMEOUT_MS,
                         active_continuation.as_ref(),
+                        &http_body.websocket_sent,
                     )
                     .await
+                }
+                CodexTransport::Auto
+                    if !http_body
+                        .websocket_sent
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        && (http_body
+                            .size_http_selected
+                            .load(std::sync::atomic::Ordering::Acquire)
+                            || self
+                                .auto_large_full_context(
+                                    body,
+                                    ctx,
+                                    active_continuation.as_ref(),
+                                    http_body,
+                                )
+                                .await?) =>
+                {
+                    http_body
+                        .size_http_selected
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    let http_body = http_body.get_or_try_init(prepare_http_body).await?;
+                    self.attempt_post_http(&auth, http_body, ctx, body.client_metadata.is_some())
+                        .await
+                        .map(|response| OwnerAwareCodexResponse::new(response, None))
                 }
                 CodexTransport::Auto => {
                     let ws_headers =
@@ -95,6 +123,7 @@ impl CodexHttpClient {
                         super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
                         super::websocket::WEBSOCKET_IDLE_TIMEOUT_MS,
                         active_continuation.as_ref(),
+                        &http_body.websocket_sent,
                     )
                     .await;
 
@@ -109,7 +138,11 @@ impl CodexHttpClient {
                             Err(err)
                         }
                         Err(err)
-                            if self.auto_http_fallback_enabled && should_fallback_to_http(&err) =>
+                            if self.auto_http_fallback_enabled
+                                && !http_body
+                                    .websocket_sent
+                                    .load(std::sync::atomic::Ordering::Acquire)
+                                && should_fallback_to_http(&err) =>
                         {
                             let http_body = http_body.get_or_try_init(prepare_http_body).await?;
                             self.attempt_post_http(
@@ -133,7 +166,26 @@ impl CodexHttpClient {
                 && should_refresh_after_unauthorized(&result, auth_refresh_attempted, transport)
             {
                 auth_refresh_attempted = true;
-                auth = self.refreshed_auth(&auth).await?;
+                auth = self.refreshed_auth(&auth).await.inspect_err(|error| {
+                    if !sent_before_attempt
+                        && result.as_ref().is_ok_and(|response| {
+                            response.transport == ActualTransport::WebSocket
+                                && response.status == 401
+                                && !crate::anthropic::sse::parse_sse_events(&response.body)
+                                    .into_iter()
+                                    .filter_map(|event| serde_json::from_str(&event.data).ok())
+                                    .any(|event| {
+                                        super::events::classify_stream_event(&event)
+                                            == super::events::CodexStreamEventKind::Semantic
+                                    })
+                        })
+                        && error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL)
+                    {
+                        http_body
+                            .websocket_sent
+                            .store(false, std::sync::atomic::Ordering::Release);
+                    }
+                })?;
                 invalidate_live_continuation_pool(active_continuation.as_ref());
                 active_continuation = full_context_continuation(active_continuation.as_ref());
                 continue;
@@ -570,7 +622,7 @@ mod tests {
             send_completed_websocket_response(&mut second_websocket, "resp_c").await;
         });
 
-        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
         let context = http_test_context();
         let first_request = buffered_request_with_texts(&["one"]);
         let first_candidate = super::super::continuation::continuation_candidate_for_owner(
@@ -644,12 +696,14 @@ mod tests {
             Some("resp_b")
         );
         assert_eq!(third_candidate.origin_socket_id(), Some(second_socket_id));
+        client.request_compression = crate::config::CodexRequestCompression::Gzip;
+        client.auto_ws_max_bytes = 1;
         let third_response = client
             .post_codex_with_transport(
                 &third_request,
                 &context,
                 Some(&third_candidate),
-                crate::config::CodexTransport::WebSocket,
+                crate::config::CodexTransport::Auto,
                 &Default::default(),
             )
             .await
@@ -1010,6 +1064,455 @@ mod tests {
         .unwrap();
         assert!(metadata["headers"].get("content-encoding").is_none());
         assert!(metadata["size"].get("compressedBytes").is_none());
+    }
+
+    #[tokio::test]
+    async fn auto_large_full_context_uses_gzip_http_without_websocket() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let request = buffered_request_with_texts(&[&"x".repeat(4 * 1024 * 1024)]);
+        let expected = serde_json::to_vec(&request).unwrap();
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let wire = read_http_request(&mut stream).await;
+                assert_wire_json(&wire, &expected, true);
+                if attempt == 0 {
+                    stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nretry-after: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+                } else {
+                    stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 12\r\nconnection: close\r\n\r\ndata: keep\n\n").await.unwrap();
+                }
+            }
+        });
+        let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        client.request_compression = crate::config::CodexRequestCompression::Gzip;
+        let cache = CodexHttpBodyCache::new();
+        let response = client
+            .post_codex_with_transport(
+                &request,
+                &http_test_context(),
+                None,
+                crate::config::CodexTransport::Auto,
+                &cache,
+            )
+            .await;
+        server.await.unwrap();
+        assert_eq!(response.unwrap().transport, ActualTransport::Http);
+        assert!(
+            cache
+                .size_http_selected
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert_eq!(
+            cache
+                .size_measurements
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_under_limit_measures_once_across_handshake_and_http_retries() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let request = buffered_test_request();
+        let expected = serde_json::to_vec(&request).unwrap();
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut ws, _) = listener.accept().await.unwrap();
+                let handshake = read_http_request(&mut ws).await;
+                assert!(handshake.starts_with(b"GET "));
+                ws.write_all(
+                    b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+                let (mut http, _) = listener.accept().await.unwrap();
+                assert_wire_json(&read_http_request(&mut http).await, &expected, true);
+                let response = if attempt == 0 {
+                    b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nretry-after: 0\r\nconnection: close\r\n\r\n".as_slice()
+                } else {
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 12\r\nconnection: close\r\n\r\ndata: keep\n\n".as_slice()
+                };
+                http.write_all(response).await.unwrap();
+            }
+        });
+        let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        client.request_compression = crate::config::CodexRequestCompression::Gzip;
+        client.auto_ws_max_bytes = 100_000;
+        let cache = CodexHttpBodyCache::new();
+        let response = client
+            .post_codex_with_transport(
+                &request,
+                &http_test_context(),
+                None,
+                crate::config::CodexTransport::Auto,
+                &cache,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.transport, ActualTransport::Http);
+        assert_eq!(
+            cache
+                .size_measurements
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_gzip_off_or_zero_limit_keeps_full_context_on_websocket() {
+        for (compression, limit, fallback) in [
+            (crate::config::CodexRequestCompression::Off, 1, true),
+            (crate::config::CodexRequestCompression::Gzip, 0, true),
+            (crate::config::CodexRequestCompression::Gzip, 1, false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _ = next_websocket_json(&mut websocket).await;
+                send_completed_websocket_response(&mut websocket, "resp_ws").await;
+            });
+            let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
+            client.request_compression = compression;
+            client.auto_ws_max_bytes = limit;
+            client.auto_http_fallback_enabled = fallback;
+            let response = client
+                .post_codex_with_transport(
+                    &buffered_request_with_texts(&["large enough"]),
+                    &http_test_context(),
+                    None,
+                    crate::config::CodexTransport::Auto,
+                    &Default::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.transport, ActualTransport::WebSocket);
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_missing_continuation_socket_uses_gzip_http() {
+        let _registry_guard =
+            super::super::continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        let owner = ConversationIdentity::Main("missing-large-socket".to_string());
+        let first = buffered_request_with_texts(&["one"]);
+        let request = buffered_request_with_texts(&["one", "two"]);
+        let expected = serde_json::to_vec(&request).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            send_completed_websocket_response(&mut ws, "resp_old").await;
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert_wire_json(&read_http_request(&mut stream).await, &expected, true);
+            let body = b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_http\",\"status\":\"completed\"}}\n\n";
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+        });
+        let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let ctx = http_test_context();
+        let first_candidate = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &first,
+            true,
+        );
+        let first_response = client
+            .post_codex_with_transport(
+                &first,
+                &ctx,
+                Some(&first_candidate),
+                crate::config::CodexTransport::WebSocket,
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+        super::super::update_continuation_from_upstream(
+            None,
+            &first_candidate,
+            None,
+            &first,
+            &first_response.body,
+            first_response.socket_id,
+            false,
+        );
+        let continuation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            true,
+        );
+        assert_eq!(
+            continuation.candidate().previous_response_id.as_deref(),
+            Some("resp_old")
+        );
+        assert_eq!(
+            continuation.candidate().input_delta.as_ref().map(Vec::len),
+            Some(1)
+        );
+        super::super::websocket::invalidate_codex_websocket_pool_owner(&owner);
+        client.request_compression = crate::config::CodexRequestCompression::Gzip;
+        client.auto_ws_max_bytes = 1;
+        let response = client
+            .post_codex_with_transport(
+                &request,
+                &ctx,
+                Some(&continuation),
+                crate::config::CodexTransport::Auto,
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.transport, ActualTransport::Http);
+        super::super::update_continuation_from_upstream(
+            None,
+            &continuation,
+            None,
+            &request,
+            &response.body,
+            response.socket_id,
+            false,
+        );
+        let next_request = buffered_request_with_texts(&["one", "two", "three"]);
+        let next = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &next_request,
+            true,
+        );
+        assert_ne!(
+            next.candidate().previous_response_id.as_deref(),
+            Some("resp_old")
+        );
+        server.await.unwrap();
+        super::super::continuation::abort_continuation_for_owner(&next);
+    }
+
+    #[tokio::test]
+    async fn account_change_after_websocket_401_clears_only_the_rejected_send() {
+        use futures_util::SinkExt;
+        for (prior_send, output) in [(false, false), (true, false), (false, true)] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let client = std::sync::Arc::new(authenticated_http_test_client(format!(
+                "http://{addr}/responses"
+            )));
+            let server_client = client.clone();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _ = next_websocket_json(&mut ws).await;
+                if output {
+                    ws.send(tokio_tungstenite::tungstenite::Message::text(
+                        serde_json::json!({"type":"response.output_text.delta", "delta":"output"})
+                            .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+                let mut auth = http_test_auth();
+                auth.access = "different-test-token".into();
+                auth.account_id = Some("different-account".into());
+                server_client.auth_manager().set_test_auth(auth);
+                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                    serde_json::json!({"type":"error", "status":401, "error":{"message":"unauthorized"}}).to_string()
+                )).await.unwrap();
+            });
+            let cache = CodexHttpBodyCache::new();
+            cache
+                .websocket_sent
+                .store(prior_send, std::sync::atomic::Ordering::Release);
+            let result = client
+                .post_codex_with_transport(
+                    &buffered_test_request(),
+                    &http_test_context(),
+                    None,
+                    crate::config::CodexTransport::WebSocket,
+                    &cache,
+                )
+                .await;
+            assert_eq!(
+                result.err().unwrap().detail.as_deref(),
+                Some(CODEX_ACCOUNT_CHANGED_DETAIL)
+            );
+            assert_eq!(
+                cache
+                    .websocket_sent
+                    .load(std::sync::atomic::Ordering::Acquire),
+                prior_send || output
+            );
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_never_uses_http_after_websocket_delta_was_sent() {
+        let _registry_guard =
+            super::super::continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        for missing_response in [false, true] {
+            let owner = ConversationIdentity::Main(format!("sent-delta-{missing_response}"));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _ = next_websocket_json(&mut ws).await;
+                send_completed_websocket_response(&mut ws, "resp_origin").await;
+                let delta = next_websocket_json(&mut ws).await;
+                assert_eq!(delta["previous_response_id"], "resp_origin");
+                if missing_response {
+                    send_nested_previous_response_missing(&mut ws).await;
+                } else {
+                    send_completed_websocket_response(&mut ws, "resp_empty").await;
+                }
+                let (mut socket, _) = listener.accept().await.unwrap();
+                if missing_response {
+                    let handshake = read_http_request(&mut socket).await;
+                    assert!(handshake.starts_with(b"GET "));
+                    socket.write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(1200), listener.accept())
+                            .await
+                            .is_err()
+                    );
+                } else {
+                    let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    let full = next_websocket_json(&mut ws).await;
+                    assert!(full.get("previous_response_id").is_none());
+                    send_completed_websocket_response(&mut ws, "resp_retry").await;
+                }
+            });
+            let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
+            let ctx = http_test_context();
+            let first = buffered_request_with_texts(&["one"]);
+            let first_candidate = super::super::continuation::continuation_candidate_for_owner(
+                Some(&owner),
+                &first,
+                true,
+            );
+            let first_response = client
+                .post_codex_with_transport(
+                    &first,
+                    &ctx,
+                    Some(&first_candidate),
+                    crate::config::CodexTransport::WebSocket,
+                    &Default::default(),
+                )
+                .await
+                .unwrap();
+            super::super::update_continuation_from_upstream(
+                None,
+                &first_candidate,
+                None,
+                &first,
+                &first_response.body,
+                first_response.socket_id,
+                false,
+            );
+            let request = buffered_request_with_texts(&["one", "two"]);
+            let candidate = super::super::continuation::continuation_candidate_for_owner(
+                Some(&owner),
+                &request,
+                true,
+            );
+            client.request_compression = crate::config::CodexRequestCompression::Gzip;
+            client.auto_ws_max_bytes = 1;
+            let cache = CodexHttpBodyCache::new();
+            let result = client
+                .post_codex_with_transport(
+                    &request,
+                    &ctx,
+                    Some(&candidate),
+                    crate::config::CodexTransport::Auto,
+                    &cache,
+                )
+                .await;
+            if missing_response {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap().transport, ActualTransport::WebSocket);
+                let full = candidate.full_context_retry();
+                let retry = client
+                    .post_codex_with_transport(
+                        &request,
+                        &ctx,
+                        Some(&full),
+                        crate::config::CodexTransport::Auto,
+                        &cache,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(retry.transport, ActualTransport::WebSocket);
+            }
+            server.await.unwrap();
+            super::super::websocket::invalidate_codex_websocket_pool_owner(&owner);
+            super::super::continuation::abort_continuation_for_owner(&candidate);
+        }
+    }
+
+    #[test]
+    fn buffered_turn_keeps_transport_when_config_changes() {
+        const CHILD: &str = "TEST_TRANSPORT_FREEZE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "providers::codex::client_buffered::tests::buffered_turn_keeps_transport_when_config_changes"])
+                .env(CHILD, "1")
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let config_dir = crate::paths::config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("config.json");
+        std::fs::write(&config_path, r#"{"codex":{"transport":"websocket"}}"#).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    let _ = next_websocket_json(&mut ws).await;
+                    send_completed_websocket_response(&mut ws, "resp_empty").await;
+                }
+            });
+            let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+            let request = buffered_test_request();
+            let ctx = http_test_context();
+            let cache = CodexHttpBodyCache::new();
+            let transport = crate::config::codex_transport();
+            assert_eq!(transport, crate::config::CodexTransport::WebSocket);
+            let first = client
+                .post_codex_for_owner(&request, &ctx, None, transport, &cache)
+                .await
+                .unwrap();
+            assert_eq!(first.transport, ActualTransport::WebSocket);
+            std::fs::write(&config_path, r#"{"codex":{"transport":"http"}}"#).unwrap();
+            assert_eq!(
+                crate::config::codex_transport(),
+                crate::config::CodexTransport::Http
+            );
+            let second = client
+                .post_codex_for_owner(&request, &ctx, None, transport, &cache)
+                .await
+                .unwrap();
+            assert_eq!(second.transport, ActualTransport::WebSocket);
+            server.await.unwrap();
+        });
     }
 
     #[tokio::test]

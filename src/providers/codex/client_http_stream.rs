@@ -129,12 +129,42 @@ impl CodexHttpClient {
         ctx: &RequestContext,
         http_body: &CodexHttpBodyCache,
         continuation: Option<&super::continuation::ContinuationReservation>,
+        allow_size_routing: bool,
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
+        if http_body
+            .size_http_selected
+            .load(std::sync::atomic::Ordering::Acquire)
+            || (allow_size_routing
+                && !http_body
+                    .websocket_sent
+                    .load(std::sync::atomic::Ordering::Acquire)
+                && self
+                    .auto_large_full_context(body, ctx, continuation, http_body)
+                    .await?)
+        {
+            http_body
+                .size_http_selected
+                .store(true, std::sync::atomic::Ordering::Release);
+            return self
+                .stream_codex_http_events_for_owner(body, ctx, http_body)
+                .await;
+        }
         let mut websocket = self
-            .stream_codex_websocket_events_for_owner(body, ctx, continuation)
+            .stream_codex_websocket_events_tracked(
+                body,
+                ctx,
+                continuation,
+                http_body.websocket_sent.clone(),
+            )
             .await?;
         match websocket.recv().await {
-            Some(Err(err)) if should_fallback_to_http(&err) => {
+            Some(Err(err))
+                if self.auto_http_fallback_enabled
+                    && !http_body
+                        .websocket_sent
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    && should_fallback_to_http(&err) =>
+            {
                 self.stream_codex_http_events_for_owner(body, ctx, http_body)
                     .await
             }
@@ -638,6 +668,94 @@ mod tests {
         assert_eq!(limit.message, "weekly \"limit\" reached");
         assert_eq!(limit.resets_at, Some(1789466238));
         assert_eq!(limit.window, Some(CodexLimitWindow::SevenDay));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_large_full_context_stream_uses_gzip_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let request = buffered_test_request();
+        let expected = serde_json::to_vec(&request).unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                assert_wire_json(&read_http_request(&mut stream).await, &expected, true);
+                let body = b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+            }
+        });
+        let mut client = http_test_client(format!("http://{addr}/responses"), 1000);
+        client.request_compression = crate::config::CodexRequestCompression::Gzip;
+        client.auto_ws_max_bytes = 1;
+        client.auth_manager().set_test_auth(http_test_auth());
+        let client = Arc::new(client);
+        let cache = CodexHttpBodyCache::new();
+        for allow_size_routing in [true, false] {
+            let mut events = client
+                .stream_codex_auto_events_for_owner(
+                    &request,
+                    &http_test_context(),
+                    &cache,
+                    None,
+                    allow_size_routing,
+                )
+                .await
+                .unwrap();
+            assert!(events.is_http());
+            while let Some(event) = events.recv().await {
+                event.unwrap();
+            }
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_stream_does_not_fallback_after_a_websocket_send() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            send_completed_websocket_response(&mut ws, "resp_empty").await;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let handshake = read_http_request(&mut socket).await;
+            assert!(handshake.starts_with(b"GET "));
+            socket
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(1200), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let request = buffered_test_request();
+        let cache = CodexHttpBodyCache::new();
+        let mut first = client
+            .stream_codex_auto_events_for_owner(&request, &http_test_context(), &cache, None, true)
+            .await
+            .unwrap();
+        while let Some(event) = first.recv().await {
+            event.unwrap();
+        }
+        let mut retry = client
+            .stream_codex_auto_events_for_owner(&request, &http_test_context(), &cache, None, false)
+            .await
+            .unwrap();
+        assert!(retry.recv().await.unwrap().is_err());
         server.await.unwrap();
     }
 

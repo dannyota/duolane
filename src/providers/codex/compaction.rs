@@ -71,6 +71,23 @@ pub async fn request_compaction(
     request: &ResponsesRequest,
     ctx: &RequestContext,
 ) -> Result<Vec<ResponsesInputItem>, CompactionError> {
+    request_compaction_for_turn(
+        client,
+        request,
+        ctx,
+        crate::config::codex_transport(),
+        std::sync::Arc::default(),
+    )
+    .await
+}
+
+pub(super) async fn request_compaction_for_turn(
+    client: &CodexHttpClient,
+    request: &ResponsesRequest,
+    ctx: &RequestContext,
+    transport: crate::config::CodexTransport,
+    websocket_sent: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<Vec<ResponsesInputItem>, CompactionError> {
     let (envelope, conversation) = split_input_envelope(&request.input);
     let conversation = without_compaction_instruction(conversation);
     let mut compaction_request = request.clone();
@@ -85,7 +102,13 @@ pub async fn request_compaction(
     compaction_request.include = Some(vec!["reasoning.encrypted_content".to_string()]);
 
     let response = client
-        .post_codex_for_owner(&compaction_request, ctx, None, &Default::default())
+        .post_codex_for_owner(
+            &compaction_request,
+            ctx,
+            None,
+            transport,
+            &super::client_body::CodexHttpBodyCache::with_websocket_sent(websocket_sent),
+        )
         .await
         .map_err(CompactionError::Upstream)?;
     let compaction = parse_compaction_response(&response.body)?;

@@ -87,6 +87,33 @@ pub fn codex_request_compression() -> CodexRequestCompression {
         .unwrap_or(CodexRequestCompression::Off)
 }
 
+const AUTO_WS_MAX_BYTES_ENV: &str = "DUOLANE_CODEX_AUTO_WS_MAX_BYTES";
+pub const CODEX_DEFAULT_AUTO_WS_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+pub(super) fn parse_auto_ws_file_value(value: &serde_json::Value) -> Option<usize> {
+    value.as_u64().and_then(|value| usize::try_from(value).ok())
+}
+
+pub fn codex_auto_ws_max_bytes() -> usize {
+    std::env::var(AUTO_WS_MAX_BYTES_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse().ok())
+        .or_else(|| {
+            let codex = read_file_config(&paths::config_dir())?.codex?;
+            codex
+                .auto_websocket_max_bytes
+                .as_ref()
+                .and_then(parse_auto_ws_file_value)
+        })
+        .unwrap_or(CODEX_DEFAULT_AUTO_WS_MAX_BYTES)
+}
+
+pub(super) fn auto_ws_max_bytes_env_source(env: &HashMap<String, String>) -> Option<String> {
+    env.get(AUTO_WS_MAX_BYTES_ENV)
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .map(|_| "codex.autoWebSocketMaxBytes (env)".to_string())
+}
+
 pub const CODEX_DEFAULT_HEADER_TIMEOUT_MS: u64 = 300_000;
 pub const CODEX_MIN_HEADER_TIMEOUT_MS: u64 = 1_000;
 
