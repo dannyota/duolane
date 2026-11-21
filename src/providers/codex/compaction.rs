@@ -280,8 +280,12 @@ fn split_input_envelope(
 
 fn without_compaction_instruction(input: &[ResponsesInputItem]) -> Vec<ResponsesInputItem> {
     let mut input = input.to_vec();
-    let remove_empty_message = if let Some(ResponsesInputItem::Message { role, content }) =
-        input.last_mut()
+    let Some(index) = input.iter().rposition(
+        |item| !matches!(item, ResponsesInputItem::Message { role, .. } if role == "developer"),
+    ) else {
+        return input;
+    };
+    if let ResponsesInputItem::Message { role, content } = &mut input[index]
         && role == "user"
     {
         content.retain(|part| {
@@ -291,12 +295,9 @@ fn without_compaction_instruction(input: &[ResponsesInputItem]) -> Vec<Responses
                     if is_compact_message_text(text)
             )
         });
-        content.is_empty()
-    } else {
-        false
-    };
-    if remove_empty_message {
-        input.pop();
+        if content.is_empty() {
+            input.remove(index);
+        }
     }
     input
 }
