@@ -1613,7 +1613,8 @@ async fn smoke_codex_http_server_compaction_replays_native_history() {
             {"role":"user","content":[
                 {"type":"tool_result","tool_use_id":"tool-1","content":"result"},
                 {"type":"text","text":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\nYour task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests."}
-            ]}
+            ]},
+            {"role":"system","content":"trailing hook instruction"}
         ]
     }))
     .await;
@@ -1651,6 +1652,9 @@ async fn smoke_codex_http_server_compaction_replays_native_history() {
             .to_string()
             .contains("Your task is to create a detailed summary")
     );
+    assert!(requests[0]["input"].as_array().unwrap().iter().any(|item| {
+        item["role"] == "developer" && item.to_string().contains("trailing hook instruction")
+    }));
     assert!(
         requests[1]
             .to_string()
@@ -1666,6 +1670,14 @@ async fn smoke_codex_http_server_compaction_replays_native_history() {
         .unwrap();
     assert_eq!(compaction["encrypted_content"], "opaque-history");
     assert!(replay.iter().any(|item| item["role"] == "user"));
+    assert!(replay.iter().any(|item| {
+        item["role"] == "developer" && item.to_string().contains("trailing hook instruction")
+    }));
+    assert!(
+        !requests[2]
+            .to_string()
+            .contains("Your task is to create a detailed summary")
+    );
     clear_all_compactions_for_tests();
 }
 

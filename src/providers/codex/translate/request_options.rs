@@ -83,9 +83,14 @@ fn is_compact_message_content(content: &Value) -> bool {
 
 pub(crate) fn is_compact_messages_request(request: &MessagesRequest) -> bool {
     is_compact_request(flatten_system_text(request.extra.get("system")).as_deref())
-        || request.messages.last().is_some_and(|message| {
-            message.role == "user" && is_compact_message_content(&message.content)
-        })
+        || request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role != "system")
+            .is_some_and(|message| {
+                message.role == "user" && is_compact_message_content(&message.content)
+            })
 }
 
 pub(super) fn compact_effort_cap() -> Option<Effort> {

@@ -72,6 +72,10 @@ fn compact_request() -> MessagesRequest {
 }
 
 fn translate_compact() -> Value {
+    translate(&compact_request())
+}
+
+fn translate(request: &MessagesRequest) -> Value {
     let opts = TranslateOptions {
         session_id: None,
         service_tier: None,
@@ -79,8 +83,56 @@ fn translate_compact() -> Value {
         use_responses_lite: false,
         reasoning_account: Default::default(),
     };
-    let out = translate_request(&compact_request(), opts).unwrap();
+    let out = translate_request(request, opts).unwrap();
     serde_json::to_value(out).unwrap()
+}
+
+#[test]
+fn compact_message_before_trailing_system_messages_is_capped() {
+    let _guard = env_lock();
+    let config = tempfile::TempDir::new().unwrap();
+    let mut env = isolated_environment(config.path());
+    env.push(EnvGuard::set("DUOLANE_CODEX_EFFORT", "high"));
+
+    for count in 1..=2 {
+        let mut messages = vec![json!({
+            "role": "user",
+            "content": concat!(
+                "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n",
+                "Your task is to create a detailed summary of the conversation so far."
+            )
+        })];
+        messages.extend((0..count).map(|_| json!({"role": "system", "content": "hook"})));
+        let request: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5", "messages": messages, "system": "You are Claude Code."
+        }))
+        .unwrap();
+
+        assert_eq!(translate(&request)["reasoning"]["effort"], "low");
+    }
+}
+
+#[test]
+fn compact_message_before_assistant_and_system_is_not_capped() {
+    let _guard = env_lock();
+    let config = tempfile::TempDir::new().unwrap();
+    let mut env = isolated_environment(config.path());
+    env.push(EnvGuard::set("DUOLANE_CODEX_EFFORT", "high"));
+    let request: MessagesRequest = serde_json::from_value(json!({
+        "model": "gpt-5.5",
+        "messages": [
+            {"role": "user", "content": concat!(
+                "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n",
+                "Your task is to create a detailed summary of the conversation so far."
+            )},
+            {"role": "assistant", "content": "continuing"},
+            {"role": "system", "content": "hook"}
+        ],
+        "system": "You are Claude Code."
+    }))
+    .unwrap();
+
+    assert_eq!(translate(&request)["reasoning"]["effort"], "high");
 }
 
 #[test]

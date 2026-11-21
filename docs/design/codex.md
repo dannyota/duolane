@@ -90,10 +90,11 @@ only the new items.
 ## Compaction requests
 
 Claude Code's conversation summary request is recognized by fixed markers in its
-system prompt or final user message. Summarizing needs little reasoning, so the
-request's effort is capped. `DUOLANE_COMPACT_EFFORT` sets the cap: `low` by
-default, `off` to disable it, or any effort level. A request with no effort
-takes the cap, and a request already below the cap keeps its effort.
+system prompt or final user message, ignoring trailing system messages.
+Summarizing needs little reasoning, so the request's effort is capped.
+`DUOLANE_COMPACT_EFFORT` sets the cap: `low` by default, `off` to disable it, or
+any effort level. A request with no effort takes the cap, and a request already
+below the cap keeps its effort.
 
 ## Transport and retries
 
