@@ -1,5 +1,6 @@
 use super::live_stream::*;
 use super::live_stream_read_args::*;
+use super::read_rewrite::sanitize_read_args;
 use super::reducer::STOP_TOOL_USE;
 use crate::traffic::TrafficCapture;
 
@@ -78,9 +79,8 @@ impl LiveStreamTranslator {
             .unwrap_or(0);
 
         if !self.blocks_by_output_index.contains_key(&output_index) {
-            let index = self.anthropic_index;
-            self.anthropic_index += 1;
             let deferred = !self.web_searches.is_empty();
+            let index = self.reserve_content_index(deferred);
             self.blocks_by_output_index.insert(
                 output_index,
                 LiveBlock::Text {
@@ -89,7 +89,7 @@ impl LiveStreamTranslator {
                     deferred,
                 },
             );
-            if !deferred {
+            if !deferred && let Some(index) = index {
                 self.ensure_message_start(traffic, out);
                 self.emit(
                     traffic,
@@ -116,7 +116,9 @@ impl LiveStreamTranslator {
         if *deferred {
             return;
         }
-        let index = *index;
+        let Some(index) = *index else {
+            return;
+        };
         self.emit(
             traffic,
             out,
@@ -169,9 +171,8 @@ impl LiveStreamTranslator {
                     "Buffered {name} tool arguments exceeded safe limits"
                 ));
             }
-            if let Some(repaired) =
-                repair_whitespace_stalled_read_args(name, args_accum, Some(call_id.as_str()))
-            {
+            if let Some(repaired) = repair_whitespace_stalled_read_args(name, args_accum) {
+                let repaired = sanitize_read_args(name, &repaired, Some(call_id.as_str()));
                 *args_accum = repaired.clone();
                 *emitted_args = true;
                 repaired_read = Some((*index, repaired));

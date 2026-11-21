@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::anthropic::sse::encode_sse_event;
 use crate::providers::codex::count_tokens::count_translated_tokens;
-use crate::providers::codex::events::classify_event_failure;
+use crate::providers::codex::events::{classify_event_failure, is_function_call_item};
 use crate::traffic::TrafficCapture;
 
 use super::reasoning_signature::ReasoningSigner;
@@ -10,11 +10,11 @@ use super::reducer::{CodexRateLimits, CodexUsage, parse_codex_rate_limits};
 use super::request::ResponsesRequest;
 
 pub(super) const BUFFERED_READ_REPAIR_TRAILING_WHITESPACE_BYTES: usize = 1_024;
-pub(super) const BUFFERED_TOOL_MAX_ARGS_BYTES: usize = 5_000_000;
+pub(in crate::providers::codex) const BUFFERED_TOOL_MAX_ARGS_BYTES: usize = 5_000_000;
 
 pub(super) enum LiveBlock {
     Text {
-        index: usize,
+        index: Option<usize>,
         text: String,
         deferred: bool,
     },
@@ -30,8 +30,8 @@ pub(super) enum LiveBlock {
 }
 
 pub(super) struct LiveWebSearch {
-    pub(super) index: usize,
-    pub(super) result_index: usize,
+    pub(super) index: Option<usize>,
+    pub(super) result_index: Option<usize>,
     pub(super) id: String,
     pub(super) query: String,
 }
@@ -52,6 +52,7 @@ pub struct LiveStreamTranslator {
     message_id: String,
     model: String,
     message_started: bool,
+    http_tool_commits: bool,
     pub(super) blocks_by_output_index: HashMap<usize, LiveBlock>,
     pub(super) item_id_to_output_index: HashMap<String, usize>,
     pub(super) anthropic_index: usize,
@@ -61,7 +62,7 @@ pub struct LiveStreamTranslator {
     pub(super) web_search_requests: usize,
     pub(super) web_searches: Vec<LiveWebSearch>,
     pub(super) web_search_results: Vec<LiveWebSearchResult>,
-    pub(super) deferred_text: Vec<(usize, String)>,
+    pub(super) deferred_text: Vec<(Option<usize>, String)>,
     pub(super) semantic_output_started: bool,
     estimated_input_tokens: u64,
     pub(super) finished: bool,
@@ -82,6 +83,7 @@ impl LiveStreamTranslator {
             message_id: message_id.into(),
             model: model.into(),
             message_started: false,
+            http_tool_commits: false,
             blocks_by_output_index: HashMap::new(),
             item_id_to_output_index: HashMap::new(),
             anthropic_index: 0,
@@ -108,6 +110,21 @@ impl LiveStreamTranslator {
             reasoning_by_output_index: ReasoningSigner::new(request.reasoning_account.clone()),
             ..Self::with_estimated_input_tokens(message_id, model, count_translated_tokens(request))
         }
+    }
+
+    pub(in crate::providers::codex) fn with_http_tool_commits(mut self, enabled: bool) -> Self {
+        self.http_tool_commits = enabled;
+        self
+    }
+
+    pub(super) fn next_content_index(&mut self) -> usize {
+        let index = self.anthropic_index;
+        self.anthropic_index += 1;
+        index
+    }
+
+    pub(super) fn reserve_content_index(&mut self, deferred: bool) -> Option<usize> {
+        (!deferred || !self.http_tool_commits).then(|| self.next_content_index())
     }
 
     pub fn accept(
@@ -174,7 +191,11 @@ impl LiveStreamTranslator {
                 self.tool_arguments_done(payload);
             }
             "response.output_item.done" => {
-                self.output_item_done(payload, traffic, &mut out);
+                if self.http_tool_commits && is_function_call_item(payload) {
+                    self.commit_http_tool_call(payload, traffic, &mut out)?;
+                } else {
+                    self.output_item_done(payload, traffic, &mut out);
+                }
             }
             "response.completed" | "response.incomplete" | "response.done" => {
                 self.finish(payload, traffic, &mut out)?;

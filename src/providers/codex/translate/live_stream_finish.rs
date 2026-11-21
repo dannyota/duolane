@@ -90,8 +90,10 @@ impl LiveStreamTranslator {
                     self.deferred_text.push((index, text));
                     continue;
                 }
-                LiveBlock::Text { index, .. } => index,
-                LiveBlock::Tool { .. } => continue,
+                LiveBlock::Text {
+                    index: Some(index), ..
+                } => index,
+                _ => continue,
             };
             self.emit(
                 traffic,

@@ -127,6 +127,9 @@ Rejections use the Anthropic error shape and never echo request values:
 | Image response                      | 128 MiB                   |
 | Transcription response              | 1 MiB                     |
 | One upstream SSE or WebSocket frame | 8 MiB                     |
+| Pending Codex HTTP function calls   | 64 calls, 8 MiB total     |
+| Committed Codex HTTP call IDs       | 1,024 IDs, 1 MiB total    |
+| Codex HTTP arguments per function   | 5,000,000 bytes           |
 | Upstream connect timeout            | 15 seconds                |
 | Wait for Claude response headers    | 15 minutes                |
 | Wait for Codex response headers     | 5 minutes                 |

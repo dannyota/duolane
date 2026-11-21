@@ -3,7 +3,7 @@ pub mod live_stream;
 mod live_stream_deltas;
 mod live_stream_finish;
 mod live_stream_items;
-mod live_stream_read_args;
+pub(super) mod live_stream_read_args;
 pub mod model_allowlist;
 pub mod model_catalog;
 pub mod read_rewrite;

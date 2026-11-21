@@ -111,6 +111,10 @@ pub(crate) fn classify_stream_event(payload: &Value) -> CodexStreamEventKind {
     }
 }
 
+pub(super) fn is_function_call_item(payload: &Value) -> bool {
+    payload.pointer("/item/type").and_then(Value::as_str) == Some("function_call")
+}
+
 pub(super) fn event_confirms_hosted_tool_execution(payload: &Value) -> bool {
     match payload.get("type").and_then(Value::as_str) {
         Some(
