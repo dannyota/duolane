@@ -27,7 +27,7 @@ pub(super) fn apply_model_lane_for_request(
     full_lane: bool,
 ) -> bool {
     if has_hosted_web_search(body) {
-        resolved.model = full_lane_web_search_model(&resolved.model).to_string();
+        resolved.model = full_lane_web_search_model(resolved).to_string();
         return false;
     }
     resolved.uses_responses_lite(full_lane)
