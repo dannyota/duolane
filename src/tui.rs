@@ -811,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_tables_use_shared_model_and_provider_widths() {
+    fn wide_tables_use_model_caps_and_shared_provider_widths() {
         let sessions = session_columns(LayoutTier::Wide, true);
         let active = active_columns(LayoutTier::Wide);
         let recent = recent_columns(LayoutTier::Wide);
@@ -821,14 +821,8 @@ mod tests {
             fixed_width(&sessions, SessionColumn::Model),
             Some(MODEL_WIDE_WIDTH)
         );
-        assert_eq!(
-            fixed_width(&active, ActiveColumn::Model),
-            Some(MODEL_WIDE_WIDTH)
-        );
-        assert_eq!(
-            fixed_width(&recent, RecentColumn::Model),
-            Some(MODEL_WIDE_WIDTH)
-        );
+        assert_eq!(fixed_width(&active, ActiveColumn::Model), Some(5));
+        assert_eq!(fixed_width(&recent, RecentColumn::Model), Some(5));
         assert_eq!(
             fixed_width(&events, EventColumn::Model),
             Some(MODEL_WIDE_WIDTH)
@@ -895,8 +889,20 @@ mod tests {
                     .count(),
                 1
             );
-            assert!(active.iter().all(|column| !column.header.is_empty()));
-            assert!(recent.iter().all(|column| !column.header.is_empty()));
+            assert_eq!(
+                active
+                    .iter()
+                    .filter(|column| column.header.is_empty())
+                    .count(),
+                usize::from(matches!(tier, LayoutTier::Expanded | LayoutTier::Wide))
+            );
+            assert_eq!(
+                recent
+                    .iter()
+                    .filter(|column| column.header.is_empty())
+                    .count(),
+                usize::from(tier == LayoutTier::Expanded)
+            );
             assert!(events.iter().all(|column| !column.header.is_empty()));
         }
     }

@@ -1,8 +1,9 @@
 use super::cells::{
-    column_header, detail_cell, display_session_id, ellipsize, error_indicator, format_duration,
-    format_system_time, http_code_cell, model_cell, muted_cell, number_cell, panel,
-    project_constraints, provider_cell, rate_cell, render_empty_table_state, spinner, status_style,
-    table_column_width, target_cell, text_cell, token_value,
+    column_constraints, column_header, content_constraint, detail_cell, display_session_id,
+    ellipsize, error_indicator, format_duration, format_system_time, http_code_cell, model_cell,
+    muted_cell, number_cell, panel, project_constraints, project_constraints_from, provider_cell,
+    rate_cell, render_empty_table_state, spinner, status_style, table_column_width, target_cell,
+    text_cell, token_value,
 };
 use super::layout::{
     CODE_WIDTH, ColumnSpec, DURATION_WIDTH, EFFORT_WIDTH, ENDPOINT_WIDTH, ERROR_WIDTH, ID_WIDTH,
@@ -32,6 +33,7 @@ pub(super) enum ActiveColumn {
     Output,
     Rate,
     Elapsed,
+    Spacer,
 }
 
 pub(super) fn active_columns(tier: LayoutTier) -> Vec<ColumnSpec<ActiveColumn>> {
@@ -43,13 +45,14 @@ pub(super) fn active_columns(tier: LayoutTier) -> Vec<ColumnSpec<ActiveColumn>> 
             ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_WIDE_WIDTH),
             ColumnSpec::fixed(C::Session, "Session", Alignment::Left, ID_WIDTH),
             ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
-            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, MODEL_WIDE_WIDTH),
+            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, 5),
             ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
-            ColumnSpec::flex(C::Endpoint, "Endpoint", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Endpoint, "Endpoint", Alignment::Left, 8),
             ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
             ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
             ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
             ColumnSpec::fixed(C::Elapsed, "Elapsed", Alignment::Right, DURATION_WIDTH),
+            ColumnSpec::flex(C::Spacer, "", Alignment::Left, 1),
         ],
         LayoutTier::Expanded => vec![
             ColumnSpec::fixed(C::Started, "Started", Alignment::Left, TIME_WIDTH),
@@ -57,11 +60,12 @@ pub(super) fn active_columns(tier: LayoutTier) -> Vec<ColumnSpec<ActiveColumn>> 
             ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_MEDIUM_WIDTH),
             ColumnSpec::fixed(C::Session, "Session", Alignment::Left, ID_WIDTH),
             ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
-            ColumnSpec::flex(C::Model, "Model", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, 5),
             ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
-            ColumnSpec::fixed(C::Endpoint, "Endpoint", Alignment::Left, ENDPOINT_WIDTH),
+            ColumnSpec::fixed(C::Endpoint, "Endpoint", Alignment::Left, 8),
             ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
             ColumnSpec::fixed(C::Elapsed, "Elapsed", Alignment::Right, DURATION_WIDTH),
+            ColumnSpec::flex(C::Spacer, "", Alignment::Left, 1),
         ],
         LayoutTier::Medium => vec![
             ColumnSpec::fixed(C::Started, "Started", Alignment::Left, TIME_WIDTH),
@@ -104,12 +108,33 @@ pub(super) fn render_active(
 
     let tier = LayoutTier::for_outer_width(area.width);
     let columns = active_columns(tier);
-    let minimum_width = tier.minimum_outer_width();
-    let widths = project_constraints(
+    let mut widths = column_constraints(&columns);
+    if matches!(tier, LayoutTier::Expanded | LayoutTier::Wide) {
+        content_constraint(
+            &columns,
+            &mut widths,
+            ActiveColumn::Endpoint,
+            area,
+            ENDPOINT_WIDTH,
+            0,
+            active.iter().map(|request| Some(request.endpoint.label())),
+        );
+        content_constraint(
+            &columns,
+            &mut widths,
+            ActiveColumn::Model,
+            area,
+            MODEL_WIDE_WIDTH,
+            0,
+            active.iter().map(|request| request.model.as_deref()),
+        );
+    }
+    let widths = project_constraints_from(
         &columns,
+        widths,
         ActiveColumn::Project,
         area,
-        minimum_width,
+        0,
         active.iter().map(|request| request.project.as_deref()),
     );
     let rows = active.iter().map(|request| {
@@ -146,6 +171,7 @@ pub(super) fn render_active(
                     ActiveColumn::Output => number_cell(token_value(request.output_tokens)),
                     ActiveColumn::Rate => rate_cell(request.rate().label()),
                     ActiveColumn::Elapsed => number_cell(format_duration(request.elapsed())),
+                    ActiveColumn::Spacer => Cell::from(""),
                 }
             })
             .collect::<Vec<_>>();
@@ -174,6 +200,7 @@ pub(super) enum RecentColumn {
     Output,
     Details,
     Error,
+    Spacer,
 }
 
 pub(super) fn recent_columns(tier: LayoutTier) -> Vec<ColumnSpec<RecentColumn>> {
@@ -185,7 +212,7 @@ pub(super) fn recent_columns(tier: LayoutTier) -> Vec<ColumnSpec<RecentColumn>> 
             ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_WIDE_WIDTH),
             ColumnSpec::fixed(C::Session, "Session", Alignment::Left, ID_WIDTH),
             ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
-            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, MODEL_WIDE_WIDTH),
+            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, 5),
             ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
             ColumnSpec::fixed(C::Endpoint, "Endpoint", Alignment::Left, ENDPOINT_WIDTH),
             ColumnSpec::fixed(C::Latency, "Latency", Alignment::Right, DURATION_WIDTH),
@@ -200,13 +227,14 @@ pub(super) fn recent_columns(tier: LayoutTier) -> Vec<ColumnSpec<RecentColumn>> 
             ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_MEDIUM_WIDTH),
             ColumnSpec::fixed(C::Session, "Session", Alignment::Left, ID_WIDTH),
             ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
-            ColumnSpec::flex(C::Model, "Model", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, 5),
             ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
             ColumnSpec::fixed(C::Latency, "Latency", Alignment::Right, DURATION_WIDTH),
             ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
             ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
             ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
             ColumnSpec::fixed(C::Error, "!", Alignment::Right, ERROR_WIDTH),
+            ColumnSpec::flex(C::Spacer, "", Alignment::Left, 1),
         ],
         LayoutTier::Medium => vec![
             ColumnSpec::fixed(C::Finished, "Finished", Alignment::Left, TIME_WIDTH),
@@ -262,13 +290,33 @@ pub(super) fn render_recent(
     let tier = LayoutTier::for_outer_width(area.width);
     let columns = recent_columns(tier);
     let minimum_width = tier.minimum_outer_width();
-    let widths = project_constraints(
+    let mut widths = project_constraints(
         &columns,
         RecentColumn::Project,
         area,
         minimum_width,
         recent.iter().map(|request| request.project.as_deref()),
     );
+    if matches!(tier, LayoutTier::Expanded | LayoutTier::Wide) {
+        content_constraint(
+            &columns,
+            &mut widths,
+            RecentColumn::Endpoint,
+            area,
+            ENDPOINT_WIDTH,
+            0,
+            recent.iter().map(|request| Some(request.endpoint.label())),
+        );
+        content_constraint(
+            &columns,
+            &mut widths,
+            RecentColumn::Model,
+            area,
+            MODEL_WIDE_WIDTH,
+            0,
+            recent.iter().map(|request| request.model.as_deref()),
+        );
+    }
     let rows = recent.iter().enumerate().map(|(index, request)| {
         let cells = columns
             .iter()
@@ -297,6 +345,7 @@ pub(super) fn render_recent(
                     RecentColumn::Output => number_cell(token_value(request.output_tokens)),
                     RecentColumn::Details => detail_cell(request.error.as_deref().unwrap_or("")),
                     RecentColumn::Error => detail_cell(error_indicator(request)),
+                    RecentColumn::Spacer => Cell::from(""),
                 }
             })
             .collect::<Vec<_>>();
@@ -458,6 +507,108 @@ mod tests {
     use crate::tui::PURPLE;
     use crate::tui::cells::status_color;
     use crate::tui::tests::{buffer_text, draw};
+
+    #[test]
+    fn wide_tables_size_content_and_leave_trailing_space() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("request-1", None, None, EndpointKind::Messages);
+        monitor.provider_selected("request-1", "codex", "terra → gpt-6.1-terra", None);
+        let active: MonitorSnapshot = monitor.snapshot().into();
+        let text = buffer_text(&draw(180, 8, |frame| {
+            render_active(frame, frame.area(), &active.active, 0)
+        }));
+        let header = text.lines().find(|line| line.contains("Endpoint")).unwrap();
+        assert_eq!(
+            header.find("Effort").unwrap() - header.find("Model").unwrap(),
+            22
+        );
+        assert_eq!(
+            header.find("In").unwrap() - header.find("Endpoint").unwrap(),
+            14
+        );
+        assert!(header.find("Elapsed").unwrap() < 160);
+
+        monitor.request_failed("request-1", Some(502), "d".repeat(35));
+        let recent: MonitorSnapshot = monitor.snapshot().into();
+        let text = buffer_text(&draw(180, 8, |frame| {
+            render_recent(frame, frame.area(), &recent.recent, 0, false);
+        }));
+        let header = text.lines().find(|line| line.contains("Endpoint")).unwrap();
+        assert_eq!(
+            header.find("Effort").unwrap() - header.find("Model").unwrap(),
+            22
+        );
+        assert_eq!(
+            header.find("Latency").unwrap() - header.find("Endpoint").unwrap(),
+            10
+        );
+        assert!(text.contains(&"d".repeat(35)));
+    }
+
+    #[test]
+    fn wide_active_uses_spare_space_for_project() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("request-1", None, None, EndpointKind::Messages);
+        monitor.project_resolved("request-1", "project-name-20-char");
+        monitor.provider_selected("request-1", "codex", "short", None);
+        let state: MonitorSnapshot = monitor.snapshot().into();
+        let text = buffer_text(&draw(154, 8, |frame| {
+            render_active(frame, frame.area(), &state.active, 0)
+        }));
+        assert!(text.contains("project-name-20-char"));
+    }
+
+    #[test]
+    fn expanded_active_preserves_long_endpoint_before_model() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("request-1", None, None, EndpointKind::CountTokens);
+        monitor.provider_selected("request-1", "codex", "x".repeat(60), None);
+        let state: MonitorSnapshot = monitor.snapshot().into();
+        let text = buffer_text(&draw(120, 8, |frame| {
+            render_active(frame, frame.area(), &state.active, 0)
+        }));
+        assert!(text.contains("count_tokens"));
+    }
+
+    #[test]
+    fn recent_model_width_stays_stable_when_scrolling() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("request-1", None, None, EndpointKind::Messages);
+        monitor.provider_selected("request-1", "codex", "short", None);
+        monitor.request_failed("request-1", Some(502), "error");
+        let state: MonitorSnapshot = monitor.snapshot().into();
+        let mut rows = vec![state.recent[0].clone(); 8];
+        rows[7].model = Some("a-long-model-name-123456".into());
+        let header = |selected| {
+            let text = buffer_text(&draw(180, 6, |frame| {
+                render_recent(frame, frame.area(), &rows, selected, false);
+            }));
+            text.lines()
+                .find(|line| line.contains("Endpoint"))
+                .unwrap()
+                .to_owned()
+        };
+        let first = header(0);
+        let last = header(7);
+        assert_eq!(
+            first.find("Effort").unwrap() - first.find("Model").unwrap(),
+            25
+        );
+        assert_eq!(first.find("Effort"), last.find("Effort"));
+    }
+
+    #[test]
+    fn wide_model_is_capped_and_ellipsized() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("request-1", None, None, EndpointKind::Messages);
+        monitor.provider_selected("request-1", "codex", "x".repeat(60), None);
+        let state: MonitorSnapshot = monitor.snapshot().into();
+        let text = buffer_text(&draw(180, 8, |frame| {
+            render_active(frame, frame.area(), &state.active, 0)
+        }));
+        assert!(text.contains(&format!("{}…", "x".repeat(35))));
+        assert!(!text.contains(&"x".repeat(36)));
+    }
 
     #[test]
     fn active_table_renders_expected_headers_at_tier_boundaries() {

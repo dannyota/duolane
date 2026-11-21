@@ -105,7 +105,24 @@ pub(super) fn project_constraints<'a, K: PartialEq>(
     minimum_width: u16,
     projects: impl Iterator<Item = Option<&'a str>>,
 ) -> Vec<Constraint> {
-    let mut widths = column_constraints(columns);
+    project_constraints_from(
+        columns,
+        column_constraints(columns),
+        project_key,
+        area,
+        minimum_width,
+        projects,
+    )
+}
+
+pub(super) fn project_constraints_from<'a, K: PartialEq>(
+    columns: &[ColumnSpec<K>],
+    mut widths: Vec<Constraint>,
+    project_key: K,
+    area: Rect,
+    minimum_width: u16,
+    projects: impl Iterator<Item = Option<&'a str>>,
+) -> Vec<Constraint> {
     if !matches!(
         LayoutTier::for_outer_width(area.width),
         LayoutTier::Expanded | LayoutTier::Wide
@@ -130,11 +147,42 @@ pub(super) fn project_constraints<'a, K: PartialEq>(
         .unwrap_or(0)
         .max(columns[project].header.len())
         .clamp(usize::from(base), 40);
-    let minimum_flex = table_column_width(Rect::new(0, 0, minimum_width, 1), &widths, flex);
+    let minimum_flex = table_column_width(
+        Rect::new(0, 0, minimum_width, 1),
+        &column_constraints(columns),
+        flex,
+    );
     let available = table_column_width(area, &widths, flex).saturating_sub(minimum_flex);
     widths[project] =
         Constraint::Length(base + (desired - usize::from(base)).min(available) as u16);
     widths
+}
+
+pub(super) fn content_constraint<'a, K: PartialEq>(
+    columns: &[ColumnSpec<K>],
+    widths: &mut [Constraint],
+    key: K,
+    area: Rect,
+    cap: u16,
+    minimum_flex: usize,
+    values: impl Iterator<Item = Option<&'a str>>,
+) {
+    let Some(index) = columns.iter().position(|column| column.key == key) else {
+        return;
+    };
+    let minimum = display_width(columns[index].header);
+    let desired = values
+        .map(|value| display_width(value.unwrap_or("-")))
+        .max()
+        .unwrap_or(0)
+        .clamp(minimum, usize::from(cap));
+    let available = columns
+        .iter()
+        .position(|column| matches!(column.width, ColumnWidth::Flex(_)))
+        .map_or(0, |flex| table_column_width(area, widths, flex));
+    let current = table_column_width(area, widths, index);
+    widths[index] =
+        Constraint::Length(desired.min(current + available.saturating_sub(minimum_flex)) as u16);
 }
 
 fn display_width(value: &str) -> usize {

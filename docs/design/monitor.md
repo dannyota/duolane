@@ -31,3 +31,12 @@ rejection on the Codex route. Do not classify retries by matching upstream error
 text. Carry the marker as a default-false field on completed monitor snapshots
 so older snapshots still render, and keep the monitor protocol version, HTTP
 response, and request routing unchanged.
+
+## Column sizing
+
+In expanded and wide request tables, Model and Endpoint fit the table values,
+with caps of 36 and 12 cells. Expanded and wide Sessions use the same Model cap.
+Project can grow to 40 cells while preserving the flexible column's minimum
+space. Active requests leave spare space after the metrics; Recent requests give
+it to Details when present. Widths stay stable while scrolling. Long model and
+project values are ellipsized.
