@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.1
+
+### Added
+
+- `duolane agents setup` writes Claude Code subagents `terra`, `sol`, `astra`,
+  and `luna` that run on the newest Codex model of each family.
+  `duolane agents remove` deletes the ones it wrote.
+
+### Fixed
+
+- The monitor shows a session's model and effort from its main conversation, not
+  from Claude Code's background Haiku calls.
+
 ## 0.4.0
 
 ### Added
