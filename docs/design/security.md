@@ -110,15 +110,6 @@ Rejections use the Anthropic error shape and never echo request values:
   descriptor of the state directory after checking that the directory is owned
   by the user and not writable by group or others. An unsafe state directory is
   an error for Codex requests, never the same as a missing selection.
-- For the profile file, the state directory, and each named home, every
-  directory from the resolved path up to `/` must be owned by root or the user
-  and not writable by group or others unless it is sticky, as OpenSSH
-  `StrictModes` requires. duolane creates the state directory only when it
-  writes a selection, with mode `0700`. Files are opened with `O_NOFOLLOW`,
-  `O_NOCTTY`, and `O_NONBLOCK`. Access control lists are not checked.
-- Named profiles and profile selection exist only on Unix. Elsewhere duolane
-  ignores both and uses `default`, and `duolane codex auth use` reports that
-  profiles are not supported.
 
 ## Upstream connections
 

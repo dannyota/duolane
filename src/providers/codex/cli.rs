@@ -2,22 +2,6 @@ use crate::provider::CliHandlers;
 
 use super::auth::token_store::file_store;
 
-pub fn list_profiles() -> anyhow::Result<()> {
-    for (name, login, selected) in super::profiles::list()? {
-        println!(
-            "{} {} {}",
-            if selected { "*" } else { " " },
-            name,
-            if login { "login exists" } else { "no login" }
-        );
-    }
-    Ok(())
-}
-
-pub fn use_profile(name: &str) -> anyhow::Result<()> {
-    super::profiles::select(name)
-}
-
 pub(crate) struct CodexCli;
 
 impl CliHandlers for CodexCli {
