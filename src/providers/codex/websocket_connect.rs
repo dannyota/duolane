@@ -472,6 +472,25 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn first_connect_does_not_start_recovery_window() {
+        let gate = WebSocketConnectGate::new(Duration::ZERO);
+        let budget = super::super::recovery::RecoveryBudget::with_window(Duration::from_secs(1));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        connect_with_policy(
+            &gate,
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+            || async {},
+            |_| async { Ok::<(), ConnectAttemptError>(()) },
+            &budget,
+        )
+        .await
+        .unwrap();
+        assert!(budget.deadline().is_none());
+        assert!(budget.try_retry(Duration::ZERO, false));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn existing_recovery_deadline_stops_a_queued_first_attempt() {
         let gate = WebSocketConnectGate::new(Duration::from_secs(1));
         let budget = super::super::recovery::RecoveryBudget::default();
