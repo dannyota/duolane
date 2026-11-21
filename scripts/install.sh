@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # duolane installation script
-# Usage: curl -fsSL https://raw.githubusercontent.com/dannyota/duolane/master/scripts/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/dannyota/duolane/HEAD/scripts/install.sh | bash
 #
 # Environment variables:
 #   DUOLANE_VERSION      - Pin a specific version (e.g., v0.1.0)
