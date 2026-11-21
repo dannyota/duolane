@@ -50,7 +50,9 @@ mod keychain {
     use std::process::{Child, ChildStdout, Command, Stdio};
     use std::time::{Duration, Instant};
 
+    #[cfg(target_os = "macos")]
     const SECURITY_PROGRAM: &str = "/usr/bin/security";
+    #[cfg(target_os = "macos")]
     const SECURITY_DEADLINE: Duration = Duration::from_secs(30);
     const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -59,6 +61,7 @@ mod keychain {
         pub(in crate::providers::anthropic::accounts) deadline: Duration,
     }
 
+    #[cfg(target_os = "macos")]
     impl KeychainReader {
         pub(in crate::providers::anthropic::accounts) fn system() -> Self {
             Self {
