@@ -110,7 +110,14 @@ below the cap keeps its effort.
 - `DUOLANE_CODEX_REQUEST_COMPRESSION` overrides `codex.requestCompression`. Use
   `gzip` to compress Responses and search requests sent over HTTP, or `off`
   (default) to send raw JSON. Invalid values fall through to the next source.
-  Media endpoints, WebSocket selection, and traffic capture are unchanged.
+  Media endpoints and traffic capture are unchanged.
+- With gzip and HTTP fallback enabled, Auto routes full-context requests whose
+  serialized JSON exceeds `DUOLANE_CODEX_AUTO_WS_MAX_BYTES` or
+  `codex.autoWebSocketMaxBytes` to HTTP before a WebSocket send. The default is
+  4 MiB; `0` disables this rule. Live deltas stay on WebSocket. Buffered
+  requests also apply the rule when a missing or dead continuation socket forces
+  a pre-send full-context retry. Streaming continuation retries remain on
+  WebSocket, including when the socket is missing or dead.
 - Gzip reuses one encoded body across retries, with at most two compression jobs
   off the async workers. Serialization stops at 64 MiB, the largest existing
   request body limit, and an oversized request receives HTTP 413. `flate2`

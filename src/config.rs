@@ -2,7 +2,8 @@ mod codex_transport;
 
 pub use codex_transport::{
     CODEX_DEFAULT_HEADER_TIMEOUT_MS, CODEX_MIN_HEADER_TIMEOUT_MS, CodexRequestCompression,
-    CodexTransport, codex_header_timeout_ms, codex_request_compression, codex_transport,
+    CodexTransport, codex_auto_ws_max_bytes, codex_header_timeout_ms, codex_request_compression,
+    codex_transport,
 };
 
 use serde::Deserialize;
@@ -90,6 +91,8 @@ struct CodexConfig {
     pub transport: Option<String>,
     #[serde(rename = "requestCompression")]
     pub request_compression: Option<String>,
+    #[serde(rename = "autoWebSocketMaxBytes")]
+    pub auto_websocket_max_bytes: Option<serde_json::Value>,
     #[serde(rename = "headerTimeoutMs")]
     pub header_timeout_ms: Option<u64>,
 }
@@ -260,6 +263,7 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
         out.push("codex.responsesApi (env)".to_string());
     }
     out.extend(codex_transport::compression_env_source(&env));
+    out.extend(codex_transport::auto_ws_max_bytes_env_source(&env));
     if env.contains_key("DUOLANE_CODEX_FULL_LANE") {
         out.push("codex.fullLane (env)".to_string());
     }
@@ -327,6 +331,13 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
             out.extend(codex_transport::compression_file_source(
                 codex.request_compression.as_deref(),
             ));
+            if let Some(value) = codex
+                .auto_websocket_max_bytes
+                .as_ref()
+                .and_then(codex_transport::parse_auto_ws_file_value)
+            {
+                out.push(format!("codex.autoWebSocketMaxBytes: {value}"));
+            }
             if codex.full_lane == Some(true) {
                 out.push("codex.fullLane: true".to_string());
             }
@@ -653,6 +664,7 @@ mod tests {
             EnvGuard::unset("DUOLANE_BIND_ADDRESS"),
             EnvGuard::unset("DUOLANE_CODEX_TRANSPORT"),
             EnvGuard::unset("DUOLANE_CODEX_REQUEST_COMPRESSION"),
+            EnvGuard::unset("DUOLANE_CODEX_AUTO_WS_MAX_BYTES"),
             EnvGuard::unset("DUOLANE_LOG_VERBOSE"),
             EnvGuard::unset("DUOLANE_LOG_STDERR"),
             EnvGuard::unset("DUOLANE_CODEX_REASONING_SUMMARY"),
@@ -844,6 +856,49 @@ mod tests {
             assert_eq!(codex_request_compression(), expected);
             assert_eq!(codex_transport(), CodexTransport::Auto);
         }
+    }
+
+    #[test]
+    fn codex_auto_ws_max_bytes_reads_valid_sources_and_lists_them() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        assert_eq!(codex_auto_ws_max_bytes(), 4 * 1024 * 1024);
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"autoWebSocketMaxBytes":123}}"#,
+        )
+        .unwrap();
+        {
+            let _value = EnvGuard::set("DUOLANE_CODEX_AUTO_WS_MAX_BYTES", "invalid");
+            assert_eq!(codex_auto_ws_max_bytes(), 123);
+            assert!(
+                !config_override_summary_lines(&load_config())
+                    .iter()
+                    .any(|s| s == "codex.autoWebSocketMaxBytes (env)")
+            );
+        }
+        let _value = EnvGuard::set("DUOLANE_CODEX_AUTO_WS_MAX_BYTES", "0");
+        assert_eq!(codex_auto_ws_max_bytes(), 0);
+        let sources = config_override_summary_lines(&load_config());
+        assert!(
+            sources
+                .iter()
+                .any(|s| s == "codex.autoWebSocketMaxBytes (env)")
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|s| s == "codex.autoWebSocketMaxBytes: 123")
+        );
+        drop(_value);
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"autoWebSocketMaxBytes":"invalid","requestCompression":"gzip"}}"#,
+        )
+        .unwrap();
+        assert_eq!(codex_auto_ws_max_bytes(), 4 * 1024 * 1024);
+        assert_eq!(codex_request_compression(), CodexRequestCompression::Gzip);
     }
 
     #[test]

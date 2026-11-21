@@ -99,6 +99,7 @@ pub(super) async fn live_stream_response(
                         &ctx,
                         &http_body,
                         continuation.as_ref(),
+                        attempt == 0,
                     )
                     .await
             }

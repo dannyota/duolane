@@ -31,6 +31,7 @@ pub(super) async fn codex_websocket_request(
     connect_timeout_ms: u64,
     idle_timeout_ms: u64,
     reservation: Option<&ContinuationReservation>,
+    websocket_sent: &std::sync::atomic::AtomicBool,
 ) -> Result<OwnerAwareCodexResponse, CodexError> {
     let continuation = reservation.map(ContinuationReservation::candidate);
     let pool_owner = reservation_pool_owner(reservation);
@@ -115,6 +116,7 @@ pub(super) async fn codex_websocket_request(
         used_pooled = false;
     }
 
+    websocket_sent.store(true, std::sync::atomic::Ordering::Release);
     guard
         .send(Message::text(body_json))
         .await
@@ -332,6 +334,7 @@ pub(super) fn start_codex_websocket_events(
     body_json: String,
     headers: &HeaderMap,
     reservation: Option<&ContinuationReservation>,
+    websocket_sent: Arc<std::sync::atomic::AtomicBool>,
 ) -> CodexWebSocketEventStream {
     if let Some(tc) = ready.traffic.as_deref() {
         write_websocket_metadata_capture(tc, &ready.ws_url, reservation, ready.used_pooled);
@@ -360,6 +363,7 @@ pub(super) fn start_codex_websocket_events(
             send_timeout_ms,
         } = ready;
         let pool_owner = reservation_pool_owner(reservation.as_ref());
+        websocket_sent.store(true, std::sync::atomic::Ordering::Release);
         let send_result = tokio::select! {
             biased;
             _ = tx.closed() => None,
@@ -422,6 +426,7 @@ pub(super) async fn codex_websocket_event_stream(
     connect_timeout_ms: u64,
     idle_timeout_ms: u64,
     reservation: Option<&ContinuationReservation>,
+    websocket_sent: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<CodexWebSocketEventStream, CodexError> {
     let body_json = serde_json::to_string(body_value).map_err(|error| CodexError {
         status: 500,
@@ -448,6 +453,7 @@ pub(super) async fn codex_websocket_event_stream(
         body_json,
         headers,
         reservation,
+        websocket_sent,
     ))
 }
 
@@ -632,6 +638,7 @@ mod tests {
             "x".repeat(32 * 1024 * 1024),
             &HeaderMap::new(),
             None,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(weak_entry.upgrade().is_some());
@@ -700,6 +707,7 @@ mod tests {
             "x".repeat(32 * 1024 * 1024),
             &HeaderMap::new(),
             Some(&reservation),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
         let error = tokio::time::timeout(Duration::from_secs(2), events.recv())
             .await
