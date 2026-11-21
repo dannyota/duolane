@@ -231,3 +231,63 @@ fn plain_service_exits_on_second_ctrl_c() -> Result<(), Box<dyn std::error::Erro
 fn plain_service_exits_on_second_sigterm() -> Result<(), Box<dyn std::error::Error>> {
     plain_service_exits_on_second_signal("-TERM")
 }
+
+#[cfg(unix)]
+#[test]
+fn agents_setup_and_remove_preserve_custom_files_and_symlinks()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let temp = TempDir::new()?;
+    let dir = temp.path().join("agents");
+    let run = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+        let output = Command::cargo_bin("duolane")?
+            .args(args)
+            .env("CLAUDE_CONFIG_DIR", temp.path())
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?)
+    };
+    run(&["agents", "remove"])?;
+    run(&["agents", "setup"])?;
+    for (family, label) in [
+        ("terra", "Terra"),
+        ("sol", "Sol"),
+        ("astra", "Astra"),
+        ("luna", "Luna"),
+    ] {
+        let path = dir.join(format!("{family}.md"));
+        let expected = format!(
+            "---\nname: {family}\ndescription: General-purpose {label} agent.\nmodel: {family}\n---\n\nFollow the task brief and project instructions.\n"
+        );
+        assert_eq!(std::fs::read_to_string(&path)?, expected);
+        assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o777, 0o644);
+    }
+    let output = run(&["agents", "setup"])?;
+    assert_eq!(output.matches("unchanged").count(), 4);
+    let terra = dir.join("terra.md");
+    std::fs::write(&terra, "custom")?;
+    assert!(run(&["agents", "setup"])?.contains("kept (differs; use --force)"));
+    assert_eq!(std::fs::read_to_string(&terra)?, "custom");
+    run(&["agents", "setup", "--force"])?;
+    assert_ne!(std::fs::read_to_string(&terra)?, "custom");
+    let target = temp.path().join("target");
+    std::fs::write(&target, "untouched")?;
+    let sol = dir.join("sol.md");
+    std::fs::remove_file(&sol)?;
+    symlink(&target, &sol)?;
+    assert!(run(&["agents", "setup", "--force"])?.contains("symlink"));
+    assert_eq!(std::fs::read_to_string(&target)?, "untouched");
+    std::fs::write(&terra, "custom")?;
+    let output = run(&["agents", "remove"])?;
+    assert!(output.contains("kept"));
+    assert!(output.contains("symlink"));
+    assert_eq!(std::fs::read_to_string(&terra)?, "custom");
+    assert!(std::fs::symlink_metadata(&sol)?.file_type().is_symlink());
+    assert!(!dir.join("astra.md").exists());
+    assert!(!dir.join("luna.md").exists());
+    Ok(())
+}

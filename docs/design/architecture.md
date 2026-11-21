@@ -79,6 +79,28 @@ other model.
 - `/monitor` returns wall-clock timestamps, elapsed durations, and computed
   rates, never monotonic clock readings.
 
+## Claude Code agents
+
+`duolane agents setup` writes one Claude Code subagent per Codex family, so a
+session can hand work to Codex by agent name. It runs only when the owner runs
+it; `serve` and intercept setup never write agents.
+
+- It writes `terra.md`, `sol.md`, `astra.md`, and `luna.md` to the Claude Code
+  user agents directory: `$CLAUDE_CONFIG_DIR/agents`, or `~/.claude/agents`.
+  Each sets `model:` to the family alias, so it follows the newest model, and
+  sets no effort. Effort comes from the Agent call or from an `effort:` line the
+  owner adds.
+- It never replaces a file whose content differs from what it writes, unless
+  `--force` is given. It never follows a symlink at an agent file, but follows a
+  symlinked `agents` directory or Claude config directory, as dotfile setups
+  use. A new file is created only if none exists by then; replacements are
+  written to a temporary file and renamed. `--force` and `remove` assume nothing
+  else edits the agent files at the same time.
+- `duolane agents remove` deletes only files whose content is still exactly what
+  setup wrote.
+- The agents reach Codex only when Claude Code routes through duolane, by
+  `ANTHROPIC_BASE_URL` or intercept mode.
+
 ## Claude route
 
 duolane relays the original body and headers to `api.anthropic.com` and streams

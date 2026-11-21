@@ -120,3 +120,17 @@ pub fn resolve_state_dir_for_env(
         home: home.to_string(),
     })
 }
+
+pub fn claude_config_dir() -> anyhow::Result<std::path::PathBuf> {
+    let dir = match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .filter(|home| !home.is_empty())
+            .map(|home| std::path::PathBuf::from(home).join(".claude"))
+            .ok_or_else(|| {
+                anyhow::anyhow!("cannot find the home directory; set CLAUDE_CONFIG_DIR")
+            })?,
+    };
+    Ok(std::path::absolute(dir)?)
+}

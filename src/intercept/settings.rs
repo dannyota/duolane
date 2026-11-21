@@ -230,17 +230,7 @@ fn text(value: &RawValue) -> String {
 }
 
 pub(super) fn settings_path() -> anyhow::Result<PathBuf> {
-    let dir = match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .filter(|home| !home.is_empty())
-            .map(|home| PathBuf::from(home).join(".claude"))
-            .ok_or_else(|| {
-                anyhow::anyhow!("cannot find the home directory; set CLAUDE_CONFIG_DIR")
-            })?,
-    };
-    Ok(std::path::absolute(dir.join(SETTINGS_FILE))?)
+    Ok(crate::paths::claude_config_dir()?.join(SETTINGS_FILE))
 }
 
 fn read_settings(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
