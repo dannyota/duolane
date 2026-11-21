@@ -8,9 +8,9 @@ pub(super) fn write_codex_http_request_capture(
     traffic: &TrafficCapture,
     url: &str,
     headers: &http::HeaderMap,
-    body_json: &str,
+    body_json: &[u8],
 ) {
-    let body = serde_json::from_str(body_json).unwrap_or_else(|_| {
+    let body = serde_json::from_slice(body_json).unwrap_or_else(|_| {
         serde_json::json!({
             "unparseable": true,
             "bytes": body_json.len(),
@@ -93,7 +93,7 @@ fn headers_to_json_from_pairs(headers: &[(String, String)]) -> serde_json::Value
     serde_json::Value::Object(out)
 }
 
-fn summarize_json_request_size(body: &serde_json::Value, body_json: &str) -> serde_json::Value {
+fn summarize_json_request_size(body: &serde_json::Value, body_json: &[u8]) -> serde_json::Value {
     serde_json::json!({
         "bytes": body_json.len(),
         "inputCount": body

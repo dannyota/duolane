@@ -5,6 +5,7 @@ use crate::provider::RequestContext;
 use super::auth::constants::CODEX_API_ENDPOINT;
 use super::auth::manager::CodexAuthManager;
 use super::auth::token_store::{DefaultCodexAuthStore, StoredAuth, file_store};
+use super::client_body::CodexHttpBodyCache;
 pub use super::client_error::*;
 pub use super::client_headers::*;
 use super::client_proxy::*;
@@ -75,6 +76,7 @@ pub struct CodexHttpClient {
     pub(super) base_url: String,
     pub(super) header_timeout_ms: u64,
     pub(super) body_idle_timeout_ms: u64,
+    pub(super) request_compression: config::CodexRequestCompression,
 }
 
 impl Default for CodexHttpClient {
@@ -97,6 +99,7 @@ impl CodexHttpClient {
             base_url: config::codex_base_url(CODEX_API_ENDPOINT),
             header_timeout_ms: timeout_ms,
             body_idle_timeout_ms: HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS,
+            request_compression: config::codex_request_compression(),
         }
     }
 
@@ -119,6 +122,7 @@ impl CodexHttpClient {
             base_url,
             header_timeout_ms: config::codex_header_timeout_ms(),
             body_idle_timeout_ms: HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS,
+            request_compression: config::codex_request_compression(),
         }
     }
 
@@ -139,6 +143,7 @@ impl CodexHttpClient {
             base_url,
             header_timeout_ms,
             body_idle_timeout_ms,
+            request_compression: config::CodexRequestCompression::Off,
         }
     }
 
@@ -191,19 +196,27 @@ impl CodexHttpClient {
             ctx,
             reservation.as_ref(),
             crate::config::codex_transport(),
+            &CodexHttpBodyCache::new(),
         )
         .await
         .map(OwnerAwareCodexResponse::into_response)
     }
 
-    pub(crate) async fn post_codex_for_owner(
+    pub(super) async fn post_codex_for_owner(
         &self,
         body: &ResponsesRequest,
         ctx: &RequestContext,
         continuation: Option<&super::continuation::ContinuationReservation>,
+        http_body: &CodexHttpBodyCache,
     ) -> Result<OwnerAwareCodexResponse, CodexError> {
-        self.post_codex_with_transport(body, ctx, continuation, crate::config::codex_transport())
-            .await
+        self.post_codex_with_transport(
+            body,
+            ctx,
+            continuation,
+            crate::config::codex_transport(),
+            http_body,
+        )
+        .await
     }
 }
 

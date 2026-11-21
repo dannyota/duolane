@@ -7,6 +7,7 @@ use crate::retry::{compute_backoff_delay, sleep};
 
 use super::auth::token_store::StoredAuth;
 use super::client::*;
+use super::client_body::{CodexHttpBody, CodexHttpBodyCache};
 use super::client_capture::*;
 use super::client_sse::*;
 #[cfg(test)]
@@ -14,20 +15,18 @@ pub use super::events::CodexLimitWindow;
 use super::translate::request::ResponsesRequest;
 
 impl CodexHttpClient {
-    pub(crate) async fn stream_codex_http_events(
+    async fn stream_codex_http_events(
         self: &Arc<Self>,
         body: &ResponsesRequest,
         ctx: &RequestContext,
+        http_body: &CodexHttpBodyCache,
     ) -> Result<CodexHttpEventReceiver, CodexError> {
         let mut auth = self.auth_for(&body.reasoning_account).await?;
-        let body_json = serde_json::to_string(body).map_err(|e| CodexError {
-            status: 500,
-            message: "Failed to serialize request".to_string(),
-            detail: Some(e.to_string()),
-            retry_after: None,
-            usage_limit: None,
-            origin: CodexErrorOrigin::Http,
-        })?;
+        let http_body = http_body
+            .get_or_try_init(|| {
+                self.prepare_http_body(body, ctx.traffic.is_some(), "Failed to serialize request")
+            })
+            .await?;
         let mut auth_refresh_attempted = false;
         let use_responses_lite = body.client_metadata.is_some();
         let mut retries = 0_u32;
@@ -35,7 +34,7 @@ impl CodexHttpClient {
             match self
                 .start_http_event_attempt(
                     &mut auth,
-                    &body_json,
+                    http_body,
                     ctx,
                     use_responses_lite,
                     &mut auth_refresh_attempted,
@@ -63,7 +62,7 @@ impl CodexHttpClient {
                 resp,
                 response_headers,
                 started_at,
-                body_json,
+                http_body: http_body.clone(),
                 auth,
                 auth_refresh_attempted,
                 use_responses_lite,
@@ -73,12 +72,13 @@ impl CodexHttpClient {
         ))
     }
 
-    pub(crate) async fn stream_codex_http_events_for_owner(
+    pub(super) async fn stream_codex_http_events_for_owner(
         self: &Arc<Self>,
         body: &ResponsesRequest,
         ctx: &RequestContext,
+        http_body: &CodexHttpBodyCache,
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
-        let receiver = self.stream_codex_http_events(body, ctx).await?;
+        let receiver = self.stream_codex_http_events(body, ctx, http_body).await?;
         let (stream, _) = super::websocket::CodexWebSocketEventStream::pending(receiver);
         Ok(stream)
     }
@@ -86,14 +86,14 @@ impl CodexHttpClient {
     async fn start_http_event_attempt(
         &self,
         auth: &mut StoredAuth,
-        body_json: &str,
+        http_body: &CodexHttpBody,
         ctx: &RequestContext,
         use_responses_lite: bool,
         auth_refresh_attempted: &mut bool,
     ) -> Result<(reqwest::Response, Vec<(String, String)>, Instant), CodexError> {
         loop {
             let (resp, started_at) = self
-                .start_post_http(auth, body_json, ctx, use_responses_lite)
+                .start_post_http(auth, http_body, ctx, use_responses_lite)
                 .await?;
 
             if resp.status().as_u16() == 401 && !*auth_refresh_attempted {
@@ -123,10 +123,11 @@ impl CodexHttpClient {
         }
     }
 
-    pub(crate) async fn stream_codex_auto_events_for_owner(
+    pub(super) async fn stream_codex_auto_events_for_owner(
         self: &Arc<Self>,
         body: &ResponsesRequest,
         ctx: &RequestContext,
+        http_body: &CodexHttpBodyCache,
         continuation: Option<&super::continuation::ContinuationReservation>,
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
         let mut websocket = self
@@ -134,7 +135,8 @@ impl CodexHttpClient {
             .await?;
         match websocket.recv().await {
             Some(Err(err)) if should_fallback_to_http(&err) => {
-                self.stream_codex_http_events_for_owner(body, ctx).await
+                self.stream_codex_http_events_for_owner(body, ctx, http_body)
+                    .await
             }
             Some(item) => {
                 let (tx, rx) = tokio::sync::mpsc::channel(64);
@@ -166,7 +168,7 @@ impl CodexHttpClient {
             mut resp,
             mut response_headers,
             mut started_at,
-            body_json,
+            http_body,
             mut auth,
             mut auth_refresh_attempted,
             use_responses_lite,
@@ -459,7 +461,7 @@ impl CodexHttpClient {
                         _ = tx.closed() => return,
                         result = client.start_http_event_attempt(
                             &mut auth,
-                            &body_json,
+                            &http_body,
                             &ctx,
                             use_responses_lite,
                             &mut auth_refresh_attempted,
@@ -537,7 +539,11 @@ mod tests {
         let client = Arc::new(http_test_client(format!("http://{addr}/responses"), 1_000));
         client.auth_manager().set_test_auth(http_test_auth());
         let mut events = client
-            .stream_codex_http_events(&buffered_test_request(), &http_test_context())
+            .stream_codex_http_events(
+                &buffered_test_request(),
+                &http_test_context(),
+                &Default::default(),
+            )
             .await
             .unwrap();
 
@@ -586,7 +592,11 @@ mod tests {
         let client = Arc::new(http_test_client(format!("http://{addr}/responses"), 1_000));
         client.auth_manager().set_test_auth(http_test_auth());
         let mut events = client
-            .stream_codex_http_events(&buffered_test_request(), &http_test_context())
+            .stream_codex_http_events(
+                &buffered_test_request(),
+                &http_test_context(),
+                &Default::default(),
+            )
             .await
             .unwrap();
 
@@ -607,10 +617,12 @@ mod tests {
     async fn http_stream_retries_with_current_attempt_headers() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let request = buffered_test_request();
+        let expected = serde_json::to_vec(&request).unwrap();
         let server = tokio::spawn(async move {
             for attempt in 0..2 {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                read_http_request(&mut stream).await;
+                assert_wire_json(&read_http_request(&mut stream).await, &expected, true);
                 let (body, headers) = if attempt == 0 {
                     (
                         br#"data: {"type":"response.failed","status_code":503,"error":{"message":"server error","retry_after":"0"}}
@@ -635,10 +647,12 @@ mod tests {
             }
         });
 
-        let client = Arc::new(http_test_client(format!("http://{addr}/responses"), 1_000));
+        let mut client = http_test_client(format!("http://{addr}/responses"), 1_000);
+        client.request_compression = crate::config::CodexRequestCompression::Gzip;
+        let client = Arc::new(client);
         client.auth_manager().set_test_auth(http_test_auth());
         let mut events = client
-            .stream_codex_http_events(&buffered_test_request(), &http_test_context())
+            .stream_codex_http_events(&request, &http_test_context(), &Default::default())
             .await
             .unwrap();
         let _ = events.recv().await.unwrap().unwrap();
@@ -681,7 +695,11 @@ mod tests {
         client.auth_manager().set_test_auth(http_test_auth());
         let mut events = tokio::time::timeout(
             Duration::from_secs(10),
-            client.stream_codex_http_events(&buffered_test_request(), &http_test_context()),
+            client.stream_codex_http_events(
+                &buffered_test_request(),
+                &http_test_context(),
+                &Default::default(),
+            ),
         )
         .await
         .unwrap()
@@ -740,7 +758,11 @@ mod tests {
         };
         let request = async {
             let mut events = client
-                .stream_codex_http_events(&buffered_test_request(), &http_test_context())
+                .stream_codex_http_events(
+                    &buffered_test_request(),
+                    &http_test_context(),
+                    &Default::default(),
+                )
                 .await
                 .unwrap();
             assert!(events.recv().await.unwrap().unwrap()["type"] == "keepalive");
@@ -792,7 +814,11 @@ mod tests {
         client.auth_manager().set_test_auth(http_test_auth());
         let started_at = Instant::now();
         let error = match client
-            .stream_codex_http_events(&buffered_test_request(), &http_test_context())
+            .stream_codex_http_events(
+                &buffered_test_request(),
+                &http_test_context(),
+                &Default::default(),
+            )
             .await
         {
             Ok(_) => panic!("a silent upstream must fail the request"),
@@ -849,7 +875,11 @@ mod tests {
         let client = Arc::new(http_test_client(format!("http://{addr}/responses"), 1_000));
         client.auth_manager().set_test_auth(http_test_auth());
         let error = match client
-            .stream_codex_http_events(&buffered_test_request(), &http_test_context())
+            .stream_codex_http_events(
+                &buffered_test_request(),
+                &http_test_context(),
+                &Default::default(),
+            )
             .await
         {
             Ok(_) => panic!("retryable status must exhaust with an error"),

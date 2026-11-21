@@ -81,6 +81,8 @@ struct CodexConfig {
     #[serde(rename = "model")]
     pub model: Option<String>,
     pub transport: Option<String>,
+    #[serde(rename = "requestCompression")]
+    pub request_compression: Option<String>,
     #[serde(rename = "headerTimeoutMs")]
     pub header_timeout_ms: Option<u64>,
 }
@@ -250,6 +252,13 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     if env.contains_key("DUOLANE_CODEX_RESPONSES_API") {
         out.push("codex.responsesApi (env)".to_string());
     }
+    if env
+        .get("DUOLANE_CODEX_REQUEST_COMPRESSION")
+        .and_then(|raw| parse_codex_request_compression(raw))
+        .is_some()
+    {
+        out.push("codex.requestCompression (env)".to_string());
+    }
     if env.contains_key("DUOLANE_CODEX_FULL_LANE") {
         out.push("codex.fullLane (env)".to_string());
     }
@@ -313,6 +322,16 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
             }
             if codex.responses_api == Some(true) {
                 out.push("codex.responsesApi: true".to_string());
+            }
+            if let Some(compression) = codex
+                .request_compression
+                .as_deref()
+                .and_then(parse_codex_request_compression)
+            {
+                out.push(format!(
+                    "codex.requestCompression: {}",
+                    compression.as_str()
+                ));
             }
             if codex.full_lane == Some(true) {
                 out.push("codex.fullLane: true".to_string());
@@ -670,6 +689,44 @@ pub fn codex_transport() -> CodexTransport {
     CodexTransport::Auto
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexRequestCompression {
+    Off,
+    Gzip,
+}
+
+impl CodexRequestCompression {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Gzip => "gzip",
+        }
+    }
+}
+
+fn parse_codex_request_compression(raw: &str) -> Option<CodexRequestCompression> {
+    match raw {
+        "off" => Some(CodexRequestCompression::Off),
+        "gzip" => Some(CodexRequestCompression::Gzip),
+        _ => None,
+    }
+}
+
+pub fn codex_request_compression() -> CodexRequestCompression {
+    std::env::var("DUOLANE_CODEX_REQUEST_COMPRESSION")
+        .ok()
+        .as_deref()
+        .and_then(parse_codex_request_compression)
+        .or_else(|| {
+            read_file_config(&paths::config_dir())?
+                .codex?
+                .request_compression
+                .as_deref()
+                .and_then(parse_codex_request_compression)
+        })
+        .unwrap_or(CodexRequestCompression::Off)
+}
+
 pub const CODEX_DEFAULT_HEADER_TIMEOUT_MS: u64 = 300_000;
 pub const CODEX_MIN_HEADER_TIMEOUT_MS: u64 = 1_000;
 
@@ -706,6 +763,7 @@ mod tests {
         let mut guards = vec![
             EnvGuard::unset("DUOLANE_BIND_ADDRESS"),
             EnvGuard::unset("DUOLANE_CODEX_TRANSPORT"),
+            EnvGuard::unset("DUOLANE_CODEX_REQUEST_COMPRESSION"),
             EnvGuard::unset("DUOLANE_LOG_VERBOSE"),
             EnvGuard::unset("DUOLANE_LOG_STDERR"),
             EnvGuard::unset("DUOLANE_CODEX_REASONING_SUMMARY"),
@@ -872,6 +930,64 @@ mod tests {
                 assert_eq!(codex_transport(), expected);
             }
         }
+    }
+
+    #[test]
+    fn codex_request_compression_reads_file_and_env_precedence() {
+        use CodexRequestCompression::{Gzip, Off};
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        assert_eq!(codex_request_compression(), Off);
+        for (file, env, expected) in [
+            ("gzip", "invalid", Gzip),
+            ("gzip", "off", Off),
+            ("off", "gzip", Gzip),
+            ("invalid", "", Off),
+        ] {
+            std::fs::write(
+                config.path().join("config.json"),
+                serde_json::json!({"codex":{"requestCompression":file}}).to_string(),
+            )
+            .unwrap();
+            let _compression = EnvGuard::set("DUOLANE_CODEX_REQUEST_COMPRESSION", env);
+            assert_eq!(codex_request_compression(), expected);
+            assert_eq!(codex_transport(), CodexTransport::Auto);
+        }
+    }
+
+    #[test]
+    fn codex_request_compression_reports_config_sources() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"requestCompression":"gzip"}}"#,
+        )
+        .unwrap();
+        {
+            let _compression = EnvGuard::set("DUOLANE_CODEX_REQUEST_COMPRESSION", "gzpi");
+            let sources = config_override_summary_lines(&load_config());
+            assert!(
+                !sources
+                    .iter()
+                    .any(|line| line == "codex.requestCompression (env)")
+            );
+        }
+        let _compression = EnvGuard::set("DUOLANE_CODEX_REQUEST_COMPRESSION", "off");
+        let sources = config_override_summary_lines(&load_config());
+        assert!(
+            sources
+                .iter()
+                .any(|line| line == "codex.requestCompression: gzip")
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|line| line == "codex.requestCompression (env)")
+        );
     }
 
     #[test]

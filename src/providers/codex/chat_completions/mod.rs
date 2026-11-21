@@ -268,6 +268,15 @@ impl ChatError {
         if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
             return Self::new(StatusCode::CONFLICT, "api_error", error.message, None, None);
         }
+        if error.is_gzip_input_limit() {
+            return Self::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "invalid_request_error",
+                error.message,
+                None,
+                Some("request_too_large"),
+            );
+        }
         let status = match error.status {
             401 => StatusCode::UNAUTHORIZED,
             403 => StatusCode::FORBIDDEN,

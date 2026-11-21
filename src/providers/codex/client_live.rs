@@ -473,6 +473,7 @@ mod tests {
                 &context,
                 Some(&first_candidate),
                 crate::config::CodexTransport::WebSocket,
+                &Default::default(),
             )
             .await
             .unwrap();

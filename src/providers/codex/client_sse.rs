@@ -5,6 +5,7 @@ use crate::traffic::TrafficCapture;
 
 use super::auth::token_store::StoredAuth;
 use super::client::*;
+use super::client_body::CodexHttpBody;
 
 #[derive(Default)]
 pub(super) struct HttpSseDecoder {
@@ -22,7 +23,7 @@ pub(super) struct HttpEventStreamState {
     pub(super) resp: reqwest::Response,
     pub(super) response_headers: Vec<(String, String)>,
     pub(super) started_at: Instant,
-    pub(super) body_json: String,
+    pub(super) http_body: CodexHttpBody,
     pub(super) auth: StoredAuth,
     pub(super) auth_refresh_attempted: bool,
     pub(super) use_responses_lite: bool,
