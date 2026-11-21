@@ -70,7 +70,9 @@ Rejections use the Anthropic error shape and never echo request values:
 
 ## Credentials
 
-- The Claude login passes through in transit and is never stored or logged.
+- The Claude login passes through in transit and is never stored or logged,
+  unless Claude accounts are configured, in which case the account store below
+  owns it.
 - The Codex login is read from `$CODEX_HOME/auth.json`, by default
   `~/.codex/auth.json`, and is never deleted, even after a rejected refresh.
 - Writes to that file are atomic, flushed to disk, readable only by the user,
@@ -119,6 +121,24 @@ Rejections use the Anthropic error shape and never echo request values:
 - Named profiles and profile selection exist only on Unix. Elsewhere duolane
   ignores both and uses `default`, and `duolane codex auth use` reports that
   profiles are not supported.
+- The Claude account store `claude-accounts.json` maps an account name to an
+  absolute Claude Code config directory, the directory `CLAUDE_CONFIG_DIR`
+  names. duolane opens the file through a descriptor of the config directory,
+  without following symlinks, accepts only a regular file, and checks ownership
+  and mode on the opened descriptor: owned by the user and not readable or
+  writable by group or others. Reads stop at 16 KiB, and the file holds at most
+  16 accounts. Each named directory must be an absolute path without `..`
+  components, opened and read the same way as a Codex profile home, under the
+  same ownership and `StrictModes` ancestor rules. The owner edits the store by
+  hand, so duolane only reads it.
+- duolane reads the selected account's session key from its config directory's
+  credential store and attaches it to an upstream request as
+  `Authorization: Bearer <token>`. The key is never logged or captured; the
+  shared credential matcher redacts the header before it reaches logs and
+  traffic captures.
+- The `claude-account` selection in the state directory is written atomically,
+  flushed, and readable only by the user, exactly like the `codex-profile`
+  selection.
 
 ## Upstream connections
 
