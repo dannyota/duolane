@@ -66,7 +66,34 @@ fn working_directory_from_line(line: &str) -> Option<&str> {
         line.strip_prefix(prefix)
             .map(str::trim)
             .filter(|path| !path.is_empty() && path.len() <= MAX_WORKING_DIRECTORY_BYTES)
+            .map(|path| without_was_suffix(path).unwrap_or(path))
+            .filter(|path| !path.is_empty())
     })
+}
+
+fn without_was_suffix(path: &str) -> Option<&str> {
+    if !path.ends_with(')') {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (index, ch) in path.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth == 0 {
+                    let current = path.get(..index)?.strip_suffix(' ')?;
+                    let previous = path
+                        .get(index..)?
+                        .strip_prefix("(was ")?
+                        .strip_suffix(')')?;
+                    return Path::new(previous).is_absolute().then_some(current);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn name_from_working_directory(path: &str) -> Option<String> {
@@ -209,6 +236,66 @@ mod tests {
         assert_eq!(
             name_from_working_directory(worktree.to_str().unwrap()).as_deref(),
             Some("project")
+        );
+    }
+
+    #[test]
+    fn resolves_current_repository_when_working_directory_has_was_suffix() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("project");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let system = json!(format!(
+            "Primary working directory: {} (was /other/worktree)",
+            root.display()
+        ));
+
+        assert_eq!(name_from_system(Some(&system)).as_deref(), Some("project"));
+    }
+
+    #[test]
+    fn resolves_linked_worktree_with_was_suffix_to_main_repository_name() {
+        let temp = tempdir().unwrap();
+        let git_dir = temp.path().join("project/.git/worktrees/feature");
+        let worktree = temp.path().join("worktrees/feature");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        let system = json!(format!(
+            "Primary working directory: {} (was /other/worktree)",
+            worktree.display()
+        ));
+
+        assert_eq!(name_from_system(Some(&system)).as_deref(), Some("project"));
+    }
+
+    #[test]
+    fn keeps_parentheses_in_working_directory_without_was_suffix() {
+        let line = "Primary working directory: /home/user/project (local)";
+
+        assert_eq!(
+            working_directory_from_line(line),
+            Some("/home/user/project (local)")
+        );
+    }
+
+    #[test]
+    fn strips_was_suffix_with_nested_parentheses() {
+        let line = "Primary working directory: /tmp/repo (was /tmp/old (was archive))";
+
+        assert_eq!(working_directory_from_line(line), Some("/tmp/repo"));
+    }
+
+    #[test]
+    fn keeps_was_group_that_is_not_an_absolute_path() {
+        let line = "Primary working directory: /tmp/repo (was archive)";
+
+        assert_eq!(
+            working_directory_from_line(line),
+            Some("/tmp/repo (was archive)")
         );
     }
 
