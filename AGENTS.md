@@ -50,8 +50,8 @@ Direct owner instructions and platform safety rules come first. An accepted ADR 
 |Role|Who|Duty|
 |-|-|-|
 |Primary|The session the owner talks to|Designs, writes documentation, decides, briefs, verifies, owns Git|
-|Implementer|Codex Terra high for routine work, Codex Sol high for hard work|One bounded task in named paths, with tests; never commits|
-|Reviewer|Codex read-only: Sol high for Terra's work, Astra high for Sol's work and the primary's work|Independent review of designs, ADRs, and code|
+|Implementer|Codex Terra high for all work (owner, 2026-11-21)|One bounded task in named paths, with tests; never commits|
+|Reviewer|Codex read-only: Sol high for Terra's work, Astra high for the primary's work|Independent review of designs, ADRs, and code|
 
 |Codex model|Current id|Claude stand-in when Codex is unavailable|
 |-|-|-|
