@@ -418,8 +418,41 @@ pub(super) fn start_codex_websocket_events(
     receiver
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn codex_websocket_event_stream(
+    websocket_client: &reqwest::Client,
+    proxy_config: &WebSocketProxyConfig,
+    url: &str,
+    headers: &HeaderMap,
+    body_value: &serde_json::Value,
+    ctx: &RequestContext,
+    traffic: Option<Arc<TrafficCapture>>,
+    connect_timeout_ms: u64,
+    idle_timeout_ms: u64,
+    reservation: Option<&ContinuationReservation>,
+    websocket_sent: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<CodexWebSocketEventStream, CodexError> {
+    codex_websocket_event_stream_prepared(
+        None,
+        websocket_client,
+        proxy_config,
+        url,
+        headers,
+        body_value,
+        ctx,
+        traffic,
+        connect_timeout_ms,
+        idle_timeout_ms,
+        reservation,
+        websocket_sent,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn codex_websocket_event_stream_prepared(
+    ready: Option<ReadyWebSocket>,
     websocket_client: &reqwest::Client,
     proxy_config: &WebSocketProxyConfig,
     url: &str,
@@ -440,18 +473,23 @@ pub(super) async fn codex_websocket_event_stream(
         usage_limit: None,
         origin: CodexErrorOrigin::WebSocketHandshake,
     })?;
-    let ready = prepare_codex_websocket(
-        websocket_client,
-        proxy_config,
-        url,
-        headers,
-        traffic,
-        reservation,
-        connect_timeout_ms,
-        idle_timeout_ms,
-        &ctx.recovery_budget,
-    )
-    .await?;
+    let ready = match ready {
+        Some(ready) => ready,
+        None => {
+            prepare_codex_websocket(
+                websocket_client,
+                proxy_config,
+                url,
+                headers,
+                traffic,
+                reservation,
+                connect_timeout_ms,
+                idle_timeout_ms,
+                &ctx.recovery_budget,
+            )
+            .await?
+        }
+    };
     Ok(start_codex_websocket_events(
         ready,
         body_value,
