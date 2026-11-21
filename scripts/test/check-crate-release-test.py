@@ -34,7 +34,8 @@ class ReleaseGate(unittest.TestCase):
         }]
         self.owners = {"users": [{"kind": "user", "login": "dannyota"}]}
         self.release = {"isDraft": False, "isImmutable": False, "assets": []}
-        for artifact, extension in check_crate_release.ARCHIVES.items():
+        for artifact, extension in (("darwin-arm64", "tar.gz"), ("linux-amd64", "tar.gz"),
+                                    ("linux-arm64", "tar.gz"), ("windows-amd64", "zip")):
             directory = self.artifacts / artifact
             directory.mkdir()
             archive = f"duolane-{artifact}.{extension}"
@@ -98,6 +99,12 @@ class ReleaseGate(unittest.TestCase):
     def test_swapped_asset_digests_fail(self):
         first, second = self.release["assets"][:2]
         first["digest"], second["digest"] = second["digest"], first["digest"]
+        with self.assertRaises(ValueError):
+            self.validate()
+
+    def test_missing_checksum_fails(self):
+        self.release["assets"] = [asset for asset in self.release["assets"]
+                                  if asset["name"] != "duolane-linux-arm64.sha256"]
         with self.assertRaises(ValueError):
             self.validate()
 
