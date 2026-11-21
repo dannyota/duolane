@@ -337,7 +337,12 @@ pub fn full_lane_web_search_model(model: &str) -> Cow<'_, str> {
         "gpt-6-luna" => Cow::Borrowed("gpt-6-sol"),
         _ if version(model, "luna").is_some() && uses_responses_lite(model) => {
             let sibling = format!("{}-sol", model.strip_suffix("-luna").unwrap_or(model));
-            let catalog = catalog_models();
+            let catalog: Vec<_> = catalog_models()
+                .into_iter()
+                .filter(|entry| {
+                    !entry.use_responses_lite || ALLOWED_MODELS.contains(&entry.slug.as_str())
+                })
+                .collect();
             if ALLOWED_MODELS.contains(&sibling.as_str())
                 || catalog
                     .iter()

@@ -374,6 +374,31 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         .unwrap()
         .unwrap();
     assert_eq!(body["model"], "gpt-7.0-sol");
+    let path = dir.path().join("models_cache.json");
+    let mut catalog: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for model in catalog["models"].as_array_mut().unwrap() {
+        if model["slug"]
+            .as_str()
+            .is_some_and(|slug| slug.ends_with("-sol"))
+        {
+            model["use_responses_lite"] = json!(true);
+        }
+    }
+    std::fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let response = client
+        .post(format!("{url}/v1/responses"))
+        .json(&json!({"model":"luna","input":"synthetic","tools":[{"type":"web_search"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let (headers, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(body["model"], "gpt-6.1-sol");
+    assert!(!headers.contains_key("x-openai-internal-codex-responses-lite"));
     std::fs::remove_file(dir.path().join("models_cache.json")).unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await;
     let response = client
