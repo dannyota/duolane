@@ -265,6 +265,7 @@ fn copy_safe_image_headers(source: &http::HeaderMap, target: &mut http::HeaderMa
 }
 
 fn image_transport_error_response(error: super::client::CodexError) -> axum::response::Response {
+    let exhausted = error.is_recovery_exhausted();
     let status = match error.status {
         401 => StatusCode::UNAUTHORIZED,
         403 => StatusCode::FORBIDDEN,
@@ -292,6 +293,11 @@ fn image_transport_error_response(error: super::client::CodexError) -> axum::res
             "upstream_error"
         }),
     });
+    if exhausted {
+        response
+            .headers_mut()
+            .insert("x-should-retry", http::HeaderValue::from_static("false"));
+    }
     if let Some(retry_after) = error.retry_after
         && let Ok(value) = http::HeaderValue::from_str(&retry_after)
     {
@@ -436,6 +442,7 @@ mod tests {
                 ImageOperation::Generation,
                 prepare_json_request(ImageOperation::Generation, br#"{"prompt":"x"}"#).unwrap(),
                 crate::provider::RequestContext {
+                    recovery_budget: Default::default(),
                     req_id: "oversized".into(),
                     session_id: None,
                     traffic: None,
@@ -495,6 +502,7 @@ mod tests {
                 ImageOperation::Generation,
                 prepared,
                 crate::provider::RequestContext {
+                    recovery_budget: Default::default(),
                     req_id: "image-test".into(),
                     session_id: None,
                     traffic: None,

@@ -171,6 +171,19 @@ fn has_native_hosted_web_search(object: &Map<String, Value>) -> bool {
 }
 
 fn local_codex_error(error: CodexError) -> Response {
+    if error.is_recovery_exhausted() {
+        let mut response = openai_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "api_error",
+            error.message,
+            None,
+            None,
+        );
+        response
+            .headers_mut()
+            .insert("x-should-retry", http::HeaderValue::from_static("false"));
+        return response;
+    }
     if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
         return openai_error(StatusCode::CONFLICT, "api_error", error.message, None, None);
     }
@@ -616,12 +629,20 @@ mod tests {
 
     fn observer_context() -> RequestContext {
         RequestContext {
+            recovery_budget: Default::default(),
             req_id: "native-test".into(),
             session_id: None,
             traffic: None,
             monitor: None,
             passthrough: None,
         }
+    }
+
+    #[test]
+    fn exhausted_recovery_is_not_retryable_by_native_clients() {
+        let response = local_codex_error(CodexError::recovery_exhausted());
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["x-should-retry"], "false");
     }
 
     #[test]

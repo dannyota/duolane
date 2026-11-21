@@ -175,6 +175,7 @@ pub(super) async fn handler_responses(
         capture.write_json("010-openai-responses-request", &body);
     }
     let context = RequestContext {
+        recovery_budget: Default::default(),
         req_id: req_id.clone(),
         session_id,
         traffic,
@@ -357,6 +358,7 @@ pub(super) async fn handler_chat_completions(
         capture.write_json("020-upstream-request", &translated.upstream);
     }
     let context = RequestContext {
+        recovery_budget: Default::default(),
         req_id: req_id.clone(),
         session_id,
         traffic,

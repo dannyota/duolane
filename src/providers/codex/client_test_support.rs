@@ -40,6 +40,7 @@ pub(super) fn http_test_auth() -> StoredAuth {
 
 pub(super) fn http_test_context() -> RequestContext {
     RequestContext {
+        recovery_budget: Default::default(),
         req_id: "http-body-test".into(),
         session_id: None,
         traffic: None,

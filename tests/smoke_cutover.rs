@@ -1511,7 +1511,7 @@ async fn smoke_codex_http_empty_completions_exhaust_to_service_unavailable() {
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
-        "exhausted empty completions must surface an explicit error: {body_text}"
+        "exhausted empty completions must surface an explicit error"
     );
     assert_eq!(
         should_retry.as_ref().and_then(|v| v.to_str().ok()),
@@ -1520,11 +1520,11 @@ async fn smoke_codex_http_empty_completions_exhaust_to_service_unavailable() {
     );
     assert!(
         body_text.contains("Codex completed without producing output"),
-        "unexpected exhaustion body: {body_text}"
+        "unexpected exhaustion response"
     );
     assert_eq!(
         attempts.load(std::sync::atomic::Ordering::SeqCst),
-        11,
+        3,
         "retry loop must stay bounded"
     );
 }
@@ -1607,6 +1607,72 @@ async fn smoke_auto_review_uses_codex_default_and_configured_override() {
     assert_eq!(sent[0]["reasoning"]["effort"], "medium");
     assert_eq!(sent[1]["reasoning"]["effort"], "medium");
     assert_eq!(sent[2]["reasoning"]["effort"], "high");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn upstream_bad_request_cannot_impersonate_recovery_exhaustion() {
+    let _guard = env_lock();
+    let config = TempDir::new().unwrap();
+    let _codex_auth = write_codex_auth(config.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let app = axum::Router::new().fallback({
+        let attempts = attempts.clone();
+        move || {
+            let attempts = attempts.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({"error": {"message": "codex_recovery_exhausted"}})),
+                )
+            }
+        }
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", format!("http://{addr}"));
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
+    let response = call_messages("gpt-5.5").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!response.headers().contains_key("x-should-retry"));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    server.abort();
+    let _ = server.await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_codex_compaction_exhaustion_never_sends_summary_request() {
+    let _guard = env_lock();
+    let _delay_guard = ZeroRetryDelayGuard::enable();
+    clear_all_compactions_for_tests();
+    let config = TempDir::new().unwrap();
+    let _codex_auth = write_codex_auth(config.path());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let upstream = spawn_http_upstream({
+        let attempts = attempts.clone();
+        move |_body: Value| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"status\":503,\"message\":\"unavailable\",\"retry_after\":0}}}\n\n".to_vec()
+        }
+    }).await;
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
+    let _compaction_env = EnvGuard::set("DUOLANE_CODEX_SERVER_COMPACTION", "1");
+    let response = call_messages_body(json!({
+        "model": "gpt-5.5", "max_tokens": 64,
+        "system": "You are a helpful AI assistant tasked with summarizing conversations.",
+        "messages": [{"role":"user","content":"old conversation"}]
+    }))
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()["x-should-retry"], "false");
+    assert_eq!(attempts.load(Ordering::SeqCst), 4);
+    clear_all_compactions_for_tests();
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -2493,20 +2559,9 @@ async fn smoke_codex_http_stops_after_retry_limit() {
     }))
     .await;
 
-    assert_eq!(response.status().as_u16(), 529);
-    let body = tokio::time::timeout(
-        Duration::from_secs(2),
-        axum::body::to_bytes(response.into_body(), usize::MAX),
-    )
-    .await
-    .expect("exhausted stream must terminate")
-    .unwrap();
-    let text = String::from_utf8_lossy(&body);
-    assert_eq!(attempts.load(Ordering::SeqCst), 4, "stream body: {text}");
-    assert!(
-        text.contains("overloaded until retry limit"),
-        "stream body: {text}"
-    );
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()["x-should-retry"], "false");
+    assert_eq!(attempts.load(Ordering::SeqCst), 4);
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -3784,15 +3839,15 @@ async fn smoke_codex_websocket_empty_completions_exhaust_to_service_unavailable(
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
-        "exhausted empty completions must surface an explicit error: {body_text}"
+        "exhausted empty completions must surface an explicit error"
     );
     assert!(
         body_text.contains("Codex completed without producing output"),
-        "unexpected exhaustion body: {body_text}"
+        "unexpected exhaustion response"
     );
     assert_eq!(
         request_count.load(std::sync::atomic::Ordering::SeqCst),
-        11,
+        3,
         "retry loop must stay bounded"
     );
 

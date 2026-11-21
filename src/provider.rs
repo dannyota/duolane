@@ -57,6 +57,7 @@ pub trait CliHandlers: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct RequestContext {
+    pub recovery_budget: crate::providers::codex::recovery::RecoveryBudget,
     pub req_id: String,
     pub session_id: Option<String>,
     pub traffic: Option<Arc<TrafficCapture>>,

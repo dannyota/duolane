@@ -139,6 +139,7 @@ impl CodexHttpClient {
                     Ok(stream) => stream,
                     Err(err) if err.status == 401 && !auth_refresh_attempted && !forwarded_any => {
                         auth_refresh_attempted = true;
+                        ctx.recovery_budget.start();
                         invalidate_live_continuation_pool(continuation.as_ref());
                         let refresh = self.refreshed_auth(&auth);
                         auth = match refresh.await {
@@ -153,6 +154,9 @@ impl CodexHttpClient {
                                 auth
                             },
                             Err(refresh_err) => {
+                                if refresh_err.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
+                                    ctx.recovery_budget.cancel_unspent_start();
+                                }
                                 if tx.send(Err(refresh_err)).await.is_err() {
                                     abort_abandoned_live_continuation(
                                         continuation.as_ref(),
@@ -162,6 +166,10 @@ impl CodexHttpClient {
                                 return;
                             }
                         };
+                        if !ctx.recovery_budget.try_retry(std::time::Duration::ZERO, false) {
+                            let _ = tx.send(Err(CodexError::recovery_exhausted())).await;
+                            return;
+                        }
                         if continuation_retry_available {
                             socket_id_publisher.mark_full_context_retry();
                         }
@@ -170,6 +178,10 @@ impl CodexHttpClient {
                         continue 'attempt;
                     }
                     Err(err) if continuation_retry_available && is_continuation_retry_error(&err) => {
+                        if !ctx.recovery_budget.try_retry(std::time::Duration::ZERO, false) {
+                            let _ = tx.send(Err(CodexError::recovery_exhausted())).await;
+                            return;
+                        }
                         socket_id_publisher.mark_full_context_retry();
                         continuation = full_context_continuation(continuation.as_ref());
                         continuation_retry_available = false;
@@ -234,6 +246,7 @@ impl CodexHttpClient {
                     && !hosted_tool_executed
                 {
                     auth_refresh_attempted = true;
+                    ctx.recovery_budget.start();
                     invalidate_live_continuation_pool(continuation.as_ref());
                     let refresh = self.refreshed_auth(&auth);
                     auth = match refresh.await {
@@ -254,6 +267,9 @@ impl CodexHttpClient {
                             auth
                         }
                         Err(refresh_err) => {
+                            if refresh_err.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
+                                ctx.recovery_budget.cancel_unspent_start();
+                            }
                             if !sent_before_attempt
                                 && refresh_err.detail.as_deref()
                                     == Some(CODEX_ACCOUNT_CHANGED_DETAIL)
@@ -275,6 +291,13 @@ impl CodexHttpClient {
                             return;
                         }
                     };
+                    if !ctx
+                        .recovery_budget
+                        .try_retry(std::time::Duration::ZERO, false)
+                    {
+                        let _ = tx.send(Err(CodexError::recovery_exhausted())).await;
+                        return;
+                    }
                     if continuation_retry_available {
                         socket_id_publisher.mark_full_context_retry();
                     }
@@ -289,6 +312,13 @@ impl CodexHttpClient {
                     && !forwarded_any
                     && !hosted_tool_executed
                 {
+                    if !ctx
+                        .recovery_budget
+                        .try_retry(std::time::Duration::ZERO, false)
+                    {
+                        let _ = tx.send(Err(CodexError::recovery_exhausted())).await;
+                        return;
+                    }
                     socket_id_publisher.mark_full_context_retry();
                     continuation = full_context_continuation(continuation.as_ref());
                     continuation_retry_available = false;

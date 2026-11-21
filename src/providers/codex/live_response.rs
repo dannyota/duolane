@@ -29,9 +29,9 @@ use super::translate::reasoning_signature::ReasoningAccount;
 use super::translate::request::{TranslateOptions, translate_request};
 use super::*;
 
-const MAX_RETRYABLE_LIVE_STREAM_RETRIES: u32 = 10;
+const MAX_RETRYABLE_LIVE_STREAM_RETRIES: u32 = 3;
 
-pub(super) const MAX_EMPTY_COMPLETION_RETRIES: u32 = 10;
+pub(super) const MAX_EMPTY_COMPLETION_RETRIES: u32 = 2;
 
 pub(super) const EMPTY_CODEX_COMPLETION_DETAIL: &str = "empty_codex_completion";
 
@@ -116,20 +116,37 @@ pub(super) async fn live_stream_response(
                 empty_completion_attempts = 0;
                 let dropped = drop_live_continuation_for_retry(&mut continuation);
                 if dropped && is_missing_previous_response_error(&err) {
+                    if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
+                        cleanup.abort();
+                        return map_codex_error_to_response(
+                            &client::CodexError::recovery_exhausted(),
+                        );
+                    }
                     attempt += 1;
                     continue;
                 }
                 if attempt >= MAX_RETRYABLE_LIVE_STREAM_RETRIES {
                     cleanup.abort();
-                    return map_codex_error_to_response(&err);
+                    return map_codex_error_to_response(&client::CodexError::recovery_exhausted());
                 }
                 let delay = compute_backoff_delay(attempt, err.retry_after.as_deref());
                 if delay.exceeds_budget {
                     cleanup.abort();
                     return map_codex_error_to_response(&err);
                 }
+                if !ctx
+                    .recovery_budget
+                    .try_retry(Duration::from_millis(delay.wait_ms), false)
+                {
+                    cleanup.abort();
+                    return map_codex_error_to_response(&client::CodexError::recovery_exhausted());
+                }
                 attempt += 1;
                 sleep(delay.wait_ms).await;
+                if ctx.recovery_budget.expired() {
+                    cleanup.abort();
+                    return map_codex_error_to_response(&client::CodexError::recovery_exhausted());
+                }
                 continue;
             }
             Err(err) => {
@@ -174,6 +191,12 @@ pub(super) async fn live_stream_response(
                     return map_codex_error_to_response(&error);
                 }
                 if dropped && is_missing_previous_response_error(&error) {
+                    if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
+                        cleanup.abort();
+                        return map_codex_error_to_response(
+                            &client::CodexError::recovery_exhausted(),
+                        );
+                    }
                     attempt += 1;
                     continue;
                 }
@@ -192,7 +215,7 @@ pub(super) async fn live_stream_response(
                         );
                     }
                     cleanup.abort();
-                    return map_codex_error_to_response(&error);
+                    return map_codex_error_to_response(&client::CodexError::recovery_exhausted());
                 }
                 let delay = compute_backoff_delay(attempt, error.retry_after.as_deref());
                 if delay.exceeds_budget {
@@ -212,8 +235,19 @@ pub(super) async fn live_stream_response(
                     cleanup.abort();
                     return map_codex_error_to_response(&error);
                 }
+                if !ctx.recovery_budget.try_retry(
+                    Duration::from_millis(delay.wait_ms),
+                    is_empty_completion_error(&error),
+                ) {
+                    cleanup.abort();
+                    return map_codex_error_to_response(&client::CodexError::recovery_exhausted());
+                }
                 attempt += 1;
                 sleep(delay.wait_ms).await;
+                if ctx.recovery_budget.expired() {
+                    cleanup.abort();
+                    return map_codex_error_to_response(&client::CodexError::recovery_exhausted());
+                }
             }
         }
     }
@@ -794,6 +828,7 @@ mod tests {
         )
         .unwrap();
         let ctx = RequestContext {
+            recovery_budget: Default::default(),
             req_id: "empty-terminal".to_string(),
             session_id: None,
             traffic: None,
@@ -966,6 +1001,7 @@ mod tests {
             crate::monitor::EndpointKind::Messages,
         );
         let ctx = RequestContext {
+            recovery_budget: Default::default(),
             req_id: "request".to_string(),
             session_id: None,
             traffic: None,
@@ -998,6 +1034,7 @@ mod tests {
         )
         .unwrap();
         let ctx = RequestContext {
+            recovery_budget: Default::default(),
             req_id: "incremental-http".to_string(),
             session_id: None,
             traffic: None,

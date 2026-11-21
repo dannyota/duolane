@@ -147,6 +147,20 @@ async fn collect_body(
 }
 
 fn codex_error_response(error: CodexError) -> Response {
+    if error.is_recovery_exhausted() {
+        let mut response = ChatError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "api_error",
+            error.message,
+            None,
+            None,
+        )
+        .response();
+        response
+            .headers_mut()
+            .insert("x-should-retry", http::HeaderValue::from_static("false"));
+        return response;
+    }
     let retry_after = error.retry_after.clone();
     let response = ChatError::from_codex(error).response();
     if let Some(retry_after) = retry_after
@@ -328,6 +342,7 @@ mod tests {
             EndpointKind::ChatCompletions,
         );
         RequestContext {
+            recovery_budget: Default::default(),
             req_id: "chat-test".into(),
             session_id: Some("session".into()),
             traffic: None,
@@ -466,6 +481,13 @@ mod tests {
         assert!(body.contains(r#""prompt_tokens":3"#));
         assert!(body.ends_with("data: [DONE]\n\n"));
         server.await.unwrap();
+    }
+
+    #[test]
+    fn exhausted_recovery_is_not_retryable_by_chat_clients() {
+        let response = codex_error_response(CodexError::recovery_exhausted());
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["x-should-retry"], "false");
     }
 
     #[test]

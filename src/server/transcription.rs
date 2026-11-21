@@ -209,6 +209,7 @@ pub(super) async fn handler_transcription(
         }
     };
     let context = RequestContext {
+        recovery_budget: Default::default(),
         req_id: req_id.clone(),
         session_id,
         traffic: None,

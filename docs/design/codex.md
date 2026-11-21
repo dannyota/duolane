@@ -133,6 +133,10 @@ below the cap keeps its effort.
   clamped, so a typo cannot hide behind the default.
 - A header timeout is not retried. The request reached Codex, so a new attempt
   restarts the reasoning and times out the same way.
+- Recovery shares at most three retries per request, including at most two for
+  empty completions. Its 60-second window starts at the first retry decision; a
+  retry is not started if its backoff would end after the deadline. An in-flight
+  attempt is not interrupted by this window.
 - duolane holds protocol framing until the stream produces real output. Before
   that point a retry is invisible to the client. After it, duolane never
   retries.

@@ -169,6 +169,9 @@ pub(super) fn is_codex_success_terminal_event(payload: &serde_json::Value) -> bo
 }
 
 pub(super) fn retryable_live_start_codex_error(err: &client::CodexError) -> bool {
+    if err.is_recovery_exhausted() {
+        return false;
+    }
     if err.origin == client::CodexErrorOrigin::WebSocketHandshake {
         if err.detail.as_deref() == Some(websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL) {
             return false;
