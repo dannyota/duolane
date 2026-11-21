@@ -30,6 +30,7 @@ pub type CodexWebSocketEventReceiver =
 
 pub(crate) struct CodexWebSocketEventStream {
     receiver: CodexWebSocketEventReceiver,
+    is_http: bool,
     socket_id: Arc<AtomicU64>,
     full_context_retry: Arc<AtomicBool>,
     provider_retry_handoff: Arc<AtomicBool>,
@@ -52,6 +53,7 @@ impl CodexWebSocketEventStream {
         (
             Self {
                 receiver,
+                is_http: false,
                 socket_id: socket_id.clone(),
                 full_context_retry: full_context_retry.clone(),
                 provider_retry_handoff: provider_retry_handoff.clone(),
@@ -62,6 +64,16 @@ impl CodexWebSocketEventStream {
                 provider_retry_handoff,
             },
         )
+    }
+
+    pub(super) fn http(receiver: CodexWebSocketEventReceiver) -> Self {
+        let (mut stream, _) = Self::pending(receiver);
+        stream.is_http = true;
+        stream
+    }
+
+    pub(super) fn is_http(&self) -> bool {
+        self.is_http
     }
 
     pub(crate) async fn recv(&mut self) -> Option<Result<serde_json::Value, CodexError>> {

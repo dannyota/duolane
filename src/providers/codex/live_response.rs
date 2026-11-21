@@ -240,7 +240,9 @@ async fn live_stream_response_once(
     configured_transport: config::CodexTransport,
     accept_empty: bool,
 ) -> LiveStreamStart {
-    let mut translator = LiveStreamTranslator::for_request(message_id, model, &request_body);
+    let is_http = upstream_events.is_http();
+    let mut translator = LiveStreamTranslator::for_request(message_id, model, &request_body)
+        .with_http_tool_commits(is_http);
     let mut upstream_sse_body = Vec::new();
     let mut pending_chunk = Vec::new();
     let mut generation_started = false;
@@ -268,7 +270,7 @@ async fn live_stream_response_once(
             }
             generation_started = true;
         }
-        append_upstream_sse_payload(&mut upstream_sse_body, &payload);
+        append_live_metadata_payload(&mut upstream_sse_body, &payload, is_http);
         let (chunk, terminal) = match translate_live_stream_payload(&mut translator, &payload, None)
         {
             Ok(result) => result,
@@ -456,6 +458,7 @@ fn remaining_live_stream_response(
     mut upstream_sse_body: Vec<u8>,
     compaction: LiveStreamCompaction,
 ) -> Response {
+    let is_http = upstream_events.is_http();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     tokio::spawn(async move {
         if tx.send(Ok(Bytes::from(first_chunk))).await.is_err() {
@@ -502,7 +505,7 @@ fn remaining_live_stream_response(
             };
             match item {
                 Ok(payload) => {
-                    append_upstream_sse_payload(&mut upstream_sse_body, &payload);
+                    append_live_metadata_payload(&mut upstream_sse_body, &payload, is_http);
                     let (chunk, terminal) = match translate_live_stream_payload(
                         &mut translator,
                         &payload,
@@ -600,6 +603,25 @@ fn remaining_live_stream_response(
         rx.recv().await.map(|item| (item, rx))
     });
     event_stream_response(stream)
+}
+
+fn append_live_metadata_payload(buffer: &mut Vec<u8>, payload: &serde_json::Value, is_http: bool) {
+    if is_http
+        && payload["type"] == "response.output_item.done"
+        && events::is_function_call_item(payload)
+        && let Some(index) = payload["output_index"].as_u64()
+    {
+        let item = &payload["item"];
+        append_upstream_sse_payload(
+            buffer,
+            &serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": index,
+                "item": {"type": "function_call", "call_id": item["call_id"], "name": item["name"]}
+            }),
+        );
+    }
+    append_upstream_sse_payload(buffer, payload);
 }
 
 fn append_upstream_sse_payload(buffer: &mut Vec<u8>, payload: &serde_json::Value) {

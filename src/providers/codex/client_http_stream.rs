@@ -9,6 +9,7 @@ use super::auth::token_store::StoredAuth;
 use super::client::*;
 use super::client_body::{CodexHttpBody, CodexHttpBodyCache};
 use super::client_capture::*;
+use super::client_http_tools::{HttpToolState, STALLED_READ_FINISH_FIELD};
 use super::client_sse::*;
 #[cfg(test)]
 pub use super::events::CodexLimitWindow;
@@ -79,8 +80,7 @@ impl CodexHttpClient {
         http_body: &CodexHttpBodyCache,
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
         let receiver = self.stream_codex_http_events(body, ctx, http_body).await?;
-        let (stream, _) = super::websocket::CodexWebSocketEventStream::pending(receiver);
-        Ok(stream)
+        Ok(super::websocket::CodexWebSocketEventStream::http(receiver))
     }
 
     async fn start_http_event_attempt(
@@ -202,6 +202,7 @@ impl CodexHttpClient {
                 let mut body_chunks = 0_u64;
                 let mut event_count = 0_u64;
                 let mut pending_events = Vec::new();
+                let mut tool_state = HttpToolState::default();
 
                 let mut retry_error = 'read_attempt: loop {
                     let chunk = tokio::select! {
@@ -337,7 +338,7 @@ impl CodexHttpClient {
                     }
 
                     for event in events {
-                        let Some(payload) = event.payload else {
+                        let Some(mut payload) = event.payload else {
                             continue;
                         };
                         event_count = event_count.saturating_add(1);
@@ -351,14 +352,25 @@ impl CodexHttpClient {
 
                         hosted_tool_executed |=
                             super::events::event_confirms_hosted_tool_execution(&payload);
-                        let event_kind = super::events::classify_stream_event(&payload);
                         let failure = super::events::classify_event_failure(&payload);
+                        if failure.is_none() {
+                            match tool_state.observe(&mut payload) {
+                                Ok(false) => continue,
+                                Ok(true) => {}
+                                Err(error) => {
+                                    let _ = tx.send(Err(error)).await;
+                                    return;
+                                }
+                            }
+                        }
+                        let event_kind = super::events::classify_stream_event(&payload);
                         if !semantic_output_forwarded {
                             if let Some(limit) = super::events::usage_limit_from_event_with_headers(
                                 &payload,
                                 &response_headers,
                             ) {
                                 pending_events.clear();
+                                drop(tool_state);
                                 let _ = tx
                                     .send(Err(codex_usage_limit_error(
                                         limit,
@@ -376,7 +388,21 @@ impl CodexHttpClient {
                             }
                         }
 
-                        let terminal = super::events::event_is_terminal(&payload);
+                        let local_read_finish = payload["type"] == "response.output_item.done"
+                            && super::events::is_function_call_item(&payload)
+                            && payload[STALLED_READ_FINISH_FIELD].as_bool() == Some(true);
+                        let terminal =
+                            local_read_finish || super::events::event_is_terminal(&payload);
+                        if terminal {
+                            let tool_state = std::mem::take(&mut tool_state);
+                            if event_kind == super::events::CodexStreamEventKind::TerminalSuccess
+                                && let Err(error) = tool_state.validate_terminal(&payload)
+                            {
+                                drop(tool_state);
+                                let _ = tx.send(Err(error)).await;
+                                return;
+                            }
+                        }
                         match event_kind {
                             super::events::CodexStreamEventKind::TerminalFailure => {
                                 if !semantic_output_forwarded {
@@ -441,6 +467,8 @@ impl CodexHttpClient {
                     }
                 };
 
+                drop(tool_state);
+                drop(pending_events);
                 loop {
                     if retries >= MAX_BUFFERED_TRANSPORT_RETRIES {
                         let _ = tx.send(Err(retry_error)).await;

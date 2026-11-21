@@ -8,6 +8,7 @@ mod client_capture;
 mod client_error;
 mod client_headers;
 mod client_http_stream;
+mod client_http_tools;
 mod client_live;
 mod client_oneshot;
 mod client_proxy;

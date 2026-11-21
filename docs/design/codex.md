@@ -126,6 +126,16 @@ below the cap keeps its effort.
 - duolane holds protocol framing until the stream produces real output. Before
   that point a retry is invisible to the client. After it, duolane never
   retries.
+- On HTTP, function-call starts and argument deltas stay private to the attempt.
+  An `output_item.done` matched by `call_id` commits the whole tool block, even
+  without an output index. A call commits once, with a completed status if one
+  is present and a bounded JSON object for arguments. Empty arguments become
+  `{}`. Unmatched argument events, uncommitted calls at a successful terminal
+  event, and exceeded [buffer limits](security.md#limits) fail the stream. A
+  drop before the commit can be retried if no other output was sent and Codex
+  has not reported hosted-tool execution. HTTP assigns deferred block indexes
+  when it emits the blocks. A tool commit closes any live text block first. If
+  that text continues, it starts a new block.
 - An unexpected EOF from the HTTP or WebSocket transport, including a TLS close
   without `close_notify`, is retryable before output. Streaming requests and
   buffered WebSockets also stop retrying once Codex reports that a hosted web

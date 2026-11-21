@@ -7,6 +7,7 @@ mod isolated_codex;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
+use duolane::anthropic::sse::parse_sse_events;
 use duolane::providers::codex::compaction::clear_all_compactions_for_tests;
 use duolane::providers::codex::continuation::clear_all_continuations_for_tests;
 use duolane::providers::codex::websocket::clear_codex_websocket_pool_for_tests;
@@ -2597,45 +2598,456 @@ async fn smoke_codex_http_body_error_after_semantic_output_preserves_message() {
     );
 }
 
+fn encode_mock_codex_events(events: impl IntoIterator<Item = Value>) -> Vec<u8> {
+    events
+        .into_iter()
+        .flat_map(|event| format!("data: {event}\n\n").into_bytes())
+        .collect()
+}
+
+fn http_tool_added(index: usize, call_id: &str, name: &str) -> Value {
+    json!({
+        "type": "response.output_item.added",
+        "output_index": index,
+        "item": {"type": "function_call", "id": format!("item_{call_id}"), "call_id": call_id, "name": name}
+    })
+}
+
+fn http_tool_done(call_id: &str, name: &str, arguments: Value) -> Value {
+    json!({
+        "type": "response.output_item.done",
+        "item": {"type": "function_call", "call_id": call_id, "name": name, "arguments": arguments}
+    })
+}
+
+fn http_tool_turn_completed() -> Value {
+    json!({"type": "response.completed", "response": {"id": "resp_tool", "status": "completed"}})
+}
+
 #[allow(clippy::await_holding_lock)]
-#[tokio::test]
-async fn smoke_codex_http_body_error_after_closed_tool_is_not_success() {
+async fn collect_http_tool_stream(
+    events: Vec<Value>,
+    after_drop: Option<Vec<Value>>,
+) -> (usize, StatusCode, Vec<Value>) {
     let _guard = env_lock();
-    clear_all_continuations_for_tests();
     let config = TempDir::new().unwrap();
     let _codex_auth = write_codex_auth(config.path());
-
-    let upstream = spawn_truncated_http_upstream(concat!(
-        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_tool_partial\"}}\n\n",
-        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_partial\",\"name\":\"Read\"}}\n\n",
-        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"file_path\\\":\\\"/tmp/example\\\"}\"}\n\n",
-        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_partial\",\"name\":\"Read\",\"arguments\":\"{\\\"file_path\\\":\\\"/tmp/example\\\"}\"}}\n\n"
-    ).as_bytes())
-    .await;
-
+    let _no_delay = ZeroRetryDelayGuard::enable();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let first = encode_mock_codex_events(events);
+    let upstream = match after_drop {
+        Some(events) => {
+            spawn_retrying_truncated_http_upstream(
+                first,
+                encode_mock_codex_events(events),
+                attempts.clone(),
+            )
+            .await
+        }
+        None => {
+            spawn_http_upstream({
+                let attempts = attempts.clone();
+                move |_| {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    first.clone()
+                }
+            })
+            .await
+        }
+    };
     let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
     let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
     let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
-    let response = call_messages_body(json!({
-        "model": "gpt-5.5",
-        "max_tokens": 64,
-        "stream": true,
-        "messages": [{"role":"user","content":"read a file"}]
-    }))
-    .await;
+    let (status, body) = tokio::time::timeout(Duration::from_secs(5), async {
+        let response = call_messages_body(json!({
+            "model": "gpt-5.5",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .await;
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        (status, body)
+    })
+    .await
+    .expect("HTTP tool stream must terminate");
+    let events = if status == StatusCode::OK {
+        parse_sse_events(&body)
+            .into_iter()
+            .map(|event| serde_json::from_str(&event.data).unwrap())
+            .collect()
+    } else {
+        vec![serde_json::from_slice(&body).unwrap()]
+    };
+    (attempts.load(Ordering::SeqCst), status, events)
+}
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("\"name\":\"Read\""), "stream body: {text}");
-    assert!(text.contains("event: error"), "stream body: {text}");
+fn assert_http_tool_block(events: &[Value], call_id: &str, name: &str, arguments: Value) {
+    let blocks: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event["type"].as_str(),
+                Some("content_block_start" | "content_block_delta" | "content_block_stop")
+            )
+        })
+        .collect();
+    assert_eq!(blocks.len(), 3);
+    assert!(blocks[0]["type"] == "content_block_start");
     assert!(
-        text.contains("Transport error reading Codex response body"),
-        "stream body: {text}"
+        blocks[0]["content_block"]
+            == json!({"type": "tool_use", "id": call_id, "name": name, "input": {}})
     );
-    assert!(!text.contains("event: message_stop"), "stream body: {text}");
+    assert!(blocks[1]["type"] == "content_block_delta");
+    assert!(blocks[1]["delta"]["type"] == "input_json_delta");
+    let actual: Value =
+        serde_json::from_str(blocks[1]["delta"]["partial_json"].as_str().unwrap()).unwrap();
+    assert!(actual == arguments);
+    assert!(blocks[2]["type"] == "content_block_stop");
+    assert!(
+        blocks
+            .iter()
+            .all(|event| event["index"] == blocks[0]["index"])
+    );
+}
+
+#[tokio::test]
+async fn smoke_codex_http_retries_incomplete_tool_without_forwarding_fragments() {
+    let (attempts, status, events) = collect_http_tool_stream(
+        vec![
+            http_tool_added(0, "call_failed", "Lookup"),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "{\"query\":\"failed"}),
+        ],
+        Some(vec![
+            http_tool_added(0, "call_retried", "Lookup"),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "{\"query\":\"draft\"}"}),
+            {
+                let mut done = http_tool_done("call_retried", "Lookup", json!(r#"{"query":"complete"}"#));
+                done["output_index"] = json!(0);
+                done
+            },
+            http_tool_turn_completed(),
+        ]),
+    ).await;
+    assert_eq!(attempts, 2);
+    assert_eq!(status, StatusCode::OK);
+    assert_http_tool_block(
+        &events,
+        "call_retried",
+        "Lookup",
+        json!({"query": "complete"}),
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "message_start")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "message_stop")
+            .count(),
+        1
+    );
+    assert!(!events.iter().any(|event| event["type"] == "error"));
+}
+
+#[tokio::test]
+async fn smoke_codex_http_body_error_after_closed_tool_does_not_retry() {
+    let (attempts, status, events) = collect_http_tool_stream(
+        vec![http_tool_added(0, "call_committed", "Read"), {
+            let mut done = http_tool_done(
+                "call_committed",
+                "Read",
+                json!(r#"{"file_path":"/tmp/example","pages":""}"#),
+            );
+            done["output_index"] = json!(0);
+            done
+        }],
+        Some(vec![http_tool_turn_completed()]),
+    )
+    .await;
+    assert_eq!(attempts, 1);
+    assert_eq!(status, StatusCode::OK);
+    assert_http_tool_block(
+        &events,
+        "call_committed",
+        "Read",
+        json!({"file_path":"/tmp/example"}),
+    );
+    assert!(events.iter().any(|event| event["type"] == "error"
+        && event["error"]["message"].as_str().is_some_and(|message| {
+            message.contains("Transport error reading Codex response body")
+        })));
+    assert!(!events.iter().any(|event| event["type"] == "message_stop"));
+}
+
+#[tokio::test]
+async fn smoke_codex_http_commits_tool_done_by_call_id_without_output_index() {
+    let mut done = http_tool_done("call_indexless", "Lookup", json!(""));
+    done["item"].as_object_mut().unwrap().remove("name");
+    let (attempts, status, events) = collect_http_tool_stream(
+        vec![
+            http_tool_added(7, "call_indexless", "Lookup"),
+            done,
+            http_tool_turn_completed(),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(attempts, 1);
+    assert_eq!(status, StatusCode::OK);
+    assert_http_tool_block(&events, "call_indexless", "Lookup", json!({}));
+    assert!(events.iter().any(|event| event["type"] == "message_stop"));
+}
+
+#[tokio::test]
+async fn smoke_codex_http_commits_a_call_id_only_once() {
+    let mut done = http_tool_done("call_once", "Lookup", json!("{}"));
+    done["item"]["status"] = json!("completed");
+    let mut terminal = http_tool_turn_completed();
+    terminal["response"]["output"] = json!([done["item"]]);
+    let (attempts, status, events) = collect_http_tool_stream(
+        vec![
+            http_tool_added(0, "call_once", "Lookup"),
+            done.clone(),
+            done,
+            terminal,
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(attempts, 1);
+    assert_eq!(status, StatusCode::OK);
+    assert_http_tool_block(&events, "call_once", "Lookup", json!({}));
+    assert!(events.iter().any(|event| event["type"] == "message_stop"));
+}
+
+#[tokio::test]
+async fn smoke_codex_http_rejects_done_for_an_incomplete_call() {
+    let mut done = http_tool_done("call_incomplete", "Lookup", json!(""));
+    done["item"]["status"] = json!("incomplete");
+    let (attempts, status, events) = collect_http_tool_stream(
+        vec![
+            http_tool_added(0, "call_incomplete", "Lookup"),
+            done,
+            http_tool_turn_completed(),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(attempts, 1);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(events[0]["error"]["type"] == "api_error");
+}
+
+#[tokio::test]
+async fn smoke_codex_http_reports_uncommitted_tool_evidence_after_text() {
+    let mut terminal_only_tool = http_tool_turn_completed();
+    terminal_only_tool["response"]["output"] =
+        json!([http_tool_done("call_terminal", "Lookup", json!("{}"))["item"]]);
+    for tail in [
+        vec![
+            json!({"type": "response.function_call_arguments.delta", "output_index": 1, "item_id": "item_missing", "delta": "{"}),
+            http_tool_turn_completed(),
+        ],
+        vec![terminal_only_tool],
+    ] {
+        let (attempts, status, events) = collect_http_tool_stream(
+            [json!({"type": "response.output_text.delta", "output_index": 0, "delta": "working"})]
+                .into_iter()
+                .chain(tail)
+                .collect(),
+            None,
+        )
+        .await;
+        assert_eq!(attempts, 1);
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            events
+                .iter()
+                .any(|event| event["delta"]["type"] == "text_delta")
+        );
+        assert!(events.iter().any(|event| event["type"] == "error"));
+        assert!(!events.iter().any(|event| event["type"] == "message_stop"));
+    }
+}
+
+#[tokio::test]
+async fn smoke_codex_http_closes_live_text_before_tool_and_reopens_it_after() {
+    let (attempts, status, events) = collect_http_tool_stream(
+        vec![
+            json!({"type": "response.output_item.added", "output_index": 4, "item": {"type": "message", "id": "msg_split"}}),
+            json!({"type": "response.output_text.delta", "output_index": 4, "delta": "before"}),
+            http_tool_done("call_between_text", "Lookup", json!("{}")),
+            json!({"type": "response.output_text.delta", "item_id": "msg_split", "delta": "after"}),
+            json!({"type": "response.output_item.done", "output_index": 4, "item": {"type": "message", "id": "msg_split"}}),
+            http_tool_turn_completed(),
+        ],
+        None,
+    ).await;
+    assert_eq!(attempts, 1);
+    assert_eq!(status, StatusCode::OK);
+    let actual: Vec<_> = events
+        .iter()
+        .filter_map(|event| Some((event["index"].as_u64()?, event["type"].as_str()?)))
+        .collect();
+    let expected: Vec<_> = (0..3)
+        .flat_map(|index| {
+            [
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+            ]
+            .map(|event_type| (index, event_type))
+        })
+        .collect();
+    assert_eq!(actual, expected);
+    let types: Vec<_> = events
+        .iter()
+        .filter_map(|event| event["content_block"]["type"].as_str())
+        .collect();
+    assert_eq!(types, ["text", "tool_use", "text"]);
+    let text: Vec<_> = events
+        .iter()
+        .filter_map(|event| event["delta"]["text"].as_str())
+        .collect();
+    assert!(text == ["before", "after"]);
+    assert!(events.iter().any(|event| event["type"] == "message_stop"));
+}
+
+#[tokio::test]
+async fn smoke_codex_http_assigns_tool_and_search_indexes_in_sse_order() {
+    let (attempts, status, events) = collect_http_tool_stream(
+        vec![
+            json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "web_search_call", "id": "search_1"}}),
+            json!({"type": "response.output_item.done", "output_index": 0, "item": {"type": "web_search_call", "id": "search_1", "action": {"query": "example"}}}),
+            json!({"type": "response.output_text.delta", "output_index": 1, "delta": "answer"}),
+            http_tool_done("call_after_search", "Lookup", json!("{}")),
+            json!({"type": "response.output_text.annotation.added", "annotation": {"type": "url_citation", "url": "https://example.com", "title": "Example"}}),
+            http_tool_turn_completed(),
+        ],
+        None,
+    ).await;
+    assert_eq!(attempts, 1);
+    assert_eq!(status, StatusCode::OK);
+    let indexes: Vec<_> = events
+        .iter()
+        .filter_map(|event| event["index"].as_u64())
+        .collect();
+    assert_eq!(indexes, [0, 0, 0, 1, 1, 1, 2, 2, 3, 3, 3]);
+    let types: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "content_block_start")
+        .filter_map(|event| event["content_block"]["type"].as_str())
+        .collect();
+    assert_eq!(
+        types,
+        [
+            "tool_use",
+            "server_tool_use",
+            "web_search_tool_result",
+            "text"
+        ]
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["content_block"]["content"][0]["url"] == "https://example.com")
+    );
+    assert!(events.iter().any(|event| event["type"] == "message_stop"));
+}
+
+#[tokio::test]
+async fn smoke_codex_http_rejects_invalid_tool_arguments_without_replaying() {
+    for arguments in [json!("{broken"), json!("[]"), json!(" ".repeat(5_000_001))] {
+        let (attempts, status, events) = collect_http_tool_stream(
+            vec![
+                http_tool_done("call_invalid", "Lookup", arguments),
+                http_tool_turn_completed(),
+            ],
+            None,
+        )
+        .await;
+        assert_eq!(attempts, 1);
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(events.len(), 1);
+        assert!(events[0]["error"]["type"] == "api_error");
+    }
+}
+
+#[tokio::test]
+async fn smoke_codex_http_rejects_too_many_held_tool_calls() {
+    let events = (0..65)
+        .map(|index| http_tool_added(index, &format!("call_{index}"), "Lookup"))
+        .chain([http_tool_turn_completed()])
+        .collect();
+    let (attempts, status, events) = collect_http_tool_stream(events, None).await;
+    assert_eq!(attempts, 1);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(events[0]["error"]["message"] == "Codex HTTP pending tool calls exceeded safe limits");
+}
+
+#[tokio::test]
+async fn smoke_codex_http_rejects_excess_held_tool_bytes() {
+    let (attempts, status, events) = collect_http_tool_stream(
+        vec![
+            http_tool_added(0, "call_one", "Lookup"),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "x".repeat(4_200_000)}),
+            http_tool_added(1, "call_two", "Lookup"),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 1, "delta": "x".repeat(4_200_000)}),
+            http_tool_turn_completed(),
+        ],
+        None,
+    ).await;
+    assert_eq!(attempts, 1);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(events[0]["error"]["message"] == "Codex HTTP pending tool bytes exceeded safe limits");
+}
+
+#[tokio::test]
+async fn smoke_codex_http_rejects_terminal_with_uncommitted_tool() {
+    let (attempts, status, events) = collect_http_tool_stream(
+        vec![
+            http_tool_added(0, "call_open", "Lookup"),
+            http_tool_turn_completed(),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(attempts, 1);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(events[0]["error"]["message"] == "upstream stream ended with an open Codex tool call");
+}
+
+#[tokio::test]
+async fn smoke_codex_http_finishes_whitespace_stalled_read_at_commit() {
+    use duolane::providers::codex::translate::read_rewrite::read_offset_rewrite;
+
+    let (attempts, status, events) = collect_http_tool_stream(
+        vec![
+            http_tool_added(7, "call_stalled_read", "Read"),
+            json!({"type": "response.function_call_arguments.delta", "item_id": "item_call_stalled_read", "delta": format!(r#"{{"file_path":"/tmp/example","offset":1000000}}{}"#, " ".repeat(1024))}),
+        ],
+        None,
+    ).await;
+    assert_eq!(attempts, 1);
+    assert_eq!(status, StatusCode::OK);
+    assert_http_tool_block(
+        &events,
+        "call_stalled_read",
+        "Read",
+        json!({"file_path":"/tmp/example"}),
+    );
+    assert!(events.iter().any(|event| event["type"] == "message_stop"));
+    assert!(
+        read_offset_rewrite("call_stalled_read").is_some_and(|rewrite| rewrite.offset == 1_000_000)
+    );
 }
 
 #[allow(clippy::await_holding_lock)]

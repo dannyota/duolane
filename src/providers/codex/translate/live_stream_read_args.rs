@@ -1,10 +1,8 @@
 use super::live_stream::*;
-use super::read_rewrite::sanitize_read_args;
 
-pub(super) fn repair_whitespace_stalled_read_args(
+pub(in crate::providers::codex) fn repair_whitespace_stalled_read_args(
     name: &str,
     args: &str,
-    call_id: Option<&str>,
 ) -> Option<String> {
     if name != "Read" {
         return None;
@@ -14,22 +12,18 @@ pub(super) fn repair_whitespace_stalled_read_args(
     if trailing_whitespace < BUFFERED_READ_REPAIR_TRAILING_WHITESPACE_BYTES {
         return None;
     }
-    parse_read_args_candidate(trimmed, call_id).or_else(|| {
+    parse_read_args_candidate(trimmed).or_else(|| {
         let with_brace = format!("{trimmed}}}");
-        parse_read_args_candidate(&with_brace, call_id)
+        parse_read_args_candidate(&with_brace)
     })
 }
 
-fn parse_read_args_candidate(args: &str, call_id: Option<&str>) -> Option<String> {
+fn parse_read_args_candidate(args: &str) -> Option<String> {
     let parsed: serde_json::Value = serde_json::from_str(args).ok()?;
     if !is_valid_read_args(&parsed) {
         return None;
     }
-    Some(sanitize_read_args(
-        "Read",
-        &serde_json::to_string(&parsed).ok()?,
-        call_id,
-    ))
+    serde_json::to_string(&parsed).ok()
 }
 
 fn is_valid_read_args(value: &serde_json::Value) -> bool {
