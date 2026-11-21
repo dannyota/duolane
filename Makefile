@@ -50,9 +50,9 @@ docs: ## Check Markdown with Prettier and markdownlint; needs npm ci --ignore-sc
 	$(BIN)/prettier --check "**/*.md"
 	$(BIN)/markdownlint-cli2 "**/*.md"
 
-crate-age: ## Fail on crate versions newer than 72 hours since BASE_REF, default origin/main
+crate-age: ## Fail on crate versions newer than 72 hours since BASE_REF, default origin/master
 	python3 -I scripts/test/check-crate-age-test.py
-	python3 -I scripts/check-crate-age.py "$${BASE_REF:-origin/main}"
+	python3 -I scripts/check-crate-age.py "$${BASE_REF:-origin/master}"
 
 tools-outdated: ## Fail when a pinned tool or action is behind its latest release
 	bash scripts/tools-outdated.sh
