@@ -23,6 +23,7 @@ use crate::providers::codex::translate::reasoning_signature::{
 use crate::providers::translate_shared::wrap_reasoning;
 use crate::registry::ANTHROPIC_STYLE_ALIASES;
 
+pub mod accounts;
 mod usage;
 #[cfg(test)]
 pub(crate) use usage::observe as observe_usage_for_test;

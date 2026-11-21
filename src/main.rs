@@ -68,6 +68,11 @@ enum Commands {
         #[command(subcommand)]
         command: ProviderGroup,
     },
+    #[command(about = "Manage Claude accounts")]
+    ClaudeAccounts {
+        #[command(subcommand)]
+        command: ClaudeAccountsCommand,
+    },
     #[command(
         about = "Start Claude Code through the intercept proxy",
         disable_help_flag = true
@@ -99,6 +104,14 @@ enum ProviderGroup {
         #[command(subcommand)]
         command: duolane::provider::AuthCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ClaudeAccountsCommand {
+    #[command(about = "List Claude accounts")]
+    List,
+    #[command(about = "Select a Claude account")]
+    Use { name: String },
 }
 
 fn main() -> Result<()> {
@@ -265,6 +278,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Codex { command } => run_provider_cli("codex", command),
+        Commands::ClaudeAccounts { command } => run_claude_accounts(command),
         Commands::Claude { args } => duolane::intercept::run_claude(args),
         Commands::Intercept { command } => match command {
             InterceptCommand::Setup => duolane::intercept::setup(),
@@ -408,6 +422,20 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
     }
 }
 
+fn run_claude_accounts(command: ClaudeAccountsCommand) -> Result<()> {
+    match command {
+        ClaudeAccountsCommand::List => {
+            for (name, selected) in duolane::providers::anthropic::accounts::list()? {
+                println!("{} {}", if selected { "*" } else { " " }, name);
+            }
+            Ok(())
+        }
+        ClaudeAccountsCommand::Use { name } => {
+            duolane::providers::anthropic::accounts::select(&name)
+        }
+    }
+}
+
 fn print_models(registry: &Registry) {
     let provider = "codex";
     if let Some(hint) = registry.signed_out().get(provider) {
@@ -498,6 +526,27 @@ mod tests {
         let cli = Cli::try_parse_from(["duolane", "demo"]).unwrap();
 
         assert!(matches!(cli.command, Some(Commands::Demo)));
+    }
+
+    #[test]
+    fn claude_accounts_commands_parse() {
+        let cli = Cli::try_parse_from(["duolane", "claude-accounts", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ClaudeAccounts {
+                command: ClaudeAccountsCommand::List
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["duolane", "claude-accounts", "use", "work"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ClaudeAccounts {
+                command: ClaudeAccountsCommand::Use { ref name }
+            }) if name == "work"
+        ));
+
+        assert!(Cli::try_parse_from(["duolane", "claude-accounts", "use"]).is_err());
     }
 
     #[tokio::test]

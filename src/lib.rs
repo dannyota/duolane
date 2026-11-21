@@ -17,6 +17,8 @@ pub mod providers;
 pub mod registry;
 pub mod request_identity;
 pub mod retry;
+#[cfg(unix)]
+pub(crate) mod secure_fs;
 pub mod server;
 pub mod session;
 pub mod text;

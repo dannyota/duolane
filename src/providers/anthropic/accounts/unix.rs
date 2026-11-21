@@ -1,0 +1,196 @@
+use super::{MAX_CONFIG_BYTES, parse_accounts};
+use crate::secure_fs::{bounded, checked, fingerprint, open_checked_directory, write_atomic};
+use anyhow::{Context, Result, ensure};
+use rustix::fs::{self, FileType, Mode, OFlags};
+use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::path::{Path, PathBuf};
+
+const SELECTOR_LIMIT: u64 = 256;
+const SELECTOR: &str = "claude-account";
+
+pub struct AccountSource {
+    path: PathBuf,
+}
+
+impl AccountSource {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn accounts() -> Result<Vec<(String, PathBuf)>> {
+    let Some((dir, _)) = open_checked_directory(&crate::paths::config_dir(), false, false)? else {
+        return Ok(Vec::new());
+    };
+    let fd = match fs::openat(
+        &dir,
+        "claude-accounts.json",
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NOCTTY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let file = File::from(fd);
+    checked(&file, FileType::RegularFile, Mode::WGRP | Mode::WOTH)?;
+    parse_accounts(&bounded(file, MAX_CONFIG_BYTES as u64)?)
+}
+
+fn source(name: &str, accounts: &[(String, PathBuf)]) -> Result<AccountSource> {
+    let path = accounts
+        .iter()
+        .find(|(account, _)| account == name)
+        .map(|(_, path)| path)
+        .context("unknown Claude account")?;
+    let (_, resolved) = open_checked_directory(path, false, true)?
+        .context("Claude account directory does not exist")?;
+    Ok(AccountSource { path: resolved })
+}
+
+fn state_dir(create: bool) -> Result<Option<File>> {
+    Ok(open_checked_directory(&crate::paths::state_dir(), create, true)?.map(|(dir, _)| dir))
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Selection {
+    name: String,
+    fingerprint: String,
+}
+
+fn selected_name(dir: Option<&File>, snapshot: &[(String, PathBuf)]) -> Result<Option<String>> {
+    let Some(dir) = dir else {
+        return Ok(None);
+    };
+    let fd = match fs::openat(
+        dir,
+        SELECTOR,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NOCTTY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let file = File::from(fd);
+    checked(&file, FileType::RegularFile, Mode::RWXG | Mode::RWXO)?;
+    let selected: Selection = serde_json::from_slice(&bounded(file, SELECTOR_LIMIT)?)?;
+    let source = source(&selected.name, snapshot)?;
+    ensure!(
+        selected.fingerprint == fingerprint(source.path()),
+        "Claude account path changed"
+    );
+    Ok(Some(selected.name))
+}
+
+pub fn select(name: &str) -> Result<()> {
+    let accounts = accounts()?;
+    let source = source(name, &accounts)?;
+    let data = serde_json::to_vec(&Selection {
+        name: name.into(),
+        fingerprint: fingerprint(source.path()),
+    })?;
+    ensure!(
+        data.len() <= SELECTOR_LIMIT as usize,
+        "selection exceeds size limit"
+    );
+    let dir = state_dir(true)
+        .context(
+            "unsafe state directory; run `duolane claude-accounts use <name>` after fixing it",
+        )?
+        .context("state directory missing")?;
+    write_atomic(&dir, SELECTOR, ".claude-account-", &data)
+}
+
+pub fn list() -> Result<Vec<(String, bool)>> {
+    let dir = state_dir(false)
+        .context("Claude account selection invalid; run `duolane claude-accounts use <name>`")?;
+    let accounts = accounts()?;
+    let selected = selected_name(dir.as_ref(), &accounts)
+        .context("Claude account selection invalid; run `duolane claude-accounts use <name>`")?;
+    Ok(accounts
+        .into_iter()
+        .map(|(name, _)| {
+            let is_selected = selected.as_deref() == Some(name.as_str());
+            (name, is_selected)
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    fn write_accounts(names: &[(&str, PathBuf)]) {
+        let config = crate::paths::config_dir();
+        let entries: Vec<String> = names
+            .iter()
+            .map(|(name, path)| format!("{:?}:{:?}", name, path))
+            .collect();
+        let json = format!("{{{}}}", entries.join(","));
+        std::fs::write(config.join("claude-accounts.json"), json).unwrap();
+        std::fs::set_permissions(
+            config.join("claude-accounts.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn select_then_list_reports_the_selection_in_file_order() {
+        let config = crate::paths::config_dir();
+        let work = config.join("work");
+        let personal = config.join("personal");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&personal).unwrap();
+        write_accounts(&[("work", work), ("personal", personal)]);
+
+        select("work").unwrap();
+        assert_eq!(
+            list().unwrap(),
+            vec![("work".to_string(), true), ("personal".to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn select_rejects_an_unknown_account() {
+        let config = crate::paths::config_dir();
+        let work = config.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        write_accounts(&[("work", work)]);
+
+        assert!(select("missing").is_err());
+    }
+
+    #[test]
+    fn select_rejects_a_symlinked_account_directory() {
+        let config = crate::paths::config_dir();
+        let real = config.join("real");
+        let link = config.join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        symlink(&real, &link).unwrap();
+        write_accounts(&[("work", link)]);
+
+        assert!(select("work").is_err());
+    }
+
+    #[test]
+    fn list_rejects_a_selection_with_a_wrong_fingerprint() {
+        let config = crate::paths::config_dir();
+        let work = config.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        write_accounts(&[("work", work)]);
+        select("work").unwrap();
+
+        let selector = crate::paths::state_dir().join(SELECTOR);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&selector).unwrap()).unwrap();
+        value["fingerprint"] = serde_json::Value::String("wrong".into());
+        std::fs::write(&selector, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        assert!(list().is_err());
+    }
+}

@@ -117,6 +117,32 @@ The reserved `default` profile keeps the existing Codex lookup. Profile
 selection is stored now, but Codex requests still use `default` until request
 binding is available. duolane never switches profiles automatically.
 
+## Claude accounts
+
+On Unix, add named Claude Code configuration directories to
+`claude-accounts.json` in the duolane configuration directory. Accounts keep the
+order they appear in the file. Paths must be absolute, and a directory itself
+must not be a symlink.
+
+```json
+{
+  "work": "/Users/example/.claude-work",
+  "personal": "/Users/example/.claude-personal"
+}
+```
+
+Log in to each account once with
+`CLAUDE_CONFIG_DIR=/Users/example/.claude-work claude` and `/login`. List
+accounts and select one manually:
+
+```bash
+duolane claude-accounts list
+duolane claude-accounts use work
+```
+
+Account selection is stored now, but Claude requests still use the login Claude
+Code sends until account binding is available.
+
 ## Intercept mode
 
 Intercept mode keeps Claude Code talking to `api.anthropic.com`, so
@@ -159,16 +185,20 @@ Pick a Claude model before you run Claude Code without duolane.
 
 ## Commands
 
-| Command                     | Purpose                                       |
-| --------------------------- | --------------------------------------------- |
-| `duolane serve`             | Start the proxy and its terminal dashboard    |
-| `duolane monitor`           | Attach a dashboard to a running proxy         |
-| `duolane models`            | List the models you can use                   |
-| `duolane codex auth status` | Check the Codex login                         |
-| `duolane claude [args]`     | Start Claude Code through the intercept proxy |
-| `duolane intercept setup`   | Route every Claude Code session through it    |
-| `duolane intercept cleanup` | Remove the intercept settings and files       |
-| `duolane intercept renew`   | Replace the intercept certificate             |
+| Command                              | Purpose                                       |
+| ------------------------------------ | --------------------------------------------- |
+| `duolane serve`                      | Start the proxy and its terminal dashboard    |
+| `duolane monitor`                    | Attach a dashboard to a running proxy         |
+| `duolane models`                     | List the models you can use                   |
+| `duolane codex auth status`          | Check the Codex login                         |
+| `duolane codex auth list`            | List Codex profiles                           |
+| `duolane codex auth use <name>`      | Select a Codex profile                        |
+| `duolane claude-accounts list`       | List Claude accounts                          |
+| `duolane claude-accounts use <name>` | Select a Claude account                       |
+| `duolane claude [args]`              | Start Claude Code through the intercept proxy |
+| `duolane intercept setup`            | Route every Claude Code session through it    |
+| `duolane intercept cleanup`          | Remove the intercept settings and files       |
+| `duolane intercept renew`            | Replace the intercept certificate             |
 
 ## How it works
 
