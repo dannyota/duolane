@@ -30,6 +30,26 @@ impl AuthSource {
             Self::Default { path } | Self::Named { path, .. } => path,
         }
     }
+    pub(crate) fn load_auth(
+        &self,
+    ) -> Result<Option<crate::providers::codex::auth::token_store::StoredAuth>> {
+        use crate::providers::codex::auth::token_store::{
+            CodexCliAuthStore, CodexTokenStore, parse_auth,
+        };
+        match self {
+            Self::Default { path } => {
+                CodexTokenStore::new(CodexCliAuthStore::new(path.clone())).load_auth()
+            }
+            Self::Named {
+                home,
+                auth_name,
+                path,
+            } => match named_auth(home, auth_name)? {
+                Some(data) => parse_auth(&data, path),
+                None => Ok(None),
+            },
+        }
+    }
     pub fn login_exists(&self) -> Result<bool> {
         match self {
             Self::Default { path } => default_login_exists(path),

@@ -96,6 +96,17 @@ mod unix {
     }
 
     #[test]
+    fn status_uses_selected_profile() {
+        let f = Fixture::new();
+        assert!(f.select().status.success());
+        let output = f.run(&["codex", "auth", "status"]);
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains("Profile: work"));
+        assert!(text.contains("Account: toy-account"));
+    }
+
+    #[test]
     fn changed_path_and_unsafe_state_never_fall_back() {
         let f = Fixture::new();
         assert!(f.select().status.success());

@@ -173,6 +173,7 @@ async fn dispatch_image_request(
         monitor.provider_selected(&req_id, "codex", &model, None);
     }
     let context = RequestContext {
+        codex_profile: None,
         recovery_budget: Default::default(),
         req_id: req_id.clone(),
         session_id,

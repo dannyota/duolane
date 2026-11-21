@@ -424,6 +424,7 @@ async fn dispatch_request(
     }
 
     let context = RequestContext {
+        codex_profile: None,
         recovery_budget: Default::default(),
         req_id: req_id.clone(),
         session_id,

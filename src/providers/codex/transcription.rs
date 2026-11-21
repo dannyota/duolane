@@ -81,6 +81,10 @@ impl CodexTranscriptionBackend {
         input: PreparedTranscription,
         ctx: crate::provider::RequestContext,
     ) -> Response {
+        let ctx = match super::profile_binding::bind_codex_profile(&self.client, ctx).await {
+            Ok(ctx) => ctx,
+            Err(response) => return response,
+        };
         let _permit = match self.limiter.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -371,6 +375,7 @@ mod tests {
 
     fn context() -> crate::provider::RequestContext {
         crate::provider::RequestContext {
+            codex_profile: None,
             recovery_budget: Default::default(),
             req_id: "transcription-test".to_string(),
             session_id: None,

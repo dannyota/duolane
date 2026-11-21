@@ -775,6 +775,7 @@ mod tests {
 
     fn passthrough_context() -> RequestContext {
         RequestContext {
+            codex_profile: None,
             recovery_budget: Default::default(),
             req_id: "req-timeout".into(),
             session_id: None,

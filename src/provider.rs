@@ -61,6 +61,7 @@ pub trait CliHandlers: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct RequestContext {
+    pub codex_profile: Option<std::sync::Arc<crate::providers::codex::CodexProfileBinding>>,
     pub recovery_budget: crate::providers::codex::recovery::RecoveryBudget,
     pub req_id: String,
     pub session_id: Option<String>,

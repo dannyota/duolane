@@ -123,6 +123,10 @@ impl CodexImagesBackend {
         prepared: PreparedImageRequest,
         ctx: crate::provider::RequestContext,
     ) -> axum::response::Response {
+        let ctx = match super::profile_binding::bind_codex_profile(&self.client, ctx).await {
+            Ok(ctx) => ctx,
+            Err(response) => return response,
+        };
         use axum::response::IntoResponse;
 
         let _permit = match self.limiter.clone().try_acquire_owned() {
@@ -442,6 +446,7 @@ mod tests {
                 ImageOperation::Generation,
                 prepare_json_request(ImageOperation::Generation, br#"{"prompt":"x"}"#).unwrap(),
                 crate::provider::RequestContext {
+                    codex_profile: None,
                     recovery_budget: Default::default(),
                     req_id: "oversized".into(),
                     session_id: None,
@@ -502,6 +507,7 @@ mod tests {
                 ImageOperation::Generation,
                 prepared,
                 crate::provider::RequestContext {
+                    codex_profile: None,
                     recovery_budget: Default::default(),
                     req_id: "image-test".into(),
                     session_id: None,

@@ -300,6 +300,7 @@ mod tests {
             expires: u64::MAX,
         };
         let ctx = RequestContext {
+            codex_profile: None,
             recovery_budget: Default::default(),
             req_id: "r".into(),
             session_id: Some("s".into()),
@@ -329,6 +330,7 @@ mod tests {
             expires: u64::MAX,
         };
         let ctx = RequestContext {
+            codex_profile: None,
             recovery_budget: Default::default(),
             req_id: "r".into(),
             session_id: None,
@@ -365,6 +367,7 @@ mod tests {
             expires: u64::MAX,
         };
         let ctx = RequestContext {
+            codex_profile: None,
             recovery_budget: Default::default(),
             req_id: "r".into(),
             session_id: None,
@@ -386,6 +389,7 @@ mod tests {
             expires: u64::MAX,
         };
         let ctx = RequestContext {
+            codex_profile: None,
             recovery_budget: Default::default(),
             req_id: "r".into(),
             session_id: Some("bad\nsession".into()),
@@ -448,6 +452,7 @@ mod tests {
             expires: u64::MAX,
         };
         let ctx = RequestContext {
+            codex_profile: None,
             recovery_budget: Default::default(),
             req_id: "r".into(),
             session_id: None,

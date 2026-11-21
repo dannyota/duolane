@@ -13,6 +13,11 @@ impl AuthSource {
             Self::Default { path } => path,
         }
     }
+    pub(crate) fn load_auth(
+        &self,
+    ) -> Result<Option<crate::providers::codex::auth::token_store::StoredAuth>> {
+        CodexTokenStore::new(CodexCliAuthStore::new(self.path().to_path_buf())).load_auth()
+    }
     pub fn login_exists(&self) -> Result<bool> {
         Ok(
             CodexTokenStore::new(CodexCliAuthStore::new(self.path().to_path_buf()))

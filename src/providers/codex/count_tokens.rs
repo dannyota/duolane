@@ -48,7 +48,7 @@ impl CodexProvider {
                 service_tier: resolved.service_tier.clone(),
                 model: resolved.model.clone(),
                 use_responses_lite,
-                reasoning_account: self.client.auth_manager().reasoning_account().await,
+                reasoning_account: self.client.auth_manager_for(&ctx).reasoning_account().await,
             },
         ) {
             Ok(t) => t,

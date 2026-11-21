@@ -1,7 +1,5 @@
 use crate::provider::CliHandlers;
 
-use super::auth::token_store::file_store;
-
 pub fn list_profiles() -> anyhow::Result<()> {
     for (name, login, selected) in super::profiles::list()? {
         println!(
@@ -34,8 +32,9 @@ impl CliHandlers for CodexCli {
     }
 
     fn status(&self) -> Result<(), anyhow::Error> {
-        let store = file_store();
-        let stored = store.load_auth()?;
+        let (name, source) = super::profiles::resolve_selected()?;
+        let stored = source.load_auth()?;
+        let path = source.path().display();
         match stored {
             Some(auth) => {
                 println!(
@@ -43,13 +42,10 @@ impl CliHandlers for CodexCli {
                     crate::text::terminal_text(auth.account_id.as_deref().unwrap_or("(none)"))
                 );
                 println!("{}", format_expiry(auth.expires, now_ms()));
-                println!("Storage: {} (Codex CLI)", store.auth_path());
+                println!("Storage: {} (Codex CLI), Profile: {name}", path);
                 Ok(())
             }
-            None => anyhow::bail!(
-                "No Codex credentials. Run `codex login` to create {}",
-                store.auth_path()
-            ),
+            None => anyhow::bail!("No Codex credentials. Run `codex login` to create {}", path),
         }
     }
 

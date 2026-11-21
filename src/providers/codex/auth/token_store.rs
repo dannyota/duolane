@@ -100,43 +100,7 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
                 ));
             }
         };
-        let doc: serde_json::Value = serde_json::from_slice(&raw)
-            .map_err(|e| anyhow::anyhow!("{} is not valid JSON: {e}", self.path.display()))?;
-        let Some(tokens) = doc.get("tokens") else {
-            return Ok(None);
-        };
-        let access = access_token(&doc).unwrap_or_default().to_string();
-        if access.is_empty() {
-            return Ok(None);
-        }
-        let refresh = tokens
-            .get("refresh_token")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let account_id = tokens
-            .get("account_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .or_else(|| {
-                let probe = TokenResponse {
-                    id_token: tokens
-                        .get("id_token")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                    access_token: access.clone(),
-                    refresh_token: refresh.clone(),
-                    expires_in: None,
-                };
-                extract_account_id(&probe)
-            });
-        let expires = token_exp_ms(&access).unwrap_or_else(|| now_ms() + 3_600_000);
-        Ok(Some(StoredAuth {
-            access,
-            refresh,
-            expires,
-            account_id,
-        }))
+        parse_auth(&raw, &self.path)
     }
 
     fn save(&self, value: StoredAuth) -> Result<(), anyhow::Error> {
@@ -149,30 +113,7 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
                 return Err(anyhow::anyhow!("failed to read {}: {err}", path.display()));
             }
         };
-        if !doc.is_object() {
-            doc = serde_json::json!({});
-        }
-        let obj = doc.as_object_mut().expect("doc is a json object");
-        let tokens = obj.entry("tokens").or_insert_with(|| serde_json::json!({}));
-        if !tokens.is_object() {
-            *tokens = serde_json::json!({});
-        }
-        let tokens = tokens.as_object_mut().expect("tokens is a json object");
-        tokens.insert(
-            "access_token".into(),
-            serde_json::Value::String(value.access),
-        );
-        tokens.insert(
-            "refresh_token".into(),
-            serde_json::Value::String(value.refresh),
-        );
-        if let Some(account_id) = value.account_id {
-            tokens.insert("account_id".into(), serde_json::Value::String(account_id));
-        }
-        obj.insert(
-            "last_refresh".into(),
-            serde_json::Value::String(now_rfc3339()),
-        );
+        update_document(&mut doc, value);
         write_atomic(&path, &serde_json::to_vec_pretty(&doc)?)
     }
 
@@ -231,7 +172,118 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
     }
 }
 
-pub type DefaultCodexAuthStore = CodexCliAuthStore;
+pub(crate) fn update_document(doc: &mut serde_json::Value, value: StoredAuth) {
+    if !doc.is_object() {
+        *doc = serde_json::json!({});
+    }
+    let obj = doc.as_object_mut().expect("doc is a json object");
+    let tokens = obj.entry("tokens").or_insert_with(|| serde_json::json!({}));
+    if !tokens.is_object() {
+        *tokens = serde_json::json!({});
+    }
+    let tokens = tokens.as_object_mut().expect("tokens is a json object");
+    tokens.insert(
+        "access_token".into(),
+        serde_json::Value::String(value.access),
+    );
+    tokens.insert(
+        "refresh_token".into(),
+        serde_json::Value::String(value.refresh),
+    );
+    if let Some(account_id) = value.account_id {
+        tokens.insert("account_id".into(), serde_json::Value::String(account_id));
+    }
+    obj.insert(
+        "last_refresh".into(),
+        serde_json::Value::String(now_rfc3339()),
+    );
+}
+
+pub(crate) fn parse_auth(raw: &[u8], path: &Path) -> Result<Option<StoredAuth>, anyhow::Error> {
+    let doc: serde_json::Value = serde_json::from_slice(raw)
+        .map_err(|e| anyhow::anyhow!("{} is not valid JSON: {e}", path.display()))?;
+    let Some(tokens) = doc.get("tokens") else {
+        return Ok(None);
+    };
+    let access = access_token(&doc).unwrap_or_default().to_string();
+    if access.is_empty() {
+        return Ok(None);
+    }
+    let refresh = tokens
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let account_id = tokens
+        .get("account_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            let probe = TokenResponse {
+                id_token: tokens
+                    .get("id_token")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                access_token: access.clone(),
+                refresh_token: refresh.clone(),
+                expires_in: None,
+            };
+            extract_account_id(&probe)
+        });
+    let expires = token_exp_ms(&access).unwrap_or_else(|| now_ms() + 3_600_000);
+    Ok(Some(StoredAuth {
+        access,
+        refresh,
+        expires,
+        account_id,
+    }))
+}
+
+pub enum CodexAuthStore {
+    Path(CodexCliAuthStore),
+    #[cfg(unix)]
+    Home(super::named_home::NamedHomeAuthStore),
+}
+
+impl AuthStorage<StoredAuth> for CodexAuthStore {
+    fn load(&self) -> Result<Option<StoredAuth>, anyhow::Error> {
+        match self {
+            Self::Path(store) => store.load(),
+            #[cfg(unix)]
+            Self::Home(store) => store.load(),
+        }
+    }
+    fn save(&self, value: StoredAuth) -> Result<(), anyhow::Error> {
+        match self {
+            Self::Path(store) => store.save(value),
+            #[cfg(unix)]
+            Self::Home(store) => store.save(value),
+        }
+    }
+    fn clear(&self) -> Result<(), anyhow::Error> {
+        match self {
+            Self::Path(store) => store.clear(),
+            #[cfg(unix)]
+            Self::Home(store) => store.clear(),
+        }
+    }
+    fn path(&self) -> String {
+        match self {
+            Self::Path(store) => store.path(),
+            #[cfg(unix)]
+            Self::Home(store) => store.path(),
+        }
+    }
+    fn lock_for_refresh(&self) -> Result<Option<File>, anyhow::Error> {
+        match self {
+            Self::Path(store) => store.lock_for_refresh(),
+            #[cfg(unix)]
+            Self::Home(store) => store.lock_for_refresh(),
+        }
+    }
+}
+
+pub type DefaultCodexAuthStore = CodexAuthStore;
 
 pub fn codex_auth_file() -> PathBuf {
     if let Some(explicit) = std::env::var_os("DUOLANE_CODEX_AUTH_FILE") {
@@ -247,7 +299,9 @@ pub fn codex_auth_file() -> PathBuf {
 }
 
 pub fn file_store() -> CodexTokenStore<DefaultCodexAuthStore> {
-    CodexTokenStore::new(CodexCliAuthStore::new(codex_auth_file()))
+    CodexTokenStore::new(CodexAuthStore::Path(CodexCliAuthStore::new(
+        codex_auth_file(),
+    )))
 }
 
 fn now_ms() -> u64 {

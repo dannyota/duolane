@@ -48,6 +48,10 @@ impl CodexNativeBackend {
         prepared: NativePrepared,
         ctx: RequestContext,
     ) -> Response {
+        let ctx = match super::profile_binding::bind_codex_profile(&self.client, ctx).await {
+            Ok(ctx) => ctx,
+            Err(response) => return response,
+        };
         prepared.apply(&mut body);
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &prepared.model);
@@ -629,6 +633,7 @@ mod tests {
 
     fn observer_context() -> RequestContext {
         RequestContext {
+            codex_profile: None,
             recovery_budget: Default::default(),
             req_id: "native-test".into(),
             session_id: None,

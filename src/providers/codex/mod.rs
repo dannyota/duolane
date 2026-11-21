@@ -24,6 +24,9 @@ pub mod images;
 mod live_completion;
 mod live_response;
 pub mod native;
+mod profile_binding;
+mod provider_init;
+pub use profile_binding::CodexProfileBinding;
 pub mod profiles;
 #[cfg(test)]
 mod provider_test_support;
@@ -83,20 +86,6 @@ pub struct CodexProvider {
     client: Arc<CodexHttpClient>,
 }
 
-impl Default for CodexProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CodexProvider {
-    pub fn new() -> Self {
-        Self {
-            client: Arc::new(CodexHttpClient::new()),
-        }
-    }
-}
-
 impl CodexProvider {
     async fn handle_messages_inner(
         &self,
@@ -104,6 +93,10 @@ impl CodexProvider {
         ctx: RequestContext,
         conversation_identity: Option<ConversationIdentity>,
     ) -> Response {
+        let ctx = match profile_binding::bind_codex_profile(&self.client, ctx).await {
+            Ok(ctx) => ctx,
+            Err(response) => return response,
+        };
         let model = body.model.as_deref().unwrap_or("opus");
         let mut resolved =
             resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
@@ -249,7 +242,7 @@ impl CodexProvider {
                 service_tier: resolved.service_tier.clone(),
                 model: resolved.model.clone(),
                 use_responses_lite,
-                reasoning_account: self.client.auth_manager().reasoning_account().await,
+                reasoning_account: self.client.auth_manager_for(&ctx).reasoning_account().await,
             },
         ) {
             Ok(t) => t,
@@ -684,6 +677,10 @@ impl Provider for CodexProvider {
     }
 
     async fn handle_count_tokens(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
+        let ctx = match profile_binding::bind_codex_profile(&self.client, ctx).await {
+            Ok(ctx) => ctx,
+            Err(response) => return response,
+        };
         self.count_tokens_response(body, ctx).await
     }
 }
@@ -1004,6 +1001,7 @@ mod tests {
                 "message".to_string(),
                 &request.model,
                 RequestContext {
+                    codex_profile: None,
                     recovery_budget: budget,
                     ..live_test_context(session_id)
                 },

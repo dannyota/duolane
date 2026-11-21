@@ -20,7 +20,7 @@ impl CodexHttpClient {
     ) -> Result<reqwest::Response, CodexError> {
         let url = format!("{}/transcribe", base_url.trim_end_matches('/'));
         let mut auth = self
-            .auth_manager
+            .auth_manager_for(ctx)
             .get_auth()
             .await
             .map_err(|error| CodexError {
@@ -41,7 +41,7 @@ impl CodexHttpClient {
                 ctx.recovery_budget.start();
                 drop(response);
                 auth = self
-                    .auth_manager
+                    .auth_manager_for(ctx)
                     .force_refresh(&auth.access)
                     .await
                     .map_err(auth_refresh_error)?;
@@ -129,7 +129,7 @@ impl CodexHttpClient {
             operation.upstream_path()
         );
         let mut auth = self
-            .auth_manager
+            .auth_manager_for(ctx)
             .get_auth()
             .await
             .map_err(|error| CodexError {
@@ -152,7 +152,7 @@ impl CodexHttpClient {
                 ctx.recovery_budget.start();
                 drop(response);
                 auth = self
-                    .auth_manager
+                    .auth_manager_for(ctx)
                     .force_refresh(&auth.access)
                     .await
                     .map_err(auth_refresh_error)?;
@@ -216,7 +216,7 @@ impl CodexHttpClient {
             )
             .await?;
         let mut auth = self
-            .auth_manager
+            .auth_manager_for(ctx)
             .get_auth()
             .await
             .map_err(|err| CodexError {
@@ -242,7 +242,7 @@ impl CodexHttpClient {
                 refresh_attempted = true;
                 ctx.recovery_budget.start();
                 drop(response);
-                auth = self.refreshed_auth(&auth).await.inspect_err(|error| {
+                auth = self.refreshed_auth(&auth, ctx).await.inspect_err(|error| {
                     if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
                         ctx.recovery_budget.cancel_unspent_start();
                     }
@@ -301,14 +301,18 @@ impl CodexHttpClient {
         body: &SearchRequest,
         ctx: &RequestContext,
     ) -> Result<SearchResponse, CodexError> {
-        let mut auth = self.auth_manager.get_auth().await.map_err(|e| CodexError {
-            status: 401,
-            message: "Auth error".to_string(),
-            detail: Some(e.to_string()),
-            retry_after: None,
-            usage_limit: None,
-            origin: CodexErrorOrigin::Auth,
-        })?;
+        let mut auth = self
+            .auth_manager_for(ctx)
+            .get_auth()
+            .await
+            .map_err(|e| CodexError {
+                status: 401,
+                message: "Auth error".to_string(),
+                detail: Some(e.to_string()),
+                retry_after: None,
+                usage_limit: None,
+                origin: CodexErrorOrigin::Auth,
+            })?;
         let http_body = self
             .prepare_http_body(
                 body,
@@ -327,7 +331,7 @@ impl CodexHttpClient {
                 auth_refresh_attempted = true;
                 ctx.recovery_budget.start();
                 auth = self
-                    .auth_manager
+                    .auth_manager_for(ctx)
                     .force_refresh(&auth.access)
                     .await
                     .map_err(auth_refresh_error)?;

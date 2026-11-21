@@ -42,6 +42,10 @@ impl ChatCompletionsBackend {
     }
 
     pub async fn handle(&self, request: TranslatedRequest, ctx: RequestContext) -> Response {
+        let ctx = match super::profile_binding::bind_codex_profile(&self.client, ctx).await {
+            Ok(ctx) => ctx,
+            Err(response) => return response,
+        };
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &request.model);
             monitor.upstream_started(&ctx.req_id);
@@ -342,6 +346,7 @@ mod tests {
             EndpointKind::ChatCompletions,
         );
         RequestContext {
+            codex_profile: None,
             recovery_budget: Default::default(),
             req_id: "chat-test".into(),
             session_id: Some("session".into()),

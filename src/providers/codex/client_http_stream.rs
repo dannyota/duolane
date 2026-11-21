@@ -22,7 +22,7 @@ impl CodexHttpClient {
         ctx: &RequestContext,
         http_body: &CodexHttpBodyCache,
     ) -> Result<CodexHttpEventReceiver, CodexError> {
-        let mut auth = self.auth_for(&body.reasoning_account).await?;
+        let mut auth = self.auth_for(&body.reasoning_account, ctx).await?;
         let http_body = http_body
             .get_or_try_init(|| {
                 self.prepare_http_body(body, ctx.traffic.is_some(), "Failed to serialize request")
@@ -108,7 +108,7 @@ impl CodexHttpClient {
             if resp.status().as_u16() == 401 && !*auth_refresh_attempted {
                 *auth_refresh_attempted = true;
                 ctx.recovery_budget.start();
-                *auth = self.refreshed_auth(auth).await.inspect_err(|error| {
+                *auth = self.refreshed_auth(auth, ctx).await.inspect_err(|error| {
                     if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
                         ctx.recovery_budget.cancel_unspent_start();
                     }
@@ -176,7 +176,7 @@ impl CodexHttpClient {
             && self.auto_ws_max_bytes != 0
             && continuation.is_some_and(|c| c.candidate().previous_response_id.is_some())
         {
-            let auth = self.auth_for(&body.reasoning_account).await?;
+            let auth = self.auth_for(&body.reasoning_account, ctx).await?;
             if super::client_live::should_reset_websocket_pool(continuation)
                 && let Some(owner) = super::client_live::websocket_pool_owner(continuation)
             {

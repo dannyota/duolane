@@ -23,7 +23,7 @@ impl CodexHttpClient {
     ) -> Result<OwnerAwareCodexResponse, CodexError> {
         use crate::config::CodexTransport;
 
-        let mut auth = self.auth_for(&body.reasoning_account).await?;
+        let mut auth = self.auth_for(&body.reasoning_account, ctx).await?;
 
         let initial_pool_owner = websocket_pool_owner(continuation).cloned();
         if should_reset_websocket_pool(continuation)
@@ -170,7 +170,7 @@ impl CodexHttpClient {
             {
                 auth_refresh_attempted = true;
                 ctx.recovery_budget.start();
-                auth = self.refreshed_auth(&auth).await.inspect_err(|error| {
+                auth = self.refreshed_auth(&auth, ctx).await.inspect_err(|error| {
                     if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
                         ctx.recovery_budget.cancel_unspent_start();
                     }

@@ -32,6 +32,13 @@ impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
         Self::new_with_token_endpoint(store, format!("{ISSUER}/oauth/token"))
     }
 
+    #[cfg(unix)]
+    pub fn new_isolated(store: CodexTokenStore<S>) -> Self {
+        let mut manager = Self::new(store);
+        manager.refresh_lock = Arc::new(AsyncMutex::new(()));
+        manager
+    }
+
     fn new_with_token_endpoint(store: CodexTokenStore<S>, token_endpoint: String) -> Self {
         Self {
             store: Arc::new(store),

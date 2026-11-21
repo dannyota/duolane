@@ -66,6 +66,13 @@ pub(super) const IMAGE_HEADER_TIMEOUT_MS: u64 = 300_000;
 pub(super) const HTTP_RESPONSE_HEADERS_DETAIL: &str = "http_response_headers";
 pub(super) const LOOPBACK_NO_PROXY: &str = "localhost,127.0.0.0/8,::1,::ffff:127.0.0.0/104";
 
+#[cfg(unix)]
+struct ProfileManager {
+    device: u64,
+    inode: u64,
+    manager: std::sync::Arc<CodexAuthManager<DefaultCodexAuthStore>>,
+}
+
 pub struct CodexHttpClient {
     pub(super) client: reqwest::Client,
     pub(super) native_client: reqwest::Client,
@@ -73,6 +80,8 @@ pub struct CodexHttpClient {
     pub(super) websocket_proxy_config: super::websocket::WebSocketProxyConfig,
     pub(super) auto_http_fallback_enabled: bool,
     pub(super) auth_manager: CodexAuthManager<DefaultCodexAuthStore>,
+    #[cfg(unix)]
+    profile_managers: std::sync::Mutex<std::collections::HashMap<String, ProfileManager>>,
     pub(super) base_url: String,
     pub(super) header_timeout_ms: u64,
     pub(super) body_idle_timeout_ms: u64,
@@ -97,6 +106,8 @@ impl CodexHttpClient {
             websocket_proxy_config: proxy_environment.websocket_proxy_config(),
             auto_http_fallback_enabled: true,
             auth_manager: CodexAuthManager::new(file_store()),
+            #[cfg(unix)]
+            profile_managers: Default::default(),
             base_url: config::codex_base_url(CODEX_API_ENDPOINT),
             header_timeout_ms: timeout_ms,
             body_idle_timeout_ms: HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS,
@@ -121,6 +132,8 @@ impl CodexHttpClient {
             auto_http_fallback_enabled,
             client,
             auth_manager,
+            #[cfg(unix)]
+            profile_managers: Default::default(),
             base_url,
             header_timeout_ms: config::codex_header_timeout_ms(),
             body_idle_timeout_ms: HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS,
@@ -143,6 +156,8 @@ impl CodexHttpClient {
             auto_http_fallback_enabled: true,
             client,
             auth_manager: CodexAuthManager::new(file_store()),
+            #[cfg(unix)]
+            profile_managers: Default::default(),
             base_url,
             header_timeout_ms,
             body_idle_timeout_ms,
@@ -151,32 +166,97 @@ impl CodexHttpClient {
         }
     }
 
+    pub fn manager_for_source(
+        &self,
+        source: super::profiles::AuthSource,
+    ) -> anyhow::Result<Option<std::sync::Arc<CodexAuthManager<DefaultCodexAuthStore>>>> {
+        match source {
+            super::profiles::AuthSource::Default { .. } => Ok(None),
+            #[cfg(unix)]
+            super::profiles::AuthSource::Named { home, path, .. } => {
+                use super::auth::token_store::{CodexAuthStore, CodexTokenStore};
+                use std::os::unix::ffi::OsStrExt;
+                use std::os::unix::fs::MetadataExt;
+                let metadata = home.metadata()?;
+                let digest =
+                    ring::digest::digest(&ring::digest::SHA256, path.as_os_str().as_bytes());
+                let key: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+                let mut managers = self
+                    .profile_managers
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("profile manager lock poisoned"))?;
+                if let Some(entry) = managers.get(&key)
+                    && entry.device == metadata.dev()
+                    && entry.inode == metadata.ino()
+                {
+                    return Ok(Some(entry.manager.clone()));
+                }
+                if managers.len() >= 16
+                    && let Some(old) = managers.keys().next().cloned()
+                {
+                    managers.remove(&old);
+                }
+                let store = super::auth::named_home::NamedHomeAuthStore::new(
+                    std::sync::Arc::new(home),
+                    path,
+                );
+                let manager = std::sync::Arc::new(CodexAuthManager::new_isolated(
+                    CodexTokenStore::new(CodexAuthStore::Home(store)),
+                ));
+                managers.insert(
+                    key,
+                    ProfileManager {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                        manager: manager.clone(),
+                    },
+                );
+                Ok(Some(manager))
+            }
+        }
+    }
+
     pub fn auth_manager(&self) -> &CodexAuthManager<DefaultCodexAuthStore> {
         &self.auth_manager
+    }
+
+    pub(super) fn auth_manager_for<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+    ) -> &'a CodexAuthManager<DefaultCodexAuthStore> {
+        ctx.codex_profile
+            .as_ref()
+            .map_or(&self.auth_manager, |binding| &binding.manager)
     }
 
     pub(super) async fn auth_for(
         &self,
         account: &ReasoningAccount,
+        ctx: &RequestContext,
     ) -> Result<StoredAuth, CodexError> {
-        let auth = self.auth_manager.get_auth().await.map_err(|e| CodexError {
-            status: 401,
-            message: "Auth error".to_string(),
-            detail: Some(e.to_string()),
-            retry_after: None,
-            usage_limit: None,
-            origin: CodexErrorOrigin::Auth,
-        })?;
+        let auth = self
+            .auth_manager_for(ctx)
+            .get_auth()
+            .await
+            .map_err(|e| CodexError {
+                status: 401,
+                message: "Auth error".to_string(),
+                detail: Some(e.to_string()),
+                retry_after: None,
+                usage_limit: None,
+                origin: CodexErrorOrigin::Auth,
+            })?;
         bind_account(account, auth)
     }
 
     pub(super) async fn refreshed_auth(
         &self,
         current: &StoredAuth,
+        ctx: &RequestContext,
     ) -> Result<StoredAuth, CodexError> {
         let account = ReasoningAccount::new(current.account_id.as_deref());
         let auth = self
-            .auth_manager
+            .auth_manager_for(ctx)
             .force_refresh(&current.access)
             .await
             .map_err(auth_refresh_error)?;
@@ -283,4 +363,60 @@ pub(super) fn log_buffered_retry_exhausted(
     fields.insert("origin".into(), serde_json::json!(origin));
     fields.insert("reason".into(), serde_json::json!(reason));
     create_logger("codex").warn("buffered_transport_retry_exhausted", Some(fields));
+}
+
+#[cfg(all(test, unix))]
+mod profile_manager_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn auth_uses_manager_bound_to_context() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let client = CodexHttpClient::new();
+        let source = super::super::profiles::AuthSource::Named {
+            home: std::fs::File::open(dir.path()).unwrap(),
+            auth_name: "auth.json",
+            path: dir.path().join("auth.json"),
+        };
+        let manager = client.manager_for_source(source).unwrap().unwrap();
+        let mut auth = super::super::client_test_support::http_test_auth();
+        auth.account_id = Some("named".into());
+        manager.set_test_auth(auth);
+        let mut ctx = super::super::client_test_support::http_test_context();
+        ctx.codex_profile = Some(Arc::new(super::super::CodexProfileBinding {
+            name: "named".into(),
+            fingerprint: "test".into(),
+            manager,
+        }));
+        assert!(
+            client
+                .auth_for(&ReasoningAccount::new(Some("named")), &ctx)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn managers_are_reused_only_for_the_same_fingerprint() {
+        let first = tempfile::TempDir::new().unwrap();
+        let second = tempfile::TempDir::new().unwrap();
+        let source = |dir: &tempfile::TempDir| super::super::profiles::AuthSource::Named {
+            home: std::fs::File::open(dir.path()).unwrap(),
+            auth_name: "auth.json",
+            path: dir.path().join("auth.json"),
+        };
+        let client = CodexHttpClient::new();
+        let a = client.manager_for_source(source(&first)).unwrap().unwrap();
+        let b = client.manager_for_source(source(&first)).unwrap().unwrap();
+        let c = client.manager_for_source(source(&second)).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(!Arc::ptr_eq(&a, &c));
+        let moved = first.path().with_extension("moved");
+        std::fs::rename(first.path(), &moved).unwrap();
+        std::fs::create_dir(first.path()).unwrap();
+        let replacement = client.manager_for_source(source(&first)).unwrap().unwrap();
+        assert!(!Arc::ptr_eq(&a, &replacement));
+        std::fs::remove_dir_all(moved).unwrap();
+    }
 }

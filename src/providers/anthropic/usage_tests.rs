@@ -25,6 +25,7 @@ async fn relay_chunks(content_type: &str, chunks: Vec<Vec<u8>>) -> (Vec<u8>, Mon
     let monitor = MonitorHandle::new(10);
     monitor.request_started("req", Some("session".into()), None, EndpointKind::Messages);
     let ctx = RequestContext {
+        codex_profile: None,
         recovery_budget: Default::default(),
         req_id: "req".into(),
         session_id: None,

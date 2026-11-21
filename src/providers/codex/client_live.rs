@@ -54,7 +54,7 @@ impl CodexHttpClient {
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
         let (auth, ready) = match prepared {
             Some((auth, ready)) => (auth, Some(ready)),
-            None => (self.auth_for(&body.reasoning_account).await?, None),
+            None => (self.auth_for(&body.reasoning_account, ctx).await?, None),
         };
 
         let turn_id = continuation.and_then(super::continuation::ContinuationReservation::turn_id);
@@ -159,7 +159,7 @@ impl CodexHttpClient {
                         auth_refresh_attempted = true;
                         ctx.recovery_budget.start();
                         invalidate_live_continuation_pool(continuation.as_ref());
-                        let refresh = self.refreshed_auth(&auth);
+                        let refresh = self.refreshed_auth(&auth, &ctx);
                         auth = match refresh.await {
                             Ok(auth) => {
                                 if tx.is_closed() {
@@ -266,7 +266,7 @@ impl CodexHttpClient {
                     auth_refresh_attempted = true;
                     ctx.recovery_budget.start();
                     invalidate_live_continuation_pool(continuation.as_ref());
-                    let refresh = self.refreshed_auth(&auth);
+                    let refresh = self.refreshed_auth(&auth, &ctx);
                     auth = match refresh.await {
                         Ok(auth) => {
                             if tx.is_closed() {

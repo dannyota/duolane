@@ -828,6 +828,7 @@ mod tests {
         )
         .unwrap();
         let ctx = RequestContext {
+            codex_profile: None,
             recovery_budget: Default::default(),
             req_id: "empty-terminal".to_string(),
             session_id: None,
@@ -1001,6 +1002,7 @@ mod tests {
             crate::monitor::EndpointKind::Messages,
         );
         let ctx = RequestContext {
+            codex_profile: None,
             recovery_budget: Default::default(),
             req_id: "request".to_string(),
             session_id: None,
@@ -1034,6 +1036,7 @@ mod tests {
         )
         .unwrap();
         let ctx = RequestContext {
+            codex_profile: None,
             recovery_budget: Default::default(),
             req_id: "incremental-http".to_string(),
             session_id: None,
