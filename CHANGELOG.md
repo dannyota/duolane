@@ -7,6 +7,7 @@
 - `terra`, `sol`, and `astra` aliases and their `anthropic-` equivalents select
   the newest listed model in each Codex family. The three short names appear in
   the intercept model picker.
+- `luna` and `anthropic-luna` select the newest listed Luna model.
 
 ## 0.1.1
 

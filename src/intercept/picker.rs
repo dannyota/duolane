@@ -70,6 +70,7 @@ fn build(catalog: &[CatalogModel]) -> Option<Lineup> {
         let name = match *alias {
             "terra" => "Terra",
             "sol" => "Sol",
+            "luna" => "Luna",
             _ => "Astra",
         };
         options.insert(i, row(alias, Some(name)));
@@ -181,7 +182,7 @@ mod tests {
         assert_eq!(options.len(), MAX_ROWS);
         let labels: Vec<(&str, &str)> = options
             .iter()
-            .take(6)
+            .take(7)
             .map(|row| (row.model.as_str(), row.label.as_str()))
             .collect();
         assert_eq!(
@@ -190,6 +191,7 @@ mod tests {
                 ("terra", "Terra (Codex)"),
                 ("sol", "Sol (Codex)"),
                 ("astra", "Astra (Codex)"),
+                ("luna", "Luna (Codex)"),
                 ("gpt-a", "gpt-a (Codex)"),
                 ("gpt-b", "gpt-b (Codex)"),
                 ("gpt-c", "Gamma (Codex)")
@@ -204,7 +206,7 @@ mod tests {
         let fallback = build(&[]).unwrap().options;
         assert_eq!(fallback.len(), ALLOWED_MODELS.len() + FAMILY_ALIASES.len());
         let newest = ALLOWED_MODELS[ALLOWED_MODELS.len() - 1];
-        assert_eq!(fallback[3].model, newest);
-        assert_eq!(fallback[3].label, format!("{newest} (Codex)"));
+        assert_eq!(fallback[4].model, newest);
+        assert_eq!(fallback[4].label, format!("{newest} (Codex)"));
     }
 }

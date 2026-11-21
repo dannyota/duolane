@@ -79,9 +79,9 @@ Restart Claude Code, then choose a model:
 /model sol
 ```
 
-`terra`, `sol`, and `astra` select the newest listed, API-capable model in each
-family in the local Codex catalog. `anthropic-terra`, `anthropic-sol`, and
-`anthropic-astra` are equivalent. Use a full ID such as `gpt-6.2-sol` to pin a
+`terra`, `sol`, `astra`, and `luna` select the newest listed, API-capable model
+in each family in the local Codex catalog. Their `anthropic-` forms, such as
+`anthropic-luna`, are equivalent. Use a full ID such as `gpt-6.2-sol` to pin a
 version. Without a matching catalog entry, the aliases use built-in models.
 
 Claude Code does not know Codex models and assumes a 1M-token context window.

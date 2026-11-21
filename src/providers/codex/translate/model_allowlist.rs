@@ -45,7 +45,7 @@ pub const MODEL_ALIASES: &[(&str, &[&str])] = &[
     ("claude-fable-5-1", OPUS_TARGETS),
 ];
 
-pub const FAMILY_ALIASES: &[&str] = &["terra", "sol", "astra"];
+pub const FAMILY_ALIASES: &[&str] = &["terra", "sol", "astra", "luna"];
 
 pub fn is_family_alias(model: &str) -> bool {
     FAMILY_ALIASES.contains(&model.strip_prefix("anthropic-").unwrap_or(model))

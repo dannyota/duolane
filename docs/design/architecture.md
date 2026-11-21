@@ -31,8 +31,8 @@ other model.
 - Codex model ids come from a built-in list plus the API-capable entries in the
   Codex CLI's `models_cache.json`. Unlisted catalog entries are accepted when
   requested by exact id but are not advertised.
-- `terra`, `sol`, and `astra`, and their `anthropic-` forms, select Codex before
-  any auto-review override. All six names are advertised. The
+- `terra`, `sol`, `astra`, and `luna`, and their `anthropic-` forms, select
+  Codex before any auto-review override. All eight names are advertised. The
   [Codex catalog](codex.md#model-catalog) determines their targets, without
   changing how explicit ids resolve.
 - A `[1m]` suffix on a model id is ignored.
@@ -60,17 +60,17 @@ other model.
 - Codex models reach the `/model` picker through a
   [`modelPicker`](https://code.claude.com/docs/en/settings-reference#modelpicker)
   lineup, which takes any model id and was seen listing `gpt-6.2-sol` on
-  2026-11-19. The three short Codex family aliases come first so they always
-  fit. The remaining rows are Codex catalog entries with `visibility` `list`
-  that duolane advertises, in catalog `priority` order, without tier variants
-  such as `-fast`. A row is `model` and `label` only: the catalog display name
-  followed by `(Codex)`, or the id when the display name holds a control
-  character or is longer than 64 characters. The catalog is untrusted: ids must
-  pass the catalog's slug check, the lineup holds at most 20 rows, and duolane
-  drops it when its JSON exceeds 16 KiB. Without a catalog, the remaining rows
-  come from the built-in Codex list, labeled with the id. duolane never writes
-  an empty lineup, never sets `behavesAs`, and never edits `availableModels`,
-  which can still hide these rows. Intercept mode supplies the lineup, as the
+  2026-11-19. The four short Codex family aliases come first so they always fit.
+  The remaining rows are Codex catalog entries with `visibility` `list` that
+  duolane advertises, in catalog `priority` order, without tier variants such as
+  `-fast`. A row is `model` and `label` only: the catalog display name followed
+  by `(Codex)`, or the id when the display name holds a control character or is
+  longer than 64 characters. The catalog is untrusted: ids must pass the
+  catalog's slug check, the lineup holds at most 20 rows, and duolane drops it
+  when its JSON exceeds 16 KiB. Without a catalog, the remaining rows come from
+  the built-in Codex list, labeled with the id. duolane never writes an empty
+  lineup, never sets `behavesAs`, and never edits `availableModels`, which can
+  still hide these rows. Intercept mode supplies the lineup, as the
   [intercept design](intercept.md#model-picker) describes. With
   `ANTHROPIC_BASE_URL`, the owner adds it to the user settings.
 - Every response a `POST` handler produces carries a `request-id` header, which

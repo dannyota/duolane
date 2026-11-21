@@ -45,7 +45,7 @@ fn write_catalog(dir: &TempDir, extra: &str) {
         dir.path().join("models_cache.json"),
         serde_json::to_vec(&json!({
             "fetched_at":"2020-01-01T00:00:00Z", "client_version":"0.1.0", "etag":"fixture",
-            "models":[entry(extra,true,"list",true), entry("gpt-6.2-sol",true,"list",false), entry("gpt-6.10.0-sol",true,"list",true), entry("gpt-6.10-sol",true,"list",false), entry("gpt-9-sol",true,"hide",false), entry("gpt-test-hidden",true,"hide",false),
+            "models":[entry(extra,true,"list",true), entry("gpt-6.2-sol",true,"list",false), entry("gpt-6.10.0-sol",true,"list",true), entry("gpt-6.10-sol",true,"list",false), entry("gpt-9-sol",true,"hide",false), entry("gpt-6.1-luna",true,"list",false), entry("gpt-6.2-luna",true,"list",true), entry("gpt-9-luna",true,"hide",true), entry("gpt-10-luna",false,"list",true), entry("gpt-test-hidden",true,"hide",false),
                 entry("gpt-test-denied",false,"list",true),
                 entry("gpt-5.4",true,"list",true), entry("gpt-6.1-terra",false,"hide",false),
                 entry("opus",true,"list",false), entry("gpt-test-forged-fast",true,"list",true),
@@ -146,6 +146,8 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         "terra",
         "sol",
         "astra",
+        "luna",
+        "anthropic-luna",
         "anthropic-terra",
         "anthropic-sol",
         "anthropic-astra",
@@ -163,6 +165,8 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
     assert!(!listing.to_string().contains("gpt-test-hidden"));
 
     for (requested, expected, lite, tier) in [
+        ("luna", "gpt-6.2-luna", true, None),
+        ("anthropic-luna", "gpt-6.2-luna", true, None),
         ("sol", "gpt-6.10-sol", false, None),
         ("anthropic-sol", "gpt-6.10-sol", false, None),
         ("anthropic-sol[1m]", "gpt-6.10-sol", false, None),
@@ -369,6 +373,27 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         .unwrap()
         .unwrap();
     assert_eq!(body["model"], "gpt-6.1-sol");
+    for (tools, expected, lite) in [
+        (json!([]), "gpt-6-luna", true),
+        (json!([{"type":"web_search"}]), "gpt-6-sol", false),
+    ] {
+        let response = client
+            .post(format!("{url}/v1/responses"))
+            .json(&json!({"model":"luna","input":"synthetic","tools":tools}))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let (headers, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body["model"], expected);
+        assert_eq!(
+            headers.contains_key("x-openai-internal-codex-responses-lite"),
+            lite
+        );
+    }
     std::fs::write(
         dir.path().join("config.json"),
         r#"{"codex":{"fullLane":true}}"#,
