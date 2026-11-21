@@ -41,6 +41,9 @@ impl CodexHttpClient {
         let mut auth_refresh_attempted = false;
         let mut transport_failures = 0u32;
         loop {
+            let sent_before_attempt = http_body
+                .websocket_sent
+                .load(std::sync::atomic::Ordering::Acquire);
             let result = match transport {
                 CodexTransport::Http => {
                     let http_body = http_body.get_or_try_init(prepare_http_body).await?;
@@ -163,7 +166,26 @@ impl CodexHttpClient {
                 && should_refresh_after_unauthorized(&result, auth_refresh_attempted, transport)
             {
                 auth_refresh_attempted = true;
-                auth = self.refreshed_auth(&auth).await?;
+                auth = self.refreshed_auth(&auth).await.inspect_err(|error| {
+                    if !sent_before_attempt
+                        && result.as_ref().is_ok_and(|response| {
+                            response.transport == ActualTransport::WebSocket
+                                && response.status == 401
+                                && !crate::anthropic::sse::parse_sse_events(&response.body)
+                                    .into_iter()
+                                    .filter_map(|event| serde_json::from_str(&event.data).ok())
+                                    .any(|event| {
+                                        super::events::classify_stream_event(&event)
+                                            == super::events::CodexStreamEventKind::Semantic
+                                    })
+                        })
+                        && error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL)
+                    {
+                        http_body
+                            .websocket_sent
+                            .store(false, std::sync::atomic::Ordering::Release);
+                    }
+                })?;
                 invalidate_live_continuation_pool(active_continuation.as_ref());
                 active_continuation = full_context_continuation(active_continuation.as_ref());
                 continue;
@@ -1273,6 +1295,63 @@ mod tests {
         );
         server.await.unwrap();
         super::super::continuation::abort_continuation_for_owner(&next);
+    }
+
+    #[tokio::test]
+    async fn account_change_after_websocket_401_clears_only_the_rejected_send() {
+        use futures_util::SinkExt;
+        for (prior_send, output) in [(false, false), (true, false), (false, true)] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let client = std::sync::Arc::new(authenticated_http_test_client(format!(
+                "http://{addr}/responses"
+            )));
+            let server_client = client.clone();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _ = next_websocket_json(&mut ws).await;
+                if output {
+                    ws.send(tokio_tungstenite::tungstenite::Message::text(
+                        serde_json::json!({"type":"response.output_text.delta", "delta":"output"})
+                            .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+                let mut auth = http_test_auth();
+                auth.access = "different-test-token".into();
+                auth.account_id = Some("different-account".into());
+                server_client.auth_manager().set_test_auth(auth);
+                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                    serde_json::json!({"type":"error", "status":401, "error":{"message":"unauthorized"}}).to_string()
+                )).await.unwrap();
+            });
+            let cache = CodexHttpBodyCache::new();
+            cache
+                .websocket_sent
+                .store(prior_send, std::sync::atomic::Ordering::Release);
+            let result = client
+                .post_codex_with_transport(
+                    &buffered_test_request(),
+                    &http_test_context(),
+                    None,
+                    crate::config::CodexTransport::WebSocket,
+                    &cache,
+                )
+                .await;
+            assert_eq!(
+                result.err().unwrap().detail.as_deref(),
+                Some(CODEX_ACCOUNT_CHANGED_DETAIL)
+            );
+            assert_eq!(
+                cache
+                    .websocket_sent
+                    .load(std::sync::atomic::Ordering::Acquire),
+                prior_send || output
+            );
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

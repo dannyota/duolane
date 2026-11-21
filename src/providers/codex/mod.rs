@@ -119,9 +119,9 @@ impl CodexProvider {
         let standalone_search = search::is_standalone_search_request(&body);
         let use_responses_lite = !standalone_search
             && apply_model_lane_for_request(&mut resolved, &body, config::codex_full_lane());
+        let configured_transport = config::codex_transport();
         let websocket_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let compaction_websocket_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let configured_transport = config::codex_transport();
         let handle_for_account = |ctx, conversation_identity| {
             self.handle_messages_for_account(
                 &body,
@@ -136,10 +136,7 @@ impl CodexProvider {
             )
         };
         let response = handle_for_account(ctx.clone(), conversation_identity.clone()).await;
-        if response.extensions().get::<CodexAccountChanged>().is_none()
-            || websocket_sent.load(std::sync::atomic::Ordering::Acquire)
-            || compaction_websocket_sent.load(std::sync::atomic::Ordering::Acquire)
-        {
+        if response.extensions().get::<CodexAccountChanged>().is_none() {
             return response;
         }
         handle_for_account(ctx, conversation_identity).await
@@ -698,29 +695,40 @@ mod tests {
     use super::provider_test_support::*;
     use super::*;
 
+    #[allow(clippy::result_large_err)]
     #[tokio::test]
-    async fn account_change_after_websocket_send_returns_conflict_without_replay() {
+    async fn account_changes_after_websocket_sends_retry_once_then_conflict() {
         for streaming in [false, true] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let client = authenticated_live_test_client(format!("http://{addr}/responses"));
             let server_client = client.clone();
             let server = tokio::spawn(async move {
-                let (socket, _) = listener.accept().await.unwrap();
-                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
-                let _ = next_live_websocket_request(&mut ws).await;
-                let mut auth = super::client_test_support::http_test_auth();
-                auth.access = "new-test-token".into();
-                auth.account_id = Some("other-account".into());
-                server_client.auth_manager().set_test_auth(auth);
-                emit_live_event(&mut ws, &serde_json::json!({"type":"error", "status":401, "error":{"message":"unauthorized"}})).await;
-                if let Ok(Ok((socket, _))) =
-                    tokio::time::timeout(std::time::Duration::from_secs(3), listener.accept()).await
-                {
-                    drop(socket);
-                    return false;
+                for (expected_account, next_account, next_token) in [
+                    ("acct", "other-account", "other-test-token"),
+                    ("other-account", "third-account", "third-test-token"),
+                ] {
+                    let Ok(Ok((socket, _))) =
+                        tokio::time::timeout(std::time::Duration::from_secs(3), listener.accept())
+                            .await
+                    else {
+                        return false;
+                    };
+                    let mut ws = tokio_tungstenite::accept_hdr_async(socket, |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                        assert!(request.headers().get("chatgpt-account-id").is_some_and(|value| value == expected_account));
+                        Ok(response)
+                    }).await.unwrap();
+                    let payload = next_live_websocket_request(&mut ws).await;
+                    assert!(payload.get("previous_response_id").is_none());
+                    let mut auth = super::client_test_support::http_test_auth();
+                    auth.access = next_token.into();
+                    auth.account_id = Some(next_account.into());
+                    server_client.auth_manager().set_test_auth(auth);
+                    emit_live_event(&mut ws, &serde_json::json!({"type":"error", "status":401, "error":{"message":"unauthorized"}})).await;
                 }
-                true
+                tokio::time::timeout(std::time::Duration::from_millis(300), listener.accept())
+                    .await
+                    .is_err()
             });
             let provider = CodexProvider { client };
             let body = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol", "max_tokens":32, "stream":streaming, "messages":[{"role":"user", "content":"hello"}]})).unwrap();
@@ -730,10 +738,100 @@ mod tests {
             )
             .await
             .unwrap();
-            let no_replay = server.await.unwrap();
             assert_eq!(response.status(), StatusCode::CONFLICT);
-            assert!(no_replay);
+            assert!(server.await.unwrap());
         }
+    }
+
+    #[test]
+    fn empty_websocket_completion_then_account_change_does_not_use_http() {
+        const CHILD: &str = "TEST_EMPTY_ACCOUNT_CHANGE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "providers::codex::tests::empty_websocket_completion_then_account_change_does_not_use_http"])
+                .env(CHILD, "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let dir = crate::paths::config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"codex":{"previousResponseId":true,"transport":"auto"}}"#,
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+        let _registry = continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool = websocket::lock_codex_websocket_pool_for_tests().await;
+        for streaming in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let mut raw = super::client_test_support::authenticated_http_test_client(format!(
+                "http://{addr}/responses"
+            ));
+            raw.request_compression = crate::config::CodexRequestCompression::Gzip;
+            raw.auto_ws_max_bytes = 1024;
+            let client = Arc::new(raw);
+            let server_client = client.clone();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _ = next_live_websocket_request(&mut ws).await;
+                for event in [
+                    serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_first"}}),
+                    serde_json::json!({"type":"response.output_text.delta","output_index":0,"delta":"first"}),
+                    serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}),
+                    serde_json::json!({"type":"response.completed","response":{"id":"resp_first","status":"completed"}}),
+                ] {
+                    emit_live_event(&mut ws, &event).await;
+                }
+                let delta = next_live_websocket_request(&mut ws).await;
+                assert_eq!(delta["previous_response_id"], "resp_first");
+                let mut auth = super::client_test_support::http_test_auth();
+                auth.access = "new-test-token".into();
+                auth.account_id = Some("other-account".into());
+                server_client.auth_manager().set_test_auth(auth);
+                emit_live_event(&mut ws, &serde_json::json!({"type":"response.completed","response":{"id":"resp_empty","status":"completed","output":[]}})).await;
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let retry = next_live_websocket_request(&mut ws).await;
+                assert!(retry.get("previous_response_id").is_none());
+                for event in [
+                    serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_retry"}}),
+                    serde_json::json!({"type":"response.output_text.delta","output_index":0,"delta":"retry"}),
+                    serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}),
+                    serde_json::json!({"type":"response.completed","response":{"id":"resp_retry","status":"completed"}}),
+                ] {
+                    emit_live_event(&mut ws, &event).await;
+                }
+            });
+            let provider = CodexProvider { client };
+            let owner = ConversationIdentity::Main(format!("empty-login-{streaming}"));
+            let ctx = live_test_context("empty-login");
+            let first = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol","max_tokens":32,"stream":streaming,"messages":[{"role":"user","content":"one"}]})).unwrap();
+            let first = provider
+                .handle_messages_inner(first, ctx.clone(), Some(owner.clone()))
+                .await;
+            assert_eq!(first.status(), StatusCode::OK);
+            first.into_body().collect().await.unwrap();
+            let second = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol","max_tokens":32,"stream":streaming,"messages":[{"role":"user","content":"one"},{"role":"assistant","content":"first"},{"role":"user","content":"x".repeat(5000)}]})).unwrap();
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                provider.handle_messages_inner(second, ctx, Some(owner.clone())),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            response.into_body().collect().await.unwrap();
+            server.await.unwrap();
+            websocket::invalidate_codex_websocket_pool_owner(&owner);
+            continuation::clear_continuation_for_owner(Some(&owner));
+        }
+        });
     }
 
     #[test]

@@ -92,6 +92,7 @@ impl CodexHttpClient {
         let mut hosted_tool_executed = false;
 
         'attempt: loop {
+            let sent_before_attempt = websocket_sent.load(std::sync::atomic::Ordering::Acquire);
             socket_id_publisher.publish(None);
             let ws_headers = match build_codex_headers(&auth, &ctx, body.client_metadata.is_some())
             {
@@ -253,6 +254,12 @@ impl CodexHttpClient {
                             auth
                         }
                         Err(refresh_err) => {
+                            if !sent_before_attempt
+                                && refresh_err.detail.as_deref()
+                                    == Some(CODEX_ACCOUNT_CHANGED_DETAIL)
+                            {
+                                websocket_sent.store(false, std::sync::atomic::Ordering::Release);
+                            }
                             if tx.send(Err(refresh_err)).await.is_err() {
                                 if let Some(reservation) = continuation.as_ref() {
                                     super::websocket::invalidate_codex_websocket_pool_socket(
