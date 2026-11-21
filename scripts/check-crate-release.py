@@ -9,7 +9,12 @@ TAG = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 CRATE = "duolane"
 OWNER = "dannyota"
-ARCHIVES = {"darwin": "tar.gz", "linux": "tar.gz", "windows": "zip"}
+ARCHIVES = {
+    "darwin-arm64": "tar.gz",
+    "linux-amd64": "tar.gz",
+    "linux-arm64": "tar.gz",
+    "windows-amd64": "zip",
+}
 
 
 def records(value):
@@ -87,14 +92,12 @@ def validate(tag: str, commit: str, manifest: dict, release: dict, runs: list,
         if not isinstance(name, str) or name in assets:
             raise ValueError("invalid release asset name")
         assets[name] = asset
-    for system, extension in ARCHIVES.items():
-        for arch in ("amd64", "arm64"):
-            artifact = f"{system}-{arch}"
-            for suffix in (extension, "sha256"):
-                name = f"{CRATE}-{artifact}.{suffix}"
-                asset = assets.get(name, {})
-                if asset.get("state") != "uploaded" or asset.get("digest") != file_digest(artifacts_dir / artifact, name):
-                    raise ValueError("release asset does not match build artifact")
+    for artifact, extension in ARCHIVES.items():
+        for suffix in (extension, "sha256"):
+            name = f"{CRATE}-{artifact}.{suffix}"
+            asset = assets.get(name, {})
+            if asset.get("state") != "uploaded" or asset.get("digest") != file_digest(artifacts_dir / artifact, name):
+                raise ValueError("release asset does not match build artifact")
 
 
 def main(args):

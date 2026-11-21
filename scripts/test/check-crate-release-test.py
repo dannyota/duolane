@@ -34,22 +34,21 @@ class ReleaseGate(unittest.TestCase):
         }]
         self.owners = {"users": [{"kind": "user", "login": "dannyota"}]}
         self.release = {"isDraft": False, "isImmutable": False, "assets": []}
-        for system, extension in (("darwin", "tar.gz"), ("linux", "tar.gz"), ("windows", "zip")):
-            for arch in ("amd64", "arm64"):
-                artifact = f"{system}-{arch}"
-                directory = self.artifacts / artifact
-                directory.mkdir()
-                archive = f"duolane-{artifact}.{extension}"
-                checksum = f"duolane-{artifact}.sha256"
-                archive_bytes = archive.encode()
-                archive_hash = hashlib.sha256(archive_bytes).hexdigest()
-                for name, data in ((archive, archive_bytes), (checksum, f"{archive_hash}  {archive}\n".encode())):
-                    (directory / name).write_bytes(data)
-                    self.release["assets"].append({
-                        "name": name,
-                        "state": "uploaded",
-                        "digest": f"sha256:{hashlib.sha256(data).hexdigest()}",
-                    })
+        for artifact, extension in (("darwin-arm64", "tar.gz"), ("linux-amd64", "tar.gz"),
+                                    ("linux-arm64", "tar.gz"), ("windows-amd64", "zip")):
+            directory = self.artifacts / artifact
+            directory.mkdir()
+            archive = f"duolane-{artifact}.{extension}"
+            checksum = f"duolane-{artifact}.sha256"
+            archive_bytes = archive.encode()
+            archive_hash = hashlib.sha256(archive_bytes).hexdigest()
+            for name, data in ((archive, archive_bytes), (checksum, f"{archive_hash}  {archive}\n".encode())):
+                (directory / name).write_bytes(data)
+                self.release["assets"].append({
+                    "name": name,
+                    "state": "uploaded",
+                    "digest": f"sha256:{hashlib.sha256(data).hexdigest()}",
+                })
 
     def validate(self):
         return check_crate_release.validate(
@@ -100,6 +99,12 @@ class ReleaseGate(unittest.TestCase):
     def test_swapped_asset_digests_fail(self):
         first, second = self.release["assets"][:2]
         first["digest"], second["digest"] = second["digest"], first["digest"]
+        with self.assertRaises(ValueError):
+            self.validate()
+
+    def test_missing_checksum_fails(self):
+        self.release["assets"] = [asset for asset in self.release["assets"]
+                                  if asset["name"] != "duolane-linux-arm64.sha256"]
         with self.assertRaises(ValueError):
             self.validate()
 

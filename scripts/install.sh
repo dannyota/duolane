@@ -59,6 +59,17 @@ detect_platform() {
 		;;
 	esac
 
+	if [ "${os}-${arch}" = "darwin-amd64" ] && [ "$(sysctl -in sysctl.proc_translated 2>/dev/null)" = "1" ]; then
+		arch="arm64"
+	fi
+
+	if [ "${os}-${arch}" = "darwin-amd64" ]; then
+		log_error "No prebuilt binary for Intel Macs"
+		echo "Build from source with Cargo:" >&2
+		echo "  cargo install duolane --locked" >&2
+		exit 1
+	fi
+
 	echo "${os}-${arch}"
 }
 

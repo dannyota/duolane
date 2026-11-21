@@ -1,8 +1,10 @@
 # Release publishing
 
-The tag-triggered Release workflow tests `duolane`, builds six platform
-archives, and uploads each archive with its checksum. Publishing to crates.io is
-a separate owner decision because an uploaded version cannot be replaced.
+The tag-triggered Release workflow tests `duolane`, builds archives for macOS on
+Apple silicon, Linux on x86-64 and Arm64, and Windows on x86-64, and uploads
+each archive with its checksum. Other platforms build from source with Cargo.
+Publishing to crates.io is a separate owner decision because an uploaded version
+cannot be replaced.
 
 ## Approaches
 
@@ -20,7 +22,7 @@ access and crates.io access.
   tagged manifest must describe the standalone `duolane` crate, match the tag
   version, and use tracked regular files for explicit README and license paths.
   The tag and commit must have a successful `release.yml` tag-push run. The
-  published GitHub Release must contain all six uploaded archives and their
+  published GitHub Release must contain all four uploaded archives and their
   checksums. Each asset digest must match the corresponding artifact file from
   that run. The `duolane` crate must list `dannyota` as an owner.
 - With publishing requested, preflight also requires an immutable GitHub Release
