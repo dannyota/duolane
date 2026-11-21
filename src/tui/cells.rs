@@ -124,7 +124,7 @@ pub(super) fn project_constraints<'a, K: PartialEq>(
         return widths;
     };
     let desired = projects
-        .map(|value| value.unwrap_or("-").chars().count())
+        .map(|value| Span::raw(value.unwrap_or("-")).width())
         .max()
         .unwrap_or(0)
         .max(columns[project].header.len())
@@ -137,18 +137,26 @@ pub(super) fn project_constraints<'a, K: PartialEq>(
 }
 
 pub(super) fn ellipsize(value: &str, width: usize) -> String {
-    if value.chars().count() <= width {
+    let span = Span::raw(value);
+    if span.width() <= width {
         return value.to_string();
     }
     if width == 0 {
         return String::new();
     }
 
-    value
-        .chars()
-        .take(width.saturating_sub(1))
-        .chain(std::iter::once('…'))
-        .collect()
+    let mut result = String::new();
+    let mut used = 0;
+    for grapheme in span.styled_graphemes(Style::default()) {
+        let grapheme_width = Span::raw(grapheme.symbol).width();
+        if used + grapheme_width > width - 1 {
+            break;
+        }
+        result.push_str(grapheme.symbol);
+        used += grapheme_width;
+    }
+    result.push('…');
+    result
 }
 
 pub(super) fn display_session_id(session_id: Option<&str>) -> &str {

@@ -229,21 +229,10 @@ mod tests {
     }
 
     #[test]
-    fn project_width_matches_character_count() {
-        let columns = session_columns(LayoutTier::Wide, true);
-        let project = columns
-            .iter()
-            .position(|column| column.key == SessionColumn::Project)
-            .unwrap();
-        let name = "界".repeat(20);
-        let widths = project_constraints(
-            &columns,
-            SessionColumn::Project,
-            Rect::new(0, 0, 280, 8),
-            170,
-            [Some(name.as_str())].into_iter(),
-        );
-        assert_eq!(widths[project], ratatui::layout::Constraint::Length(20));
+    fn wide_project_ends_with_ellipsis() {
+        let text = render_project(&"界".repeat(30), 280);
+        let row = text.lines().find(|line| line.contains('界')).unwrap();
+        assert!(row.contains('…'));
     }
 
     #[test]
@@ -267,6 +256,12 @@ mod tests {
             .unwrap();
         let flex = |line: &str| line.find("Status").unwrap() - line.find("Tokens/10s").unwrap();
         assert!(flex(header) >= flex(baseline_header));
+        let near_minimum = render_project(&"x".repeat(200), SESSION_SPARKLINE_MIN_WIDTH + 1);
+        let near_header = near_minimum
+            .lines()
+            .find(|line| line.contains("Tokens/10s"))
+            .unwrap();
+        assert!(flex(near_header) >= flex(baseline_header));
     }
 
     #[test]
