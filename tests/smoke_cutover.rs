@@ -688,6 +688,7 @@ async fn spawn_websocket_sequence_upstream(captured: Arc<Mutex<Vec<Value>>>) -> 
 
 async fn spawn_websocket_previous_missing_then_retry_upstream(
     captured: Arc<Mutex<Vec<Value>>>,
+    retry_failure: u8,
 ) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -695,7 +696,7 @@ async fn spawn_websocket_previous_missing_then_retry_upstream(
 
     tokio::spawn(async move {
         let mut handled = 0usize;
-        while handled < 3 {
+        while handled < if retry_failure == 0 { 3 } else { 4 } {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
@@ -704,7 +705,7 @@ async fn spawn_websocket_previous_missing_then_retry_upstream(
             };
             let (mut sender, mut receiver) = ws.split();
 
-            while handled < 3 {
+            while handled < if retry_failure == 0 { 3 } else { 4 } {
                 let Some(text) = (loop {
                     match receiver.next().await {
                         Some(Ok(Message::Text(text))) => break Some(text),
@@ -722,21 +723,21 @@ async fn spawn_websocket_previous_missing_then_retry_upstream(
                     let _ = captured.lock().map(|mut g| g.push(json));
                 }
 
-                if handled == 1 {
-                    let rate_limits = json!({
-                        "type": "codex.rate_limits",
-                        "rate_limits": {"limit_reached": false}
-                    });
-                    let _ = sender.send(Message::text(rate_limits.to_string())).await;
+                if handled == 1 || (retry_failure == 2 && handled == 2) {
                     let event = json!({
-                        "type": "error",
-                        "error": {
+                        "type": "response.failed",
+                        "response": {"status": "failed", "error": {
                             "code": "previous_response_not_found",
-                            "message": "previous response not found",
-                            "status": 400
-                        }
+                            "message": "previous response not found"
+                        }}
                     });
                     let _ = sender.send(Message::text(event.to_string())).await;
+                    handled += 1;
+                    break;
+                }
+
+                if retry_failure == 1 && handled == 2 {
+                    let _ = sender.send(Message::Close(None)).await;
                     handled += 1;
                     break;
                 }
@@ -3426,7 +3427,7 @@ async fn smoke_codex_websocket_stream_retries_missing_previous_response_id() {
     clear_all_continuations_for_tests();
 
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let upstream = spawn_websocket_previous_missing_then_retry_upstream(captured.clone()).await;
+    let upstream = spawn_websocket_previous_missing_then_retry_upstream(captured.clone(), 0).await;
 
     let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
     let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
@@ -3460,11 +3461,7 @@ async fn smoke_codex_websocket_stream_retries_missing_previous_response_id() {
     let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
         .await
         .unwrap();
-    assert!(
-        String::from_utf8_lossy(&second_body).contains("retry"),
-        "second response body: {}",
-        String::from_utf8_lossy(&second_body)
-    );
+    assert!(String::from_utf8_lossy(&second_body).contains("retry"));
     let guard = captured.lock().unwrap();
     assert_eq!(guard.len(), 3, "expected retry websocket request");
     assert!(guard[0].get("previous_response_id").is_none());
@@ -3475,6 +3472,115 @@ async fn smoke_codex_websocket_stream_retries_missing_previous_response_id() {
         Some(3),
         "retry request should send the full input"
     );
+
+    clear_all_continuations_for_tests();
+    clear_codex_websocket_pool_for_tests();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_codex_websocket_stream_retries_drop_after_full_context_retry() {
+    let _guard = env_lock();
+    let config = TempDir::new().unwrap();
+    let _codex_auth = write_codex_auth(config.path());
+    clear_codex_websocket_pool_for_tests();
+    clear_all_continuations_for_tests();
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let upstream = spawn_websocket_previous_missing_then_retry_upstream(captured.clone(), 1).await;
+
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
+    let _previous_response_env = EnvGuard::set("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "1");
+
+    let first = call_messages_body(json!({
+        "model": "gpt-5.5",
+        "max_tokens": 64,
+        "stream": true,
+        "messages": [{"role":"user","content":"one"}]
+    }))
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let _ = axum::body::to_bytes(first.into_body(), usize::MAX)
+        .await
+        .unwrap();
+
+    let second = call_messages_body(json!({
+        "model": "gpt-5.5",
+        "max_tokens": 64,
+        "stream": true,
+        "messages": [
+            {"role":"user","content":"one"},
+            {"role":"assistant","content":"first"},
+            {"role":"user","content":"two"}
+        ]
+    }))
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&second_body).contains("retry"));
+    let guard = captured.lock().unwrap();
+    assert_eq!(guard.len(), 4, "expected retry websocket request");
+    assert!(guard[0].get("previous_response_id").is_none());
+    assert_eq!(guard[1]["previous_response_id"], "resp_1");
+    assert!(guard[2].get("previous_response_id").is_none());
+    assert_eq!(
+        guard[2]["input"].as_array().map(Vec::len),
+        Some(3),
+        "retry request should send the full input"
+    );
+
+    clear_all_continuations_for_tests();
+    clear_codex_websocket_pool_for_tests();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_codex_websocket_stream_fails_fast_on_repeated_missing_origin() {
+    let _guard = env_lock();
+    let config = TempDir::new().unwrap();
+    let _codex_auth = write_codex_auth(config.path());
+    clear_codex_websocket_pool_for_tests();
+    clear_all_continuations_for_tests();
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let upstream = spawn_websocket_previous_missing_then_retry_upstream(captured.clone(), 2).await;
+
+    let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "websocket");
+    let _previous_response_env = EnvGuard::set("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "1");
+
+    let first = call_messages_body(json!({
+        "model": "gpt-5.5",
+        "max_tokens": 64,
+        "stream": true,
+        "messages": [{"role":"user","content":"one"}]
+    }))
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let _ = axum::body::to_bytes(first.into_body(), usize::MAX)
+        .await
+        .unwrap();
+
+    let second = call_messages_body(json!({
+        "model": "gpt-5.5",
+        "max_tokens": 64,
+        "stream": true,
+        "messages": [
+            {"role":"user","content":"one"},
+            {"role":"assistant","content":"first"},
+            {"role":"user","content":"two"}
+        ]
+    }))
+    .await;
+    assert_eq!(second.status(), StatusCode::BAD_GATEWAY);
+    let guard = captured.lock().unwrap();
+    assert_eq!(guard.len(), 3);
+    assert!(guard[2].get("previous_response_id").is_none());
 
     clear_all_continuations_for_tests();
     clear_codex_websocket_pool_for_tests();
@@ -3524,11 +3630,7 @@ async fn smoke_codex_websocket_stream_retries_empty_close_with_full_context() {
     let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
         .await
         .unwrap();
-    assert!(
-        String::from_utf8_lossy(&second_body).contains("retry"),
-        "second response body: {}",
-        String::from_utf8_lossy(&second_body)
-    );
+    assert!(String::from_utf8_lossy(&second_body).contains("retry"));
     let second_text = String::from_utf8_lossy(&second_body);
     assert!(
         !second_text.contains("call_aborted"),
@@ -3606,11 +3708,7 @@ async fn smoke_codex_websocket_stream_retries_terminal_only_completion_with_full
     let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
         .await
         .unwrap();
-    assert!(
-        String::from_utf8_lossy(&second_body).contains("retry"),
-        "second response body: {}",
-        String::from_utf8_lossy(&second_body)
-    );
+    assert!(String::from_utf8_lossy(&second_body).contains("retry"));
 
     let downstream_end_turns = traffic_files(state.path())
         .into_iter()
