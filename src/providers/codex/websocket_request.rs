@@ -13,7 +13,7 @@ use crate::traffic::TrafficCapture;
 
 use super::client::{
     ActualTransport, CodexError, CodexErrorOrigin, CodexResponse, MAX_UPSTREAM_FRAME_BYTES,
-    OwnerAwareCodexResponse,
+    OwnerAwareCodexResponse, TRANSPORT_UNEXPECTED_EOF_DETAIL, has_unexpected_eof,
 };
 use super::continuation::ContinuationReservation;
 use super::websocket::*;
@@ -122,14 +122,7 @@ pub(super) async fn codex_websocket_request(
             if let Some(owner) = &pool_owner {
                 pool_remove_entry(owner, &entry);
             }
-            CodexError {
-                status: 0,
-                message: format!("WebSocket send error: {error}"),
-                detail: None,
-                retry_after: None,
-                usage_limit: None,
-                origin: CodexErrorOrigin::WebSocket,
-            }
+            websocket_transport_error("send", &error)
         })?;
 
     let collected = collect_ws_events(
@@ -161,13 +154,18 @@ pub(super) async fn codex_websocket_request(
         if let Some(owner) = &pool_owner {
             pool_remove_entry(owner, &entry);
         }
-        return Err(CodexError {
+        let error = CodexError {
             status: 0,
             message: "Previous response not found".to_string(),
             detail: Some("previous_response_not_found".to_string()),
             retry_after: None,
             usage_limit: None,
             origin: CodexErrorOrigin::WebSocket,
+        };
+        return Err(if terminal_event.hosted_tool_executed {
+            error.after_hosted_tool_execution()
+        } else {
+            error
         });
     }
 
@@ -191,7 +189,7 @@ pub(super) async fn codex_websocket_request(
         write_websocket_response_capture(tc, status, started_at.elapsed());
     }
 
-    Ok(OwnerAwareCodexResponse::new(
+    let mut response = OwnerAwareCodexResponse::new(
         CodexResponse {
             body: sse_body,
             status,
@@ -199,7 +197,9 @@ pub(super) async fn codex_websocket_request(
             transport: ActualTransport::WebSocket,
         },
         origin_reinserted.then_some(entry.socket_id),
-    ))
+    );
+    response.hosted_tool_executed = terminal_event.hosted_tool_executed;
+    Ok(response)
 }
 
 async fn validate_pooled_websocket<S>(
@@ -364,14 +364,7 @@ pub(super) fn start_codex_websocket_events(
             }
             socket_id_publisher.publish(None);
             let _ = tx
-                .send(Err(CodexError {
-                    status: 0,
-                    message: format!("WebSocket send error: {error}"),
-                    detail: None,
-                    retry_after: None,
-                    usage_limit: None,
-                    origin: CodexErrorOrigin::WebSocket,
-                }))
+                .send(Err(websocket_transport_error("send", &error)))
                 .await;
             return;
         }
@@ -473,6 +466,17 @@ pub(super) fn websocket_stream_error(message: impl Into<String>) -> CodexError {
         usage_limit: None,
         origin: CodexErrorOrigin::WebSocket,
     }
+}
+
+pub(super) fn websocket_transport_error(
+    operation: &str,
+    error: &tokio_tungstenite::tungstenite::Error,
+) -> CodexError {
+    let mut failure = websocket_stream_error(format!("WebSocket {operation} error: {error}"));
+    if has_unexpected_eof(error) {
+        failure.detail = Some(TRANSPORT_UNEXPECTED_EOF_DETAIL.to_string());
+    }
+    failure
 }
 
 pub(super) fn websocket_idle_timeout_error(timeout_ms: u64) -> CodexError {

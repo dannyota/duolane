@@ -162,7 +162,7 @@ pub(super) fn authenticated_http_test_client(base_url: String) -> CodexHttpClien
     client
 }
 
-pub(super) async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+pub(super) async fn read_http_request(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> Vec<u8> {
     let mut request = Vec::new();
     let mut chunk = [0_u8; 4096];
     loop {
@@ -186,4 +186,26 @@ pub(super) async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Vec
             return request;
         }
     }
+}
+
+pub(super) fn loopback_tls() -> (tokio_rustls::TlsAcceptor, reqwest::Client) {
+    let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
+    let server_config = rustls::ServerConfig::builder_with_provider(
+        rustls::crypto::ring::default_provider().into(),
+    )
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(vec![cert.cert.der().clone()], key.into())
+    .unwrap();
+    let client = crate::tls::client_builder()
+        .no_proxy()
+        .tls_certs_only([reqwest::Certificate::from_der(cert.cert.der()).unwrap()])
+        .build()
+        .unwrap();
+    (
+        tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config)),
+        client,
+    )
 }

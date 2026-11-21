@@ -75,6 +75,7 @@ where
 pub(super) struct WsEvent {
     pub(super) event_type: String,
     pub(super) payload: serde_json::Value,
+    pub(super) hosted_tool_executed: bool,
 }
 
 pub(super) async fn collect_ws_events<S>(
@@ -110,13 +111,13 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut sse_body: Vec<u8> = Vec::new();
-    let mut terminal_event: Option<WsEvent> = None;
+    let mut hosted_tool_executed = false;
     let response_event_budget = Duration::from_millis(idle_timeout_ms);
     let response_wait_started = Instant::now();
     let mut last_response_event_at = response_wait_started;
     let mut response_started = false;
 
-    loop {
+    let terminal_event = loop {
         let response_deadline_started = if response_started {
             last_response_event_at
         } else {
@@ -127,7 +128,7 @@ where
                 Some(remaining) if !remaining.is_zero() => remaining,
                 _ => {
                     invalidate_pool_owner(pool_owner, pool_entry);
-                    return Err(websocket_idle_timeout_error(idle_timeout_ms));
+                    break Err(websocket_idle_timeout_error(idle_timeout_ms));
                 }
             }
         } else {
@@ -135,7 +136,7 @@ where
                 Some(remaining) if !remaining.is_zero() => remaining,
                 _ => {
                     invalidate_pool_owner(pool_owner, pool_entry);
-                    return Err(response_start_timeout_error(idle_timeout_ms));
+                    break Err(response_start_timeout_error(idle_timeout_ms));
                 }
             }
         };
@@ -144,7 +145,7 @@ where
             WebSocketRead::Frame(frame) => frame,
             WebSocketRead::Timeout => {
                 invalidate_pool_owner(pool_owner, pool_entry);
-                return Err(if response_started {
+                break Err(if response_started {
                     websocket_idle_timeout_error(idle_timeout_ms)
                 } else {
                     response_start_timeout_error(idle_timeout_ms)
@@ -152,7 +153,7 @@ where
             }
             WebSocketRead::KeepaliveError(error) => {
                 invalidate_pool_owner(pool_owner, pool_entry);
-                return Err(CodexError {
+                break Err(CodexError {
                     status: 0,
                     message: format!("WebSocket keepalive error: {error}"),
                     detail: Some(WEBSOCKET_KEEPALIVE_FAILURE_DETAIL.to_string()),
@@ -167,7 +168,7 @@ where
             Some(Ok(Message::Text(text))) => {
                 if sse_body.len().saturating_add(text.len()) > MAX_BUFFERED_RESPONSE_BYTES {
                     invalidate_pool_owner(pool_owner, pool_entry);
-                    return Err(websocket_stream_error(
+                    break Err(websocket_stream_error(
                         "Codex WebSocket response exceeds the size limit",
                     ));
                 }
@@ -198,21 +199,23 @@ where
                     last_response_event_at = Instant::now();
                 }
 
+                hosted_tool_executed |=
+                    super::events::event_confirms_hosted_tool_execution(&parsed);
                 if is_terminal_event(&parsed) {
-                    terminal_event = Some(WsEvent {
+                    break Ok(Some(WsEvent {
                         event_type: parsed
                             .get("type")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown")
                             .to_string(),
                         payload: parsed,
-                    });
-                    break;
+                        hosted_tool_executed,
+                    }));
                 }
             }
             Some(Ok(Message::Binary(_))) => {
                 invalidate_pool_owner(pool_owner, pool_entry);
-                return Err(websocket_stream_error(
+                break Err(websocket_stream_error(
                     "WebSocket binary frames not supported",
                 ));
             }
@@ -226,24 +229,30 @@ where
             Some(Ok(Message::Frame(_))) => {
                 continue;
             }
-            Some(Ok(Message::Close(_))) => {
+            Some(Ok(Message::Close(_))) | None => {
                 invalidate_pool_owner(pool_owner, pool_entry);
-                break;
+                break if hosted_tool_executed {
+                    Err(missing_terminal_error())
+                } else {
+                    Ok(None)
+                };
             }
             Some(Err(e)) => {
                 invalidate_pool_owner(pool_owner, pool_entry);
-                return Err(websocket_stream_error(format!(
-                    "WebSocket stream error: {e}"
-                )));
-            }
-            None => {
-                invalidate_pool_owner(pool_owner, pool_entry);
-                break;
+                break Err(websocket_transport_error("stream", &e));
             }
         }
-    }
+    };
 
-    Ok((sse_body, terminal_event))
+    terminal_event
+        .map(|event| (sse_body, event))
+        .map_err(|error| {
+            if hosted_tool_executed {
+                error.after_hosted_tool_execution()
+            } else {
+                error
+            }
+        })
 }
 
 pub(super) async fn stream_ws_events<S>(
@@ -386,14 +395,7 @@ where
                 break;
             }
             Some(Err(error)) => {
-                terminal_item = Some(Err(CodexError {
-                    status: 0,
-                    message: format!("WebSocket stream error: {error}"),
-                    detail: None,
-                    retry_after: None,
-                    usage_limit: None,
-                    origin: CodexErrorOrigin::WebSocket,
-                }));
+                terminal_item = Some(Err(websocket_transport_error("stream", &error)));
                 break;
             }
         }

@@ -137,7 +137,12 @@ impl CodexHttpClient {
                 }
             };
 
-            if should_refresh_after_unauthorized(&result, auth_refresh_attempted, transport) {
+            let replay_allowed = !result
+                .as_ref()
+                .is_ok_and(|response| response.hosted_tool_executed);
+            if replay_allowed
+                && should_refresh_after_unauthorized(&result, auth_refresh_attempted, transport)
+            {
                 auth_refresh_attempted = true;
                 auth = self.refreshed_auth(&auth).await?;
                 invalidate_live_continuation_pool(active_continuation.as_ref());
@@ -160,7 +165,7 @@ impl CodexHttpClient {
                 && (200..300).contains(&response.status)
                 && let Some(failure) = super::events::first_retryable_failure(&response.body)
             {
-                if transport_failures < MAX_BUFFERED_TRANSPORT_RETRIES {
+                if replay_allowed && transport_failures < MAX_BUFFERED_TRANSPORT_RETRIES {
                     let delay =
                         compute_backoff_delay(transport_failures, failure.retry_after.as_deref());
                     if delay.exceeds_budget {
@@ -237,7 +242,7 @@ impl CodexHttpClient {
                         .iter()
                         .find(|(k, _)| k.to_lowercase() == "retry-after")
                         .map(|(_, v)| v.clone());
-                    if transport_failures < MAX_BUFFERED_TRANSPORT_RETRIES {
+                    if replay_allowed && transport_failures < MAX_BUFFERED_TRANSPORT_RETRIES {
                         let delay =
                             compute_backoff_delay(transport_failures, retry_after.as_deref());
                         if delay.exceeds_budget {
@@ -282,7 +287,7 @@ impl CodexHttpClient {
                     });
                 }
                 Ok(response) if should_retry_codex_status(response.status) => {
-                    if transport_failures < MAX_BUFFERED_TRANSPORT_RETRIES {
+                    if replay_allowed && transport_failures < MAX_BUFFERED_TRANSPORT_RETRIES {
                         let retry_after = response
                             .headers
                             .iter()
@@ -325,7 +330,10 @@ impl CodexHttpClient {
                     continue;
                 }
                 Err(err) => {
-                    let retryable = is_retryable_transport_error(&err);
+                    let retryable = err.usage_limit.is_none()
+                        && (is_retryable_transport_error(&err)
+                            || (err.origin == CodexErrorOrigin::Http
+                                && should_retry_codex_status(err.status)));
                     if retryable && transport_failures < MAX_BUFFERED_TRANSPORT_RETRIES {
                         let delay =
                             compute_backoff_delay(transport_failures, err.retry_after.as_deref());
@@ -440,7 +448,7 @@ impl CodexHttpClient {
         started_at: Instant,
         ctx: &RequestContext,
     ) -> Result<CodexResponse, CodexError> {
-        let status = resp.status().as_u16();
+        let status = resp.status();
         let headers: Vec<(String, String)> = resp
             .headers()
             .iter()
@@ -449,7 +457,19 @@ impl CodexHttpClient {
 
         let body_bytes = self
             .read_buffered_body(&mut resp, ctx, "Codex response body")
-            .await?;
+            .await
+            .map_err(|mut error| {
+                if !status.is_success() {
+                    error.status = status.as_u16();
+                    error.detail = Some(error.message.clone());
+                    error.retry_after = headers.iter().find_map(|(name, value)| {
+                        name.eq_ignore_ascii_case("retry-after")
+                            .then(|| value.clone())
+                    });
+                }
+                error
+            })?;
+        let status = status.as_u16();
 
         if let Some(traffic) = ctx.traffic.as_deref() {
             write_upstream_response_capture(
@@ -850,22 +870,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn buffered_websocket_does_not_replay_tls_eof_after_hosted_search() {
+        use super::super::provider_test_support::assert_no_websocket_replay_after_hosted_search;
+
+        assert_no_websocket_replay_after_hosted_search(
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {"type": "web_search_call", "id": "search_1", "status": "completed"}
+            }),
+            |client: CodexHttpClient| async move {
+                match client
+                    .post_codex_with_transport(
+                        &buffered_test_request(),
+                        &http_test_context(),
+                        None,
+                        crate::config::CodexTransport::WebSocket,
+                    )
+                    .await
+                {
+                    Ok(response) => response.status,
+                    Err(error) => super::super::map_codex_error_to_response(&error)
+                        .status()
+                        .as_u16(),
+                }
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn buffered_http_does_not_replay_truncated_forbidden_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let sends = std::cell::Cell::new(0);
+        let server = async {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_http_request(&mut stream).await;
+                sends.set(sends.get() + 1);
+                if sends.get() == 2 {
+                    return;
+                }
+                stream.write_all(b"HTTP/1.1 403 Forbidden\r\ncontent-length: 10\r\nconnection: close\r\n\r\n").await.unwrap();
+            }
+        };
+        let request = buffered_test_request();
+        let context = http_test_context();
+        let response = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                _ = server => None,
+                result = client.post_codex_with_transport(
+                    &request,
+                    &context,
+                    None,
+                    crate::config::CodexTransport::Http,
+                ) => Some(result),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(sends.get(), 1);
+        assert_eq!(response.unwrap().err().unwrap().status, 403);
+    }
+
+    #[tokio::test]
     async fn buffered_http_retries_retryable_status() {
+        check_buffered_http_retries_retryable_status(false).await;
+    }
+
+    #[tokio::test]
+    async fn buffered_http_retries_truncated_service_unavailable_response() {
+        check_buffered_http_retries_retryable_status(true).await;
+    }
+
+    async fn check_buffered_http_retries_retryable_status(truncate_error_body: bool) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             for attempt in 0..2 {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = [0_u8; 16 * 1024];
-                assert!(stream.read(&mut request).await.unwrap() > 0);
+                read_http_request(&mut stream).await;
                 let (status, body): (&str, &[u8]) = if attempt == 0 {
                     ("503 Service Unavailable", b"retry")
                 } else {
                     ("200 OK", b"data: keep\n\n")
                 };
+                let content_length = body.len() + usize::from(attempt == 0 && truncate_error_body);
                 let response = format!(
-                    "HTTP/1.1 {status}\r\ncontent-length: {}\r\nretry-after: 0\r\nconnection: close\r\n\r\n",
-                    body.len()
+                    "HTTP/1.1 {status}\r\ncontent-length: {content_length}\r\nretry-after: 0\r\nconnection: close\r\n\r\n"
                 );
                 stream.write_all(response.as_bytes()).await.unwrap();
                 stream.write_all(body).await.unwrap();

@@ -179,7 +179,9 @@ pub(super) fn retryable_live_start_codex_error(err: &client::CodexError) -> bool
         return true;
     }
     matches!(err.status, 429 | 500 | 502 | 503 | 504 | 529)
-        || (err.status == 0 && retryable_live_message(codex_error_message(err)))
+        || (err.status == 0
+            && (err.detail.as_deref() == Some(client::TRANSPORT_UNEXPECTED_EOF_DETAIL)
+                || retryable_live_message(codex_error_message(err))))
 }
 
 pub(super) fn is_missing_previous_response_error(err: &client::CodexError) -> bool {

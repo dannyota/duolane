@@ -47,7 +47,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::anthropic::error::json_error;
-use crate::anthropic::schema::{CountTokensResponse, MessagesRequest};
+use crate::anthropic::schema::MessagesRequest;
 use crate::anthropic::sse::usage_from_anthropic_sse;
 use crate::config;
 use crate::logging::create_logger;
@@ -438,6 +438,11 @@ impl CodexProvider {
                 break response;
             }
             let error = empty_buffered_completion_error();
+            if response.hosted_tool_executed {
+                abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
+                abort_continuation_for_owner(&request_continuation);
+                return map_codex_error_to_response(&error);
+            }
             drop_live_continuation_for_retry(&mut continuation);
             if attempt >= MAX_EMPTY_COMPLETION_RETRIES {
                 log.warn(
@@ -638,56 +643,7 @@ impl Provider for CodexProvider {
     }
 
     async fn handle_count_tokens(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
-        let model = body.model.as_deref().unwrap_or("opus");
-        let mut resolved =
-            resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
-        if let Err(e) = resolved.assert_allowed() {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                format!(
-                    "Model \"{model}\" resolves to unsupported model \"{}\"",
-                    e.model
-                ),
-            );
-        }
-        let use_responses_lite =
-            apply_model_lane_for_request(&mut resolved, &body, config::codex_full_lane());
-        if let Some(monitor) = ctx.monitor.as_ref() {
-            monitor.model_resolved(&ctx.req_id, &resolved.model);
-        }
-
-        let translated = match translate_request(
-            &body,
-            TranslateOptions {
-                session_id: None,
-                service_tier: resolved.service_tier.clone(),
-                model: resolved.model.clone(),
-                use_responses_lite,
-                reasoning_account: self.client.auth_manager().reasoning_account().await,
-            },
-        ) {
-            Ok(t) => t,
-            Err(e) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request_error",
-                    e.to_string(),
-                );
-            }
-        };
-
-        let tokens = count_translated_tokens(&translated);
-        if let Some(monitor) = ctx.monitor.as_ref() {
-            monitor.usage_updated(&ctx.req_id, Some(tokens), None);
-        }
-        (
-            StatusCode::OK,
-            Json(CountTokensResponse {
-                input_tokens: tokens,
-            }),
-        )
-            .into_response()
+        self.count_tokens_response(body, ctx).await
     }
 }
 

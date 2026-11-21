@@ -111,6 +111,20 @@ pub(crate) fn classify_stream_event(payload: &Value) -> CodexStreamEventKind {
     }
 }
 
+pub(super) fn event_confirms_hosted_tool_execution(payload: &Value) -> bool {
+    match payload.get("type").and_then(Value::as_str) {
+        Some(
+            "response.web_search_call.in_progress"
+            | "response.web_search_call.searching"
+            | "response.web_search_call.completed",
+        ) => true,
+        Some("response.output_item.done") => {
+            payload.pointer("/item/type").and_then(Value::as_str) == Some("web_search_call")
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn event_is_terminal(payload: &Value) -> bool {
     matches!(
         classify_stream_event(payload),

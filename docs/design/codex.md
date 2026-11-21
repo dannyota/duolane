@@ -117,6 +117,12 @@ below the cap keeps its effort.
 - duolane holds protocol framing until the stream produces real output. Before
   that point a retry is invisible to the client. After it, duolane never
   retries.
+- An unexpected EOF from the HTTP or WebSocket transport, including a TLS close
+  without `close_notify`, is retryable before output. Streaming requests and
+  buffered WebSockets also stop retrying once Codex reports that a hosted web
+  search is in progress or has completed, even before client output.
+- A failed read of an HTTP error body preserves the status from the headers,
+  which still governs retries.
 - The HTTP reader runs its own bounded retries. They are not multiplied by the
   WebSocket retry policy.
 - An unclassified `response.failed` event is retryable, and never becomes a

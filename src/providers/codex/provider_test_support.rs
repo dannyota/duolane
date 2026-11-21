@@ -1,6 +1,6 @@
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::anthropic::schema::MessagesRequest;
@@ -67,7 +67,7 @@ pub(super) fn authenticated_live_test_client(base_url: String) -> Arc<CodexHttpC
 }
 
 pub(super) async fn next_live_websocket_request(
-    websocket: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+    websocket: &mut tokio_tungstenite::WebSocketStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> serde_json::Value {
     loop {
         match websocket.next().await {
@@ -75,13 +75,13 @@ pub(super) async fn next_live_websocket_request(
                 websocket.send(Message::Pong(payload)).await.unwrap();
             }
             Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).unwrap(),
-            other => panic!("unexpected WebSocket request frame: {other:?}"),
+            _ => panic!("unexpected WebSocket request frame"),
         }
     }
 }
 
 pub(super) async fn emit_live_event(
-    websocket: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+    websocket: &mut tokio_tungstenite::WebSocketStream<impl AsyncRead + AsyncWrite + Unpin>,
     event: &serde_json::Value,
 ) {
     websocket
@@ -105,4 +105,45 @@ pub(super) fn request_with_tools(tools: serde_json::Value) -> MessagesRequest {
         "tools": tools
     }))
     .unwrap()
+}
+
+pub(super) async fn assert_no_websocket_replay_after_hosted_search(
+    event: serde_json::Value,
+    request: impl AsyncFnOnce(CodexHttpClient) -> u16,
+) {
+    use super::client_test_support::{http_test_auth, loopback_tls};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tls, http) = loopback_tls();
+    let mut client = CodexHttpClient::new_for_test(
+        http.clone(),
+        format!("https://{addr}/responses"),
+        1_000,
+        1_000,
+    );
+    client.websocket_client = http;
+    client.auth_manager().set_test_auth(http_test_auth());
+    let sends = std::cell::Cell::new(0);
+    let server = async {
+        for _ in 0..2 {
+            let (socket, _) = listener.accept().await.unwrap();
+            let stream = tls.accept(socket).await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let payload = next_live_websocket_request(&mut websocket).await;
+            assert!(payload["type"] == "response.create");
+            sends.set(sends.get() + 1);
+            emit_live_event(&mut websocket, &event).await;
+        }
+    };
+    let status = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::select! {
+            _ = server => None,
+            status = request(client) => Some(status),
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(sends.get(), 1);
+    assert_eq!(status, Some(502));
 }
