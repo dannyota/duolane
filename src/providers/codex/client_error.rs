@@ -28,6 +28,7 @@ pub enum CodexErrorOrigin {
     Http,
     WebSocket,
     WebSocketHandshake,
+    WebSocketOverload,
     Auth,
     BufferedHttp,
     BufferedWebSocket,
@@ -40,6 +41,10 @@ impl CodexError {
             origin: CodexErrorOrigin::RecoveryBudget,
             ..Self::new(503, "Codex completed without producing output".to_string())
         }
+    }
+
+    pub(super) fn is_websocket_overload(&self) -> bool {
+        self.origin == CodexErrorOrigin::WebSocketOverload
     }
 
     pub(super) fn is_recovery_exhausted(&self) -> bool {
@@ -135,7 +140,8 @@ pub(super) fn codex_usage_limit_error(
 }
 
 pub(super) fn retryable_http_stream_error(error: &CodexError) -> bool {
-    if error.usage_limit.is_some() || error.is_recovery_exhausted() {
+    if error.usage_limit.is_some() || error.is_recovery_exhausted() || error.is_websocket_overload()
+    {
         return false;
     }
     if should_retry_codex_status(error.status) || is_retryable_transport_error(error) {
@@ -245,6 +251,7 @@ pub(super) fn codex_error_origin_name(origin: CodexErrorOrigin) -> &'static str 
         CodexErrorOrigin::Http => "http",
         CodexErrorOrigin::WebSocket => "websocket",
         CodexErrorOrigin::WebSocketHandshake => "websocket_handshake",
+        CodexErrorOrigin::WebSocketOverload => "websocket_overload",
         CodexErrorOrigin::Auth => "auth",
         CodexErrorOrigin::BufferedHttp => "buffered_http",
         CodexErrorOrigin::BufferedWebSocket => "buffered_websocket",
@@ -253,7 +260,7 @@ pub(super) fn codex_error_origin_name(origin: CodexErrorOrigin) -> &'static str 
 }
 
 pub(super) fn is_retryable_transport_error(err: &CodexError) -> bool {
-    if err.is_recovery_exhausted() {
+    if err.is_recovery_exhausted() || err.is_websocket_overload() {
         return false;
     }
     if matches!(
@@ -330,7 +337,7 @@ pub(super) fn should_refresh_after_unauthorized(
 }
 
 pub(super) fn should_fallback_to_http(err: &CodexError) -> bool {
-    err.origin == CodexErrorOrigin::WebSocketHandshake
+    (err.origin == CodexErrorOrigin::WebSocketHandshake || err.is_websocket_overload())
         && err.status != http::StatusCode::PROXY_AUTHENTICATION_REQUIRED.as_u16()
         && err.detail.as_deref() != Some(super::websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL)
 }

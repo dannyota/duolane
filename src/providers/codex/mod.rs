@@ -1140,7 +1140,7 @@ mod tests {
             let (socket, _) = listener.accept().await.unwrap();
             let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
             let _ = next_live_websocket_request(&mut websocket).await;
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             emit_live_event(&mut websocket, &serde_json::json!({
                 "type":"response.failed", "response":{"status":"failed", "error":{
                     "status":429, "code":"rate_limit_exceeded", "message":"retry", "retry_after_seconds":0
@@ -1161,7 +1161,7 @@ mod tests {
         let request = live_test_request("one");
         let mut ctx = live_test_context("slow-first-live");
         ctx.recovery_budget =
-            recovery::RecoveryBudget::with_window(std::time::Duration::from_millis(200));
+            recovery::RecoveryBudget::with_window(std::time::Duration::from_secs(1));
         let response = live_stream_response(
             authenticated_live_test_client(format!("http://{addr}/responses")),
             "message".to_string(),

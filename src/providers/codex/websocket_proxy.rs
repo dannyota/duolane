@@ -454,6 +454,9 @@ mod tests {
             &proxy_config,
             "wss://codex.invalid/backend-api/codex/responses",
             &HeaderMap::new(),
+            &WebSocketConnectGate::new(std::time::Duration::ZERO),
+            std::time::Duration::ZERO,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await
         {
@@ -541,6 +544,7 @@ mod tests {
             "ws://codex.invalid/backend-api/codex/responses",
             &HeaderMap::new(),
             2_000,
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         .unwrap();
@@ -694,6 +698,7 @@ mod tests {
             "wss://codex.invalid:4443/backend-api/codex/responses",
             &HeaderMap::new(),
             2_000,
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         {

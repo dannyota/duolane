@@ -59,6 +59,13 @@ impl RecoveryBudget {
         !self.expired()
     }
 
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        self.state
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .deadline
+    }
+
     pub(super) fn expired(&self) -> bool {
         self.state
             .lock()

@@ -101,6 +101,15 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+pub fn reset_codex_websocket_connect_gate_for_tests() {
+    let mut state = WS_CONNECT_GATE.last_start.lock().unwrap();
+    state.last_start = None;
+    state.spacing = WS_CONNECT_GATE.floor;
+    state.cooldown_until = None;
+    drop(state);
+    WS_CONNECT_GATE.changed.notify_waiters();
+}
+
 pub fn clear_codex_websocket_pool_for_tests() {
     let mut guard = WS_POOL.lock().unwrap();
     guard.clear();
@@ -309,26 +318,141 @@ pub(super) fn cleanup_pool_before_connect() {
     drop(removed);
 }
 
+struct ConnectGateState {
+    last_start: Option<tokio::time::Instant>,
+    spacing: Duration,
+    cooldown_until: Option<tokio::time::Instant>,
+    queue: std::collections::VecDeque<u64>,
+    next_id: u64,
+}
+
 pub(super) struct WebSocketConnectGate {
-    last_start: AsyncMutex<Option<tokio::time::Instant>>,
-    start_spacing: Duration,
+    last_start: Mutex<ConnectGateState>,
+    floor: Duration,
+    changed: tokio::sync::Notify,
+    handshakes: tokio::sync::Semaphore,
+}
+
+struct ConnectWaiter<'a> {
+    gate: &'a WebSocketConnectGate,
+    id: u64,
+}
+
+impl Drop for ConnectWaiter<'_> {
+    fn drop(&mut self) {
+        let mut state = self.gate.last_start.lock().unwrap();
+        state.queue.retain(|id| *id != self.id);
+        drop(state);
+        self.gate.changed.notify_waiters();
+    }
 }
 
 impl WebSocketConnectGate {
     pub(super) fn new(start_spacing: Duration) -> Self {
         Self {
-            last_start: AsyncMutex::new(None),
-            start_spacing,
+            last_start: Mutex::new(ConnectGateState {
+                last_start: None,
+                spacing: start_spacing,
+                cooldown_until: None,
+                queue: Default::default(),
+                next_id: 0,
+            }),
+            floor: start_spacing,
+            changed: tokio::sync::Notify::new(),
+            handshakes: tokio::sync::Semaphore::new(4),
         }
     }
 
-    pub(super) async fn wait_to_start(&self, before_start: impl std::future::Future<Output = ()>) {
-        let mut last_start = self.last_start.lock().await;
-        if let Some(previous) = *last_start {
-            crate::retry::sleep_until(previous + self.start_spacing).await;
-        }
+    #[cfg(test)]
+    pub(super) async fn wait_to_start(
+        &self,
+        before_start: impl std::future::Future<Output = ()>,
+    ) -> tokio::sync::SemaphorePermit<'_> {
+        self.wait_to_start_until(
+            before_start,
+            tokio::time::Instant::now() + Duration::from_secs(3600),
+        )
+        .await
+        .unwrap()
+    }
+
+    pub(super) async fn wait_to_start_until(
+        &self,
+        before_start: impl std::future::Future<Output = ()>,
+        queue_deadline: tokio::time::Instant,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, ()> {
         before_start.await;
-        *last_start = Some(tokio::time::Instant::now());
+        let permit = self.handshakes.acquire().await.unwrap();
+        let waiter = {
+            let mut state = self.last_start.lock().unwrap();
+            let id = state.next_id;
+            state.next_id = state.next_id.wrapping_add(1);
+            state.queue.push_back(id);
+            ConnectWaiter { gate: self, id }
+        };
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let deadline = {
+                let mut state = self.last_start.lock().unwrap();
+                let now = tokio::time::Instant::now();
+                if now >= queue_deadline {
+                    drop(state);
+                    return Err(());
+                }
+                if state.queue.front() == Some(&waiter.id) {
+                    let deadline = state
+                        .last_start
+                        .map(|last| last + state.spacing)
+                        .unwrap_or(now)
+                        .max(state.cooldown_until.unwrap_or(now));
+                    if deadline <= now {
+                        state.last_start = Some(now);
+                        state.queue.pop_front();
+                        drop(state);
+                        drop(waiter);
+                        return Ok(permit);
+                    }
+                    Some(deadline)
+                } else {
+                    None
+                }
+            };
+            if let Some(deadline) = deadline {
+                tokio::select! { _ = tokio::time::sleep_until(deadline) => {}, _ = &mut notified => {} }
+            } else {
+                notified.await;
+            }
+        }
+    }
+
+    pub(super) fn record_forbidden(&self, cooldown: Duration) {
+        let mut state = self.last_start.lock().unwrap();
+        let now = tokio::time::Instant::now();
+        if state.cooldown_until.is_none_or(|until| until <= now) {
+            state.spacing = state.spacing.saturating_mul(2).min(Duration::from_secs(8));
+            state.cooldown_until = Some(now + cooldown);
+        }
+        drop(state);
+        self.changed.notify_waiters();
+    }
+
+    #[cfg(test)]
+    pub(super) fn last_start_for_tests(&self) -> Option<tokio::time::Instant> {
+        self.last_start.lock().unwrap().last_start
+    }
+
+    #[cfg(test)]
+    pub(super) fn spacing_for_tests(&self) -> Duration {
+        self.last_start.lock().unwrap().spacing
+    }
+
+    pub(super) fn record_success(&self) {
+        let mut state = self.last_start.lock().unwrap();
+        state.spacing = (state.spacing / 2).max(self.floor);
+        drop(state);
+        self.changed.notify_waiters();
     }
 }
 
@@ -512,6 +636,123 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn waiting_for_start_does_not_hold_gate_lock() {
+        let gate = Arc::new(WebSocketConnectGate::new(Duration::from_secs(1)));
+        drop(gate.wait_to_start(async {}).await);
+        let waiting_gate = gate.clone();
+        let waiting = tokio::spawn(async move { drop(waiting_gate.wait_to_start(async {}).await) });
+        tokio::task::yield_now().await;
+        assert!(gate.last_start.try_lock().is_ok());
+        waiting.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn burst_slots_and_cancelled_waiter() {
+        let gate = Arc::new(WebSocketConnectGate::new(Duration::from_secs(1)));
+        let start = tokio::time::Instant::now();
+        drop(gate.wait_to_start(async {}).await);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut tasks = Vec::new();
+        for id in 0..4 {
+            let gate = gate.clone();
+            let tx = tx.clone();
+            tasks.push(tokio::spawn(async move {
+                let _permit = gate.wait_to_start(async {}).await;
+                tx.send((id, tokio::time::Instant::now())).unwrap();
+            }));
+            tokio::task::yield_now().await;
+        }
+        tasks[1].abort();
+        for (second, expected_id) in [0, 2, 3].into_iter().enumerate() {
+            let (id, started) = rx.recv().await.unwrap();
+            assert_eq!(id, expected_id);
+            assert_eq!(
+                started.duration_since(start),
+                Duration::from_secs(second as u64 + 1)
+            );
+        }
+        for (id, task) in tasks.into_iter().enumerate() {
+            if id == 1 {
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                task.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_deadline_does_not_start_handshake() {
+        let gate = WebSocketConnectGate::new(Duration::ZERO);
+        let deadline = tokio::time::Instant::now();
+        assert!(gate.wait_to_start_until(async {}, deadline).await.is_err());
+        assert!(gate.last_start.lock().unwrap().last_start.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn permit_ready_at_deadline_cannot_start() {
+        let gate = Arc::new(WebSocketConnectGate::new(Duration::ZERO));
+        let mut permits = Vec::new();
+        for _ in 0..4 {
+            permits.push(gate.wait_to_start(async {}).await);
+        }
+        let previous = gate.last_start.lock().unwrap().last_start;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let waiter_gate = gate.clone();
+        let waiter = tokio::spawn(async move {
+            waiter_gate
+                .wait_to_start_until(async {}, deadline)
+                .await
+                .is_err()
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        permits.pop();
+        assert!(waiter.await.unwrap());
+        assert_eq!(gate.last_start.lock().unwrap().last_start, previous);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn forbidden_cooldown_bounds_growth_and_success_decays() {
+        let gate = WebSocketConnectGate::new(Duration::from_secs(1));
+        gate.record_forbidden(Duration::from_secs(3));
+        gate.record_forbidden(Duration::from_secs(3));
+        assert_eq!(
+            gate.last_start.lock().unwrap().spacing,
+            Duration::from_secs(2)
+        );
+        for _ in 0..4 {
+            tokio::time::advance(Duration::from_secs(3)).await;
+            gate.record_forbidden(Duration::from_secs(3));
+        }
+        assert_eq!(
+            gate.last_start.lock().unwrap().spacing,
+            Duration::from_secs(8)
+        );
+        for _ in 0..4 {
+            gate.record_success();
+        }
+        assert_eq!(
+            gate.last_start.lock().unwrap().spacing,
+            Duration::from_secs(1)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handshakes_are_bounded_and_cancellation_releases_permits() {
+        let gate = Arc::new(WebSocketConnectGate::new(Duration::ZERO));
+        let mut permits = Vec::new();
+        for _ in 0..4 {
+            permits.push(gate.wait_to_start(async {}).await);
+        }
+        let other = gate.clone();
+        let task = tokio::spawn(async move { drop(other.wait_to_start(async {}).await) });
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        permits.pop();
+        task.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn connect_gate_spaces_starts_without_serializing_handshakes() {
         let gate = Arc::new(WebSocketConnectGate::new(Duration::from_secs(1)));
         let preflight_started = Arc::new(tokio::sync::Notify::new());
@@ -523,7 +764,7 @@ mod tests {
         let first_release = release_first.clone();
         let first_tx = started_tx.clone();
         let first = tokio::spawn(async move {
-            first_gate
+            let _permit = first_gate
                 .wait_to_start(async move {
                     first_preflight.notify_one();
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -536,7 +777,7 @@ mod tests {
 
         let second_gate = gate.clone();
         let second = tokio::spawn(async move {
-            second_gate.wait_to_start(async {}).await;
+            let _permit = second_gate.wait_to_start(async {}).await;
             started_tx.send(tokio::time::Instant::now()).unwrap();
         });
         let first_started = started_rx.recv().await.unwrap();
@@ -625,6 +866,7 @@ mod tests {
             Some(&continuation),
             50,
             50,
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         {
@@ -698,6 +940,7 @@ mod tests {
             Some(&continuation),
             50,
             50,
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         {
@@ -884,6 +1127,7 @@ mod tests {
             Some(&continuation),
             1_000,
             1_000,
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         .unwrap();
@@ -1191,6 +1435,7 @@ mod tests {
             &url,
             &HeaderMap::new(),
             1_000,
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         .unwrap()
