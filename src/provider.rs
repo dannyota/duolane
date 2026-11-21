@@ -20,10 +20,6 @@ pub enum AuthCommand {
     Status,
     #[command(about = "Delete stored authentication credentials")]
     Logout,
-    #[command(about = "List Codex profiles")]
-    List,
-    #[command(about = "Select a Codex profile")]
-    Use { name: String },
 }
 
 #[allow(clippy::double_must_use)]

@@ -94,31 +94,6 @@ Rejections use the Anthropic error shape and never echo request values:
   only with a login for the account it was translated for. If the login changed,
   duolane translates the request again once for the new account, and answers
   HTTP 409 if the login changes again during that retry.
-- The `default` Codex profile keeps the lookup and file handling above,
-  including a symlinked `auth.json`.
-- Named profiles in `codex-profiles.json` must name absolute paths without `..`
-  components. duolane opens the profile file, each named Codex home, and its
-  `auth.json` through file descriptors, without following symlinks, accepts only
-  regular files and directories, and checks ownership and mode on the opened
-  descriptors. The profile file and each home must be owned by the user and not
-  writable by group or others; a named `auth.json` must also not be readable by
-  them. Reads of a named `auth.json` stop at 1 MiB. Reading, the refresh lock,
-  and the atomic rename happen relative to the same opened home directory, so
-  replacing a path component cannot redirect them.
-- The profile selection in the state directory is written atomically, flushed,
-  and readable only by the user. duolane reads and writes it through a
-  descriptor of the state directory after checking that the directory is owned
-  by the user and not writable by group or others. An unsafe state directory is
-  an error for Codex requests, never the same as a missing selection.
-- For the profile file, the state directory, and each named home, every
-  directory from the resolved path up to `/` must be owned by root or the user
-  and not writable by group or others unless it is sticky, as OpenSSH
-  `StrictModes` requires. duolane creates the state directory only when it
-  writes a selection, with mode `0700`. Files are opened with `O_NOFOLLOW`,
-  `O_NOCTTY`, and `O_NONBLOCK`. Access control lists are not checked.
-- Named profiles and profile selection exist only on Unix. Elsewhere duolane
-  ignores both and uses `default`, and `duolane codex auth use` reports that
-  profiles are not supported.
 
 ## Upstream connections
 
