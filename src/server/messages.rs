@@ -1,4 +1,4 @@
-use super::auto_review::apply_auto_review_model;
+use super::auto_review::{apply_auto_review_model, is_claude_auto_review_request};
 use super::request_monitor::{
     FailedResponseLogContext, RequestLogContext, RequestMonitorGuard, headers_to_record,
     log_request_completed, monitor_failed, monitor_response_body, record_failed_response,
@@ -346,6 +346,9 @@ async fn dispatch_request(
     }
 
     body.bypass_provider_model_override = auto_review_route.is_some() && provider.name() == "codex";
+    if !count_tokens && provider.name() == "codex" && is_claude_auto_review_request(&body) {
+        body.auto_review_effort = crate::config::auto_review_effort();
+    }
 
     if let Some(route) = auto_review_route.as_ref() {
         log.info(

@@ -141,11 +141,15 @@ fn translate_request_inner(
     let effort = read_effort(req)?;
     let codex_effort = to_codex_effort(effort);
     let mut resolved_effort = if apply_codex_config {
-        resolve_effort(codex_effort)?
+        if let Some(effort) = req.auto_review_effort.as_deref() {
+            resolve_effort_override(codex_effort, Some(effort))?
+        } else {
+            resolve_effort(codex_effort)?
+        }
     } else {
         codex_effort
     };
-    if apply_codex_config && is_compact {
+    if apply_codex_config && is_compact && req.auto_review_effort.is_none() {
         resolved_effort = apply_compact_effort_cap(resolved_effort, compact_effort_cap());
     }
     let wants_reasoning = reasoning_requested(resolved_effort.as_ref());

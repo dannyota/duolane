@@ -47,6 +47,8 @@ struct FileConfig {
     pub alias_provider: Option<String>,
     #[serde(rename = "autoReviewModel")]
     pub auto_review_model: Option<String>,
+    #[serde(rename = "autoReviewEffort")]
+    pub auto_review_effort: Option<serde_json::Value>,
     pub log: Option<FileLog>,
     pub codex: Option<CodexConfig>,
     #[serde(rename = "authToken")]
@@ -291,7 +293,21 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     {
         out.push("DUOLANE_AUTO_REVIEW_MODEL (env)".to_string());
     }
+    if env
+        .get("DUOLANE_AUTO_REVIEW_EFFORT")
+        .is_some_and(|v| valid_auto_review_effort(v))
+    {
+        out.push("DUOLANE_AUTO_REVIEW_EFFORT (env)".to_string());
+    }
     if let Some(file_cfg) = file {
+        if file_cfg
+            .auto_review_effort
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(valid_auto_review_effort)
+        {
+            out.push("autoReviewEffort (config)".to_string());
+        }
         if let Some(bind_address) = file_cfg.bind_address {
             out.push(format!("bindAddress: {bind_address}"));
         }
@@ -651,6 +667,23 @@ pub fn auto_review_model() -> Option<String> {
         .filter(|model| !model.is_empty())
 }
 
+fn valid_auto_review_effort(value: &str) -> bool {
+    matches!(value, "none" | "low" | "medium" | "high" | "xhigh" | "max")
+}
+
+pub fn auto_review_effort() -> Option<String> {
+    std::env::var("DUOLANE_AUTO_REVIEW_EFFORT")
+        .ok()
+        .filter(|value| valid_auto_review_effort(value))
+        .or_else(|| {
+            read_file_config(&paths::config_dir())?
+                .auto_review_effort?
+                .as_str()
+                .filter(|value| valid_auto_review_effort(value))
+                .map(str::to_owned)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -676,6 +709,7 @@ mod tests {
             EnvGuard::unset("DUOLANE_CODEX_TRANSCRIPTIONS_API"),
             EnvGuard::unset("DUOLANE_CODEX_HEADER_TIMEOUT_MS"),
             EnvGuard::unset("DUOLANE_AUTO_REVIEW_MODEL"),
+            EnvGuard::unset("DUOLANE_AUTO_REVIEW_EFFORT"),
         ];
         guards.push(EnvGuard::set("DUOLANE_CONFIG_DIR", config.path()));
         guards
@@ -1147,6 +1181,49 @@ mod tests {
         {
             let _summary_env = EnvGuard::set("DUOLANE_CODEX_REASONING_SUMMARY", "");
             assert_eq!(codex_reasoning_summary().as_deref(), Some("off"));
+        }
+    }
+
+    #[test]
+    fn auto_review_effort_precedence_and_sources() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        let path = config.path().join("config.json");
+        assert_eq!(auto_review_effort(), None);
+        std::fs::write(&path, r#"{"autoReviewEffort":"medium"}"#).unwrap();
+        assert_eq!(auto_review_effort().as_deref(), Some("medium"));
+        assert!(
+            config_override_summary_lines(&load_config())
+                .contains(&"autoReviewEffort (config)".to_string())
+        );
+        for value in ["none", "low", "medium", "high", "xhigh", "max"] {
+            let _effort = EnvGuard::set("DUOLANE_AUTO_REVIEW_EFFORT", value);
+            assert_eq!(auto_review_effort().as_deref(), Some(value));
+            assert!(
+                config_override_summary_lines(&load_config())
+                    .contains(&"DUOLANE_AUTO_REVIEW_EFFORT (env)".to_string())
+            );
+        }
+        let _effort = EnvGuard::set("DUOLANE_AUTO_REVIEW_EFFORT", "invalid");
+        assert_eq!(auto_review_effort().as_deref(), Some("medium"));
+        assert!(
+            !config_override_summary_lines(&load_config())
+                .contains(&"DUOLANE_AUTO_REVIEW_EFFORT (env)".to_string())
+        );
+        for value in [serde_json::json!("invalid"), serde_json::json!(42)] {
+            std::fs::write(
+                &path,
+                serde_json::json!({"autoReviewEffort":value, "autoReviewModel":"gpt-6-luna"})
+                    .to_string(),
+            )
+            .unwrap();
+            assert_eq!(auto_review_effort(), None);
+            assert_eq!(auto_review_model().as_deref(), Some("gpt-6-luna"));
+            assert!(
+                !config_override_summary_lines(&load_config())
+                    .contains(&"autoReviewEffort (config)".to_string())
+            );
         }
     }
 

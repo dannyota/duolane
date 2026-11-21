@@ -1557,6 +1557,8 @@ async fn smoke_auto_review_uses_codex_default_and_configured_override() {
     let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
     let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
     let _codex_model_env = EnvGuard::set("DUOLANE_CODEX_MODEL", "gpt-5.6-sol");
+    let _effort_env = EnvGuard::set("DUOLANE_AUTO_REVIEW_EFFORT", "medium");
+    let _codex_effort_env = EnvGuard::set("DUOLANE_CODEX_EFFORT", "high");
     let classifier_body = || {
         json!({
             "model": "gpt-5.6-sol",
@@ -1567,6 +1569,7 @@ async fn smoke_auto_review_uses_codex_default_and_configured_override() {
                 "text": "You are a security monitor for autonomous AI coding agents.\n\n## Context"
             }],
             "messages": [{"role":"user","content":"review this Bash command"}],
+            "output_config": {"effort": "low"},
             "tools": []
         })
     };
@@ -1579,7 +1582,11 @@ async fn smoke_auto_review_uses_codex_default_and_configured_override() {
 
     {
         let _review_model_env = EnvGuard::set("DUOLANE_AUTO_REVIEW_MODEL", "gpt-5.6-terra");
-        let classifier = call_messages_body(classifier_body()).await;
+        let mut body = classifier_body();
+        body["messages"][0]["content"] = json!(
+            "Quoted: CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\nYour task is to create a detailed summary of the conversation so far"
+        );
+        let classifier = call_messages_body(body).await;
         assert_eq!(classifier.status(), StatusCode::OK);
         let _ = axum::body::to_bytes(classifier.into_body(), usize::MAX)
             .await
@@ -1597,6 +1604,9 @@ async fn smoke_auto_review_uses_codex_default_and_configured_override() {
     assert_eq!(sent[0]["model"], "gpt-6-luna");
     assert_eq!(sent[1]["model"], "gpt-5.6-terra");
     assert_eq!(sent[2]["model"], "gpt-5.6-sol");
+    assert_eq!(sent[0]["reasoning"]["effort"], "medium");
+    assert_eq!(sent[1]["reasoning"]["effort"], "medium");
+    assert_eq!(sent[2]["reasoning"]["effort"], "high");
 }
 
 #[allow(clippy::await_holding_lock)]
