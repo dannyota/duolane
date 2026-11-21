@@ -193,48 +193,6 @@ become an empty turn.
 - When retries run out, duolane returns HTTP 503 with `x-should-retry: false`,
   because duolane already spent its retry budget.
 
-## Profiles
-
-A profile names a Codex home, so one duolane can serve more than one ChatGPT
-login. The owner switches profiles by command; duolane never switches on its
-own, for example when a usage limit is reached.
-
-- `codex-profiles.json` in the duolane config directory maps profile names to
-  absolute Codex home directories. Names are 1 to 32 characters from
-  `A-Z a-z 0-9 _ -`. The file holds at most 16 profiles and 16 KiB. `default` is
-  reserved and keeps today's lookup: `DUOLANE_CODEX_AUTH_FILE`, then
-  `$CODEX_HOME`, then `~/.codex`.
-- `duolane codex auth list` prints each name, whether a login exists, and which
-  profile is selected. It prints no tokens and no account ids.
-  `duolane codex auth use <name>` writes the selection, at most 256 bytes, to
-  `codex-profile` in the state directory. The selection records the name and the
-  SHA-256 of the auth file path it pointed to; for `default` that is the
-  resolved auth file, since `DUOLANE_CODEX_AUTH_FILE` can change it.
-- Without a selection, duolane uses `default`. A selection that cannot be read,
-  names an unknown profile, or no longer matches its recorded auth file makes
-  Codex requests fail with a message to run `duolane codex auth use` again. It
-  never falls back to another login, and it does not affect Claude requests or
-  `/healthz`.
-- Each request reads the selection once when it starts and keeps that profile
-  through translation, retries, token refresh, and streaming. A switch applies
-  to the next request.
-- The model catalog is read from the selected profile's Codex home, once per
-  request, and family aliases resolve against that snapshot.
-- A profile only chooses which `auth.json` is read and refreshed. Connection
-  reuse, continuation, compaction state, and encrypted reasoning stay bound to
-  the ChatGPT account, so two profiles with the same account share them and the
-  reasoning signature format does not change.
-- A login without an account id gets no connection reuse, continuation, or
-  compaction state, and no Codex signature. Two logins without an account id are
-  never treated as the same account.
-- The account change rule in the security design applies within the request's
-  profile: Messages translates again once for the new account with the same
-  profile, model, catalog snapshot, search owner, and recovery budget, and
-  builds a new request body; a compressed body from the earlier translation is
-  never reused. Native Responses answers 409 instead of resending.
-- When more than one profile is defined, the usage limit answer names
-  `duolane codex auth use` as a way to continue.
-
 ## Usage limits
 
 Codex reports a spent subscription window as `usage_limit_reached`, with reset
