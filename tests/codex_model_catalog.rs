@@ -45,10 +45,10 @@ fn write_catalog(dir: &TempDir, extra: &str) {
         dir.path().join("models_cache.json"),
         serde_json::to_vec(&json!({
             "fetched_at":"2020-01-01T00:00:00Z", "client_version":"0.1.0", "etag":"fixture",
-            "models":[entry(extra,true,"list",true), entry("gpt-6.2-sol",true,"list",false), entry("gpt-6.10.0-sol",true,"list",true), entry("gpt-6.10-sol",true,"list",false), entry("gpt-9-sol",true,"hide",false), entry("gpt-test-hidden",true,"hide",false),
+            "models":[entry(extra,true,"list",true), entry("gpt-6.2-sol",true,"list",false), entry("gpt-6.10.0-sol",true,"list",true), entry("gpt-6.10-sol",true,"list",false), entry("gpt-9-sol",true,"hide",false), entry("gpt-6.1-luna",true,"list",false), entry("gpt-6.2-luna",true,"list",true), entry("gpt-9-luna",true,"hide",true), entry("gpt-10-luna",false,"list",true), entry("gpt-test-hidden",true,"hide",false),
                 entry("gpt-test-denied",false,"list",true),
                 entry("gpt-5.4",true,"list",true), entry("gpt-6.1-terra",false,"hide",false),
-                entry("opus",true,"list",false), entry("gpt-test-forged-fast",true,"list",true),
+                entry("opus",true,"list",false), entry("luna",true,"list",true), entry("anthropic-luna",true,"list",true), entry("gpt-test-forged-fast",true,"list",true),
                 {"slug":"gpt-test-incomplete"}]
         }))
         .unwrap(),
@@ -146,23 +146,41 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         "terra",
         "sol",
         "astra",
+        "luna",
+        "anthropic-luna",
         "anthropic-terra",
         "anthropic-sol",
         "anthropic-astra",
     ] {
-        assert!(
+        assert_eq!(
             listing["data"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|entry| entry["id"] == alias),
+                .filter(|entry| entry["id"] == alias)
+                .count(),
+            1,
             "{alias}"
         );
+    }
+    for alias in ["luna", "anthropic-luna"] {
+        for suffix in ["fast", "ultrafast"] {
+            let variant = format!("{alias}-{suffix}");
+            assert!(
+                !listing["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["id"] == variant)
+            );
+        }
     }
     assert!(listing.to_string().contains("gpt-test-future-fast"));
     assert!(!listing.to_string().contains("gpt-test-hidden"));
 
     for (requested, expected, lite, tier) in [
+        ("luna", "gpt-6.2-luna", true, None),
+        ("anthropic-luna", "gpt-6.2-luna", true, None),
         ("sol", "gpt-6.10-sol", false, None),
         ("anthropic-sol", "gpt-6.10-sol", false, None),
         ("anthropic-sol[1m]", "gpt-6.10-sol", false, None),
@@ -210,6 +228,20 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         );
         assert_eq!(headers["authorization"], "Bearer synthetic-access");
     }
+    let response = client
+        .post(format!("{url}/v1/responses"))
+        .json(&json!({"model":"luna","input":"synthetic","tools":[{"type":"web_search"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let (headers, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(body["model"], "gpt-6.2-sol");
+    assert!(!headers.contains_key("x-openai-internal-codex-responses-lite"));
+
     for route in ["/v1/messages", "/v1/chat/completions"] {
         let mut request = json!({"model":"gpt-test-future-fast","stream":false,
                 "messages":[{"role":"user","content":"synthetic"}]});
@@ -291,6 +323,10 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         "gpt-test-future-ultrafast",
         "gpt-test-future-fast-fast",
         "gpt-5.4[1m]",
+        "luna-fast",
+        "luna-ultrafast",
+        "anthropic-luna-fast",
+        "anthropic-luna-ultrafast",
     ] {
         let response = client
             .post(format!("{url}/v1/responses"))
@@ -338,6 +374,31 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         .unwrap()
         .unwrap();
     assert_eq!(body["model"], "gpt-7.0-sol");
+    let path = dir.path().join("models_cache.json");
+    let mut catalog: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for model in catalog["models"].as_array_mut().unwrap() {
+        if model["slug"]
+            .as_str()
+            .is_some_and(|slug| slug.ends_with("-sol"))
+        {
+            model["use_responses_lite"] = json!(true);
+        }
+    }
+    std::fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let response = client
+        .post(format!("{url}/v1/responses"))
+        .json(&json!({"model":"luna","input":"synthetic","tools":[{"type":"web_search"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let (headers, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(body["model"], "gpt-6.1-sol");
+    assert!(!headers.contains_key("x-openai-internal-codex-responses-lite"));
     std::fs::remove_file(dir.path().join("models_cache.json")).unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await;
     let response = client
@@ -369,6 +430,27 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         .unwrap()
         .unwrap();
     assert_eq!(body["model"], "gpt-6.1-sol");
+    for (tools, expected, lite) in [
+        (json!([]), "gpt-6-luna", true),
+        (json!([{"type":"web_search"}]), "gpt-6-sol", false),
+    ] {
+        let response = client
+            .post(format!("{url}/v1/responses"))
+            .json(&json!({"model":"luna","input":"synthetic","tools":tools}))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let (headers, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body["model"], expected);
+        assert_eq!(
+            headers.contains_key("x-openai-internal-codex-responses-lite"),
+            lite
+        );
+    }
     std::fs::write(
         dir.path().join("config.json"),
         r#"{"codex":{"fullLane":true}}"#,

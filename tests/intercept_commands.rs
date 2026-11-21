@@ -261,6 +261,7 @@ async fn claude_starts_with_the_intercept_environment_and_the_lineup_before_the_
         {"model": "terra", "label": "Terra (Codex)"},
         {"model": "sol", "label": "Sol (Codex)"},
         {"model": "astra", "label": "Astra (Codex)"},
+        {"model": "luna", "label": "Luna (Codex)"},
         {"model": "gpt-toy-early", "label": "Toy Early (Codex)"},
         {"model": "gpt-toy-late", "label": "Toy Late (Codex)"}
     ]}});
