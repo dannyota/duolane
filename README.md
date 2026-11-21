@@ -141,6 +141,18 @@ duolane claude-accounts list
 duolane claude-accounts use work
 ```
 
+Show how much of each account's 5-hour and weekly limits is used, and when each
+resets:
+
+```bash
+duolane claude-accounts usage
+```
+
+`usage` reads each account's login from the macOS Keychain, or from
+`.credentials.json` on other systems, and asks Anthropic for that account's
+usage. macOS may ask once per account to let `security` read the login. An
+expired login is reported; open Claude Code with that account to refresh it.
+
 Account selection is stored now, but Claude requests still use the login Claude
 Code sends until account binding is available.
 
@@ -196,6 +208,7 @@ Pick a Claude model before you run Claude Code without duolane.
 | `duolane codex auth use <name>`      | Select a Codex profile                        |
 | `duolane claude-accounts list`       | List Claude accounts                          |
 | `duolane claude-accounts use <name>` | Select a Claude account                       |
+| `duolane claude-accounts usage`      | Show each Claude account's usage              |
 | `duolane claude [args]`              | Start Claude Code through the intercept proxy |
 | `duolane intercept setup`            | Route every Claude Code session through it    |
 | `duolane intercept cleanup`          | Remove the intercept settings and files       |

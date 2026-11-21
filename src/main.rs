@@ -115,6 +115,8 @@ enum ClaudeAccountsCommand {
         #[arg(allow_hyphen_values = true)]
         name: String,
     },
+    #[command(about = "Show Claude account usage")]
+    Usage,
 }
 
 fn main() -> Result<()> {
@@ -436,6 +438,19 @@ fn run_claude_accounts(command: ClaudeAccountsCommand) -> Result<()> {
         ClaudeAccountsCommand::Use { name } => {
             duolane::providers::anthropic::accounts::select(&name)
         }
+        ClaudeAccountsCommand::Usage => {
+            let report = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(duolane::providers::anthropic::accounts::usage())?;
+            if let Some(warning) = report.warning {
+                eprintln!("{warning}");
+            }
+            for line in &report.lines {
+                println!("{line}");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -558,6 +573,15 @@ mod tests {
         ));
 
         assert!(Cli::try_parse_from(["duolane", "claude-accounts", "use"]).is_err());
+
+        let cli = Cli::try_parse_from(["duolane", "claude-accounts", "usage"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ClaudeAccounts {
+                command: ClaudeAccountsCommand::Usage
+            })
+        ));
+        assert!(Cli::try_parse_from(["duolane", "claude-accounts", "usage", "work"]).is_err());
     }
 
     #[tokio::test]

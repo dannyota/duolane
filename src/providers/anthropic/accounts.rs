@@ -61,15 +61,26 @@ pub fn parse_accounts(bytes: &[u8]) -> anyhow::Result<Vec<(String, PathBuf)>> {
     Ok(accounts)
 }
 
+pub struct UsageReport {
+    pub lines: Vec<String>,
+    pub warning: Option<&'static str>,
+}
+
+pub const SELECTION_WARNING: &str =
+    "warning: Claude account selection invalid; run duolane claude-accounts use <name>";
+
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{list, select};
+pub use unix::{list, select, usage};
+
+#[cfg(unix)]
+mod usage;
 
 #[cfg(not(unix))]
 mod non_unix;
 #[cfg(not(unix))]
-pub use non_unix::{list, select};
+pub use non_unix::{list, select, usage};
 
 #[cfg(all(test, unix))]
 mod tests {
