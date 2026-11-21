@@ -133,6 +133,18 @@ The intercept certificate lasts 90 days. When fewer than 14 days remain,
 `/model <codex model>` also saves that model as the default for new sessions.
 Pick a Claude model before you run Claude Code without duolane.
 
+## Claude Code agents
+
+Run `duolane agents setup` to install Codex family agents, or
+`duolane agents remove` to remove unmodified agents. Use `--force` with setup to
+replace modified files. Files live in `$CLAUDE_CONFIG_DIR/agents`, or
+`~/.claude/agents` when `CLAUDE_CONFIG_DIR` is unset.
+
+Agents reach Codex only when Claude Code routes through duolane via
+`ANTHROPIC_BASE_URL` or intercept mode (`duolane intercept setup` or
+`duolane claude`). Set effort per Agent call or add an `effort:` line to an
+agent file.
+
 ## Commands
 
 | Command                     | Purpose                                       |
