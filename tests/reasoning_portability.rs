@@ -124,6 +124,7 @@ async fn reasoning_survives_codex_to_claude_to_codex() {
         std::env::set_var("DUOLANE_CODEX_BASE_URL", &codex);
         std::env::set_var("DUOLANE_CODEX_TRANSPORT", "http");
         std::env::set_var("DUOLANE_ANTHROPIC_BASE_URL", &claude);
+        std::env::set_var("DUOLANE_AUTO_REVIEW_EFFORT", "high");
     }
 
     let codex_reply = send(
@@ -178,6 +179,10 @@ async fn reasoning_survives_codex_to_claude_to_codex() {
         assert_eq!(claude_requests.lock().unwrap().last(), Some(&body));
     }
 
+    let classifier = r#"{ "model": "claude-opus-4-8", "max_tokens": 64, "system": [{"type":"text","text":"You are a security monitor for autonomous AI coding agents."}], "messages": [{"role":"user","content":"review"}], "output_config": {"effort":"low"}, "tools": [] }"#.to_string();
+    send_raw(classifier.clone(), StatusCode::OK).await;
+    assert!(claude_requests.lock().unwrap().last() == Some(&classifier));
+
     let missed_block = json!({"role": "user", "content": codex_reply["content"]});
     let refused = [
         json!({"model": "claude-opus-4-8", "max_tokens": 64, "messages": [missed_block]})
@@ -189,7 +194,7 @@ async fn reasoning_survives_codex_to_claude_to_codex() {
         assert_eq!(reply["error"]["type"], "invalid_request_error");
         assert!(!reply.to_string().contains("enc-secret"));
     }
-    assert_eq!(claude_requests.lock().unwrap().len(), 3);
+    assert_eq!(claude_requests.lock().unwrap().len(), 4);
 
     history.extend([assistant(&claude_answer), user("three")]);
     let next_codex_turn = json!({"model": "gpt-5.5", "max_tokens": 64, "messages": history});

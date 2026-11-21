@@ -173,6 +173,7 @@ your Claude login, and the Claude route then fails.
 | `DUOLANE_INTERCEPT`              | Set to `true` to open the intercept proxy |
 | `DUOLANE_INTERCEPT_PORT`         | Intercept proxy port, `18766` by default  |
 | `DUOLANE_AUTO_REVIEW_MODEL`      | Model for Claude Code's auto-review       |
+| `DUOLANE_AUTO_REVIEW_EFFORT`     | Codex auto-review reasoning effort        |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL`   | Claude Code's model for the Opus alias    |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | Claude Code's model for the Sonnet alias  |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL`  | Claude Code's small background model      |
@@ -182,6 +183,11 @@ File settings live in `~/.config/duolane/config.json`, and logs in
 `~/.local/state/duolane/`. On Windows they live in `%APPDATA%\duolane` and
 `%LOCALAPPDATA%\duolane`. `DUOLANE_CONFIG_DIR` and `DUOLANE_STATE_DIR` move
 them.
+
+Set `DUOLANE_AUTO_REVIEW_EFFORT` or `autoReviewEffort` to `none`, `low`,
+`medium`, `high`, `xhigh`, or `max` to override Codex classifier effort. The
+environment takes precedence over the file. Invalid values are ignored; without
+a valid override, normal effort selection applies.
 
 Set `DUOLANE_CODEX_REQUEST_COMPRESSION=gzip` or set `codex.requestCompression`
 to `"gzip"` in the config file to compress Codex Responses and search requests

@@ -9,7 +9,9 @@ pub(super) struct AutoReviewRoute {
     pub(super) override_model: String,
 }
 
-fn is_claude_auto_review_request(body: &crate::anthropic::schema::MessagesRequest) -> bool {
+pub(super) fn is_claude_auto_review_request(
+    body: &crate::anthropic::schema::MessagesRequest,
+) -> bool {
     if body.stream {
         return false;
     }

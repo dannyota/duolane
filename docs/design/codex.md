@@ -62,6 +62,9 @@ owner, with `:0` appended to the window id. Agent ids are not sent upstream.
 
 - A content block the translation cannot carry becomes the text
   `[unsupported content block omitted: <type>]`, so the loss stays visible.
+- For auto-review classifiers routed to Codex, `DUOLANE_AUTO_REVIEW_EFFORT` or
+  `autoReviewEffort` overrides normal effort resolution. The environment wins;
+  invalid values are ignored. Claude routes and token counting are unchanged.
 - Reasoning output and encrypted reasoning are requested only when the resolved
   effort is not `none`. An explicit `none` still names the effort so it
   overrides the backend default.
