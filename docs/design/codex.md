@@ -109,6 +109,13 @@ native server compaction retain their configured transport.
 
 ## Transport and retries
 
+- Fresh WebSocket handshakes share a process-wide queue, with at most four in
+  flight and a 30-second queue deadline. Starts are spaced by one second
+  initially and at minimum. An origin upgrade 403 doubles spacing up to eight
+  seconds and starts one three-second cooldown; further 403s during it do not
+  stack. Each successful handshake halves spacing toward the floor. Proxy 403s
+  do not affect pacing. Cancelled waiters release their place. Lowering the
+  floor awaits a live A/B check.
 - `DUOLANE_CODEX_TRANSPORT` selects `http`, `websocket`, or `auto`. `auto`
   prefers WebSocket and falls back to HTTP only when WebSocket failed before the
   request was sent.

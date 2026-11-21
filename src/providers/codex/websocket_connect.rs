@@ -10,8 +10,6 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
 
-use crate::retry::sleep as retry_sleep;
-
 use super::client::{CodexError, CodexErrorOrigin};
 use super::websocket::*;
 use super::websocket_handshake::*;
@@ -248,7 +246,12 @@ where
     Fut: std::future::Future<Output = Result<T, ConnectAttemptError>>,
 {
     for attempt in 0..=1 {
-        gate.wait_to_start(before_start()).await;
+        let permit =
+            tokio::time::timeout(Duration::from_secs(30), gate.wait_to_start(before_start()))
+                .await
+                .map_err(|_| {
+                    websocket_protocol_error("WebSocket connect queue timeout after 30000ms")
+                })?;
         let result = tokio::time::timeout(connect_timeout, connect())
             .await
             .unwrap_or_else(|_| {
@@ -256,13 +259,17 @@ where
                     connect_timeout,
                 )))
             });
+        drop(permit);
         if result
             .as_ref()
             .is_err_and(ConnectAttemptError::is_origin_forbidden)
-            && attempt == 0
         {
-            retry_sleep(u64::try_from(forbidden_cooldown.as_millis()).unwrap_or(u64::MAX)).await;
-            continue;
+            gate.record_forbidden(forbidden_cooldown);
+            if attempt == 0 {
+                continue;
+            }
+        } else if result.is_ok() {
+            gate.record_success();
         }
         return result.map_err(ConnectAttemptError::into_error);
     }
@@ -306,6 +313,29 @@ mod tests {
 
     fn origin_forbidden_error() -> ConnectAttemptError {
         ConnectAttemptError::Origin(handshake_error(http::StatusCode::FORBIDDEN.as_u16()))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_queue_wait_has_a_deadline() {
+        let gate = WebSocketConnectGate::new(Duration::ZERO);
+        let mut permits = Vec::new();
+        for _ in 0..4 {
+            permits.push(gate.wait_to_start(async {}).await);
+        }
+        let started = tokio::time::Instant::now();
+        let result = connect_with_policy(
+            &gate,
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+            || async {},
+            || async { Ok::<(), ConnectAttemptError>(()) },
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err().message,
+            "WebSocket connect queue timeout after 30000ms"
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
     }
 
     #[tokio::test(start_paused = true)]
@@ -390,6 +420,7 @@ mod tests {
         assert_eq!(error.retry_after.as_deref(), Some("7"));
         assert_eq!(error.origin, CodexErrorOrigin::WebSocketHandshake);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(gate.spacing_for_tests(), Duration::from_secs(4));
         let starts = starts.lock().unwrap();
         assert!(starts[1].duration_since(starts[0]) >= Duration::from_secs(3));
     }
@@ -418,6 +449,7 @@ mod tests {
 
         assert_eq!(error.status, http::StatusCode::FORBIDDEN.as_u16());
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.spacing_for_tests(), Duration::ZERO);
     }
 
     #[tokio::test]
