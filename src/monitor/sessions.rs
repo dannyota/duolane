@@ -16,6 +16,7 @@ pub(super) fn session_summaries(
     now: SystemTime,
 ) -> Vec<SessionSummary> {
     let mut sessions: HashMap<Option<String>, SessionSummary> = HashMap::new();
+    let mut identity_ranks = HashMap::new();
     for request in recent.iter().rev() {
         let entry = sessions
             .entry(request.session_id.clone())
@@ -41,9 +42,20 @@ pub(super) fn session_summaries(
             entry.failure_count += 1;
         }
         entry.project = request.project.clone().or(entry.project.clone());
-        entry.provider = request.provider.clone().or(entry.provider.clone());
-        entry.model = request.model.clone().or(entry.model.clone());
-        entry.effort = request.effort.clone().or(entry.effort.clone());
+        let rank = (
+            request.input_tokens,
+            request.input_tokens.is_none() && request.model.is_some(),
+            request.started_at,
+        );
+        let best = identity_ranks
+            .entry(request.session_id.clone())
+            .or_insert(rank);
+        if rank >= *best {
+            *best = rank;
+            entry.provider = request.provider.clone();
+            entry.model = request.model.clone();
+            entry.effort = request.effort.clone();
+        }
         entry.last_seen = max_system_time(entry.last_seen, request.finished_at);
         if let (Some(tokens), Some(duration)) = (
             request
@@ -83,9 +95,20 @@ pub(super) fn session_summaries(
         entry.active_count += 1;
         entry.request_count += 1;
         entry.project = request.project.clone().or(entry.project.clone());
-        entry.provider = request.provider.clone().or(entry.provider.clone());
-        entry.model = request.model.clone().or(entry.model.clone());
-        entry.effort = request.effort.clone().or(entry.effort.clone());
+        let rank = (
+            request.input_tokens,
+            request.input_tokens.is_none() && request.model.is_some(),
+            request.started_at,
+        );
+        let best = identity_ranks
+            .entry(request.session_id.clone())
+            .or_insert(rank);
+        if rank >= *best {
+            *best = rank;
+            entry.provider = request.provider.clone();
+            entry.model = request.model.clone();
+            entry.effort = request.effort.clone();
+        }
         entry.last_seen = max_system_time(entry.last_seen, request.started_at);
         if let (Some(tokens), Some(duration)) = (
             request
