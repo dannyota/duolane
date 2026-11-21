@@ -1,12 +1,9 @@
 # Changelog
 
-## 0.2.0
+## 0.2.1
 
 ### Added
 
-- `terra`, `sol`, and `astra` aliases and their `anthropic-` equivalents select
-  the newest listed model in each Codex family. The three short names appear in
-  the intercept model picker.
 - `luna` and `anthropic-luna` select the newest listed Luna model.
 
 ### Changed
@@ -14,6 +11,14 @@
 - The monitor shows rate, input, and output tokens for Claude requests.
 - The monitor widens the Project column on wide terminals and labels the Claude
   provider `claude`.
+
+## 0.2.0
+
+### Added
+
+- `terra`, `sol`, and `astra` aliases and their `anthropic-` equivalents select
+  the newest listed model in each Codex family. The three short names appear in
+  the intercept model picker.
 
 ## 0.1.1
 
