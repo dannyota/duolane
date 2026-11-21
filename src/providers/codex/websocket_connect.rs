@@ -3,6 +3,10 @@ use http::HeaderMap;
 use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering as AtomicOrdering},
+};
 use std::time::Duration;
 #[cfg(test)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -143,6 +147,9 @@ async fn connect_via_http_upgrade(
     websocket_client: &reqwest::Client,
     url: &str,
     headers: &HeaderMap,
+    gate: &WebSocketConnectGate,
+    forbidden_cooldown: Duration,
+    forbidden_seen: Arc<AtomicBool>,
 ) -> Result<CodexWebSocketStream, CodexError> {
     let http_url = to_http_upgrade_url(url).map_err(|error| CodexError {
         status: 0,
@@ -172,6 +179,10 @@ async fn connect_via_http_upgrade(
     let response = request.send().await.map_err(reqwest_handshake_error)?;
     if response.status() != http::StatusCode::SWITCHING_PROTOCOLS {
         let status = response.status().as_u16();
+        if status == http::StatusCode::FORBIDDEN.as_u16() {
+            gate.record_forbidden(forbidden_cooldown);
+            forbidden_seen.store(true, AtomicOrdering::Release);
+        }
         let retry_after = response
             .headers()
             .get(http::header::RETRY_AFTER)
@@ -212,6 +223,9 @@ pub(super) async fn connect_once(
     proxy_config: &WebSocketProxyConfig,
     url: &str,
     headers: &HeaderMap,
+    gate: &WebSocketConnectGate,
+    forbidden_cooldown: Duration,
+    forbidden_seen: Arc<AtomicBool>,
 ) -> Result<CodexWebSocketStream, ConnectAttemptError> {
     if let Some(route) = proxy_config
         .http_connect_route(url)
@@ -219,9 +233,16 @@ pub(super) async fn connect_once(
     {
         connect_via_http_proxy_tunnel(proxy_config, route, url, headers).await
     } else {
-        connect_via_http_upgrade(websocket_client, url, headers)
-            .await
-            .map_err(ConnectAttemptError::Origin)
+        connect_via_http_upgrade(
+            websocket_client,
+            url,
+            headers,
+            gate,
+            forbidden_cooldown,
+            forbidden_seen,
+        )
+        .await
+        .map_err(ConnectAttemptError::Origin)
     }
 }
 
@@ -238,38 +259,79 @@ async fn connect_with_policy<T, P, PFut, F, Fut>(
     forbidden_cooldown: Duration,
     mut before_start: P,
     mut connect: F,
+    budget: &super::recovery::RecoveryBudget,
 ) -> Result<T, CodexError>
 where
     P: FnMut() -> PFut,
     PFut: std::future::Future<Output = ()>,
-    F: FnMut() -> Fut,
+    F: FnMut(Arc<AtomicBool>) -> Fut,
     Fut: std::future::Future<Output = Result<T, ConnectAttemptError>>,
 {
+    let mut forbidden = None;
     for attempt in 0..=1 {
-        let permit =
-            tokio::time::timeout(Duration::from_secs(30), gate.wait_to_start(before_start()))
-                .await
-                .map_err(|_| {
-                    websocket_protocol_error("WebSocket connect queue timeout after 30000ms")
-                })?;
-        let result = tokio::time::timeout(connect_timeout, connect())
+        let queue_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let budget_deadline = budget.deadline();
+        let deadline =
+            budget_deadline.map_or(queue_deadline, |deadline| deadline.min(queue_deadline));
+        let permit = match tokio::time::timeout_at(
+            deadline,
+            gate.wait_to_start_until(before_start(), deadline),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            _ => {
+                if budget_deadline
+                    .is_some_and(|end| end <= queue_deadline && tokio::time::Instant::now() >= end)
+                {
+                    return Err(CodexError::recovery_exhausted());
+                }
+                return Err(forbidden.unwrap_or_else(|| CodexError {
+                    status: 503,
+                    origin: CodexErrorOrigin::WebSocketOverload,
+                    ..websocket_protocol_error("WebSocket connect queue timeout after 30000ms")
+                }));
+            }
+        };
+        if budget.expired() {
+            return Err(CodexError::recovery_exhausted());
+        }
+        let forbidden_seen = Arc::new(AtomicBool::new(false));
+        let result = tokio::time::timeout(connect_timeout, connect(forbidden_seen.clone()))
             .await
             .unwrap_or_else(|_| {
-                Err(ConnectAttemptError::Origin(connect_timeout_error(
-                    connect_timeout,
-                )))
+                let error = if forbidden_seen.load(AtomicOrdering::Acquire) {
+                    CodexError {
+                        status: 403,
+                        message: "WebSocket upgrade rejected with status 403".to_string(),
+                        detail: Some(GENERIC_HANDSHAKE_ERROR_DETAIL.to_string()),
+                        ..websocket_protocol_error("WebSocket upgrade rejected with status 403")
+                    }
+                } else {
+                    connect_timeout_error(connect_timeout)
+                };
+                Err(ConnectAttemptError::Origin(error))
             });
-        drop(permit);
         if result
             .as_ref()
             .is_err_and(ConnectAttemptError::is_origin_forbidden)
         {
-            gate.record_forbidden(forbidden_cooldown);
+            if !forbidden_seen.load(AtomicOrdering::Acquire) {
+                gate.record_forbidden(forbidden_cooldown);
+            }
+            drop(permit);
             if attempt == 0 {
+                forbidden = result.err().map(ConnectAttemptError::into_error);
+                if !budget.try_retry(Duration::ZERO, false) {
+                    return Err(CodexError::recovery_exhausted());
+                }
                 continue;
             }
-        } else if result.is_ok() {
-            gate.record_success();
+        } else {
+            if result.is_ok() {
+                gate.record_success();
+            }
+            drop(permit);
         }
         return result.map_err(ConnectAttemptError::into_error);
     }
@@ -282,13 +344,25 @@ pub(super) async fn connect_with_timeout(
     url: &str,
     headers: &HeaderMap,
     connect_timeout_ms: u64,
+    budget: &super::recovery::RecoveryBudget,
 ) -> Result<CodexWebSocketStream, CodexError> {
     connect_with_policy(
         &WS_CONNECT_GATE,
         Duration::from_millis(connect_timeout_ms),
         WEBSOCKET_CONNECT_FORBIDDEN_COOLDOWN,
         || async { cleanup_pool_before_connect() },
-        || connect_once(websocket_client, proxy_config, url, headers),
+        |seen| {
+            connect_once(
+                websocket_client,
+                proxy_config,
+                url,
+                headers,
+                &WS_CONNECT_GATE,
+                WEBSOCKET_CONNECT_FORBIDDEN_COOLDOWN,
+                seen,
+            )
+        },
+        budget,
     )
     .await
 }
@@ -328,14 +402,140 @@ mod tests {
             Duration::from_secs(1),
             Duration::from_secs(3),
             || async {},
-            || async { Ok::<(), ConnectAttemptError>(()) },
+            |_| async { Ok::<(), ConnectAttemptError>(()) },
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await;
-        assert_eq!(
-            result.unwrap_err().message,
-            "WebSocket connect queue timeout after 30000ms"
-        );
+        let error = result.unwrap_err();
+        assert_eq!(error.status, 503);
+        assert!(!super::super::client::retryable_http_stream_error(&error));
+        assert!(!super::super::client::is_retryable_transport_error(&error));
+        assert!(!super::super::live_completion::retryable_live_start_codex_error(&error));
+        assert!(super::super::client::should_fallback_to_http(&error));
+        let response = super::super::error_response::map_codex_error_to_response(&error);
+        assert_eq!(response.status(), 503);
+        assert_eq!(response.headers()["x-should-retry"], "false");
+
         assert_eq!(started.elapsed(), Duration::from_secs(30));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn forbidden_updates_cooldown_before_permit_is_released() {
+        let gate = std::sync::Arc::new(WebSocketConnectGate::new(Duration::ZERO));
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            held.push(gate.wait_to_start(async {}).await);
+        }
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let connecting_gate = gate.clone();
+        let connecting = tokio::spawn(async move {
+            let mut release_rx = Some(release_rx);
+            let mut started_tx = Some(started_tx);
+            connect_with_policy(
+                &connecting_gate,
+                Duration::from_secs(10),
+                Duration::from_secs(3),
+                || async {},
+                |_| {
+                    let rx = release_rx.take();
+                    if let Some(tx) = started_tx.take() {
+                        tx.send(()).unwrap();
+                    }
+                    async move {
+                        if let Some(rx) = rx {
+                            rx.await.unwrap();
+                        }
+                        Err::<(), _>(origin_forbidden_error())
+                    }
+                },
+                &super::super::recovery::RecoveryBudget::default(),
+            )
+            .await
+        });
+        started_rx.await.unwrap();
+        let waiter_gate = gate.clone();
+        let waiter = tokio::spawn(async move {
+            let _permit = waiter_gate.wait_to_start(async {}).await;
+            tokio::time::Instant::now()
+        });
+        tokio::task::yield_now().await;
+        let now = tokio::time::Instant::now();
+        release_tx.send(()).unwrap();
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        let started = waiter.await.unwrap();
+        assert!(started.duration_since(now) >= Duration::from_secs(3));
+        connecting.abort();
+        let _ = connecting.await;
+        drop(held);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn existing_recovery_deadline_stops_a_queued_first_attempt() {
+        let gate = WebSocketConnectGate::new(Duration::from_secs(1));
+        let budget = super::super::recovery::RecoveryBudget::default();
+        budget.start();
+        tokio::time::advance(Duration::from_secs(58)).await;
+        gate.record_forbidden(Duration::from_secs(5));
+        let calls = AtomicUsize::new(0);
+        let result = connect_with_policy(
+            &gate,
+            Duration::from_secs(10),
+            Duration::from_secs(3),
+            || async {},
+            |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<(), ConnectAttemptError>(()) }
+            },
+            &budget,
+        )
+        .await;
+        assert!(result.unwrap_err().is_recovery_exhausted());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(gate.last_start_for_tests(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queue_timeout_after_forbidden_preserves_origin_error() {
+        let gate = WebSocketConnectGate::new(Duration::from_secs(1));
+        let budget = super::super::recovery::RecoveryBudget::default();
+        let result = connect_with_policy(
+            &gate,
+            Duration::from_secs(1),
+            Duration::from_secs(31),
+            || async {},
+            |_| async { Err::<(), _>(origin_forbidden_error()) },
+            &budget,
+        )
+        .await;
+        let error = result.unwrap_err();
+        assert_eq!(error.status, 403);
+        assert_eq!(error.origin, CodexErrorOrigin::WebSocketHandshake);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn forbidden_retry_consumes_request_recovery_budget() {
+        let gate = WebSocketConnectGate::new(Duration::ZERO);
+        let budget = super::super::recovery::RecoveryBudget::default();
+        for _ in 0..3 {
+            assert!(budget.try_retry(Duration::ZERO, false));
+        }
+        let attempts = AtomicUsize::new(0);
+        let result = connect_with_policy(
+            &gate,
+            Duration::from_secs(1),
+            Duration::ZERO,
+            || async {},
+            |_| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                async { Err::<(), _>(origin_forbidden_error()) }
+            },
+            &budget,
+        )
+        .await;
+        assert!(result.unwrap_err().is_recovery_exhausted());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -349,7 +549,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(3),
             || async {},
-            || {
+            |_| {
                 attempts.fetch_add(1, Ordering::SeqCst);
                 starts.lock().unwrap().push(tokio::time::Instant::now());
                 async {
@@ -358,6 +558,7 @@ mod tests {
                     )))
                 }
             },
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         .unwrap_err();
@@ -369,10 +570,11 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(3),
             || async {},
-            || {
+            |_| {
                 starts.lock().unwrap().push(tokio::time::Instant::now());
                 async { Ok::<(), ConnectAttemptError>(()) }
             },
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         .unwrap();
@@ -392,7 +594,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(3),
             || async {},
-            || {
+            |_| {
                 let attempt = attempts.fetch_add(1, Ordering::SeqCst);
                 starts.lock().unwrap().push(tokio::time::Instant::now());
                 async move {
@@ -410,6 +612,7 @@ mod tests {
                     }
                 }
             },
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         .unwrap_err();
@@ -435,7 +638,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(3),
             || async {},
-            || {
+            |_| {
                 attempts.fetch_add(1, Ordering::SeqCst);
                 async {
                     Err::<(), ConnectAttemptError>(ConnectAttemptError::ProxyTunnel(
@@ -443,6 +646,7 @@ mod tests {
                     ))
                 }
             },
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         .unwrap_err();
@@ -450,6 +654,127 @@ mod tests {
         assert_eq!(error.status, http::StatusCode::FORBIDDEN.as_u16());
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert_eq!(gate.spacing_for_tests(), Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn stalled_origin_403_body_records_headers_and_preserves_status() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while connect_response_header_end(&request).is_none() {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&buffer[..read]);
+            }
+            socket
+                .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 10\r\n\r\n")
+                .await
+                .unwrap();
+            tx.send(()).unwrap();
+            futures_util::future::pending::<()>().await;
+        });
+        let client = test_websocket_client();
+        let proxy = WebSocketProxyConfig::direct();
+        let url = format!("ws://{addr}/responses");
+        let headers = HeaderMap::new();
+        let gate = WebSocketConnectGate::new(Duration::from_millis(10));
+        let budget = super::super::recovery::RecoveryBudget::default();
+        let attempts = AtomicUsize::new(0);
+        let request = connect_with_policy(
+            &gate,
+            Duration::from_secs(60),
+            Duration::from_millis(20),
+            || async {},
+            |seen| {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                let (client, proxy, url, headers, gate) = (&client, &proxy, &url, &headers, &gate);
+                async move {
+                    if attempt == 0 {
+                        connect_once(
+                            client,
+                            proxy,
+                            url,
+                            headers,
+                            gate,
+                            Duration::from_millis(20),
+                            seen,
+                        )
+                        .await
+                    } else {
+                        Err(origin_forbidden_error())
+                    }
+                }
+            },
+            &budget,
+        );
+        tokio::pin!(request);
+        let observation = async {
+            rx.recv().await.unwrap();
+            while gate.spacing_for_tests() == Duration::from_millis(10) {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::select! {
+            () = observation => {},
+            _ = &mut request => panic!("handshake ended before observing the origin 403"),
+        }
+        assert_eq!(gate.spacing_for_tests(), Duration::from_millis(20));
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let error = request.await.err().unwrap();
+        assert_eq!(error.status, 403);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn origin_body_cannot_spoof_overload_classification() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while connect_response_header_end(&request).is_none() {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let body = r#"{"error":{"message":"websocket_connect_overload"}}"#;
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let client = test_websocket_client();
+        let gate = WebSocketConnectGate::new(Duration::ZERO);
+        let error = match connect_once(
+            &client,
+            &WebSocketProxyConfig::direct(),
+            &format!("ws://{addr}/responses"),
+            &HeaderMap::new(),
+            &gate,
+            Duration::ZERO,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        {
+            Ok(_) => panic!("expected rejection"),
+            Err(error) => error.into_error(),
+        };
+        assert_eq!(error.status, 403);
+        assert_eq!(error.detail.as_deref(), Some("websocket_connect_overload"));
+        assert!(!error.is_websocket_overload());
+        let response = super::super::error_response::map_codex_error_to_response(&error);
+        assert_eq!(response.status(), 403);
+        assert!(!response.headers().contains_key("x-should-retry"));
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -487,7 +812,18 @@ mod tests {
             Duration::from_secs(1),
             Duration::ZERO,
             || async {},
-            || connect_once(&client, &proxy_config, &url, &headers),
+            |seen| {
+                connect_once(
+                    &client,
+                    &proxy_config,
+                    &url,
+                    &headers,
+                    &gate,
+                    Duration::ZERO,
+                    seen,
+                )
+            },
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         {
@@ -514,7 +850,7 @@ mod tests {
             Duration::from_secs(2),
             Duration::from_secs(3),
             || async {},
-            || {
+            |_| {
                 let attempt = attempts.fetch_add(1, Ordering::SeqCst);
                 async move {
                     if attempt == 0 {
@@ -526,6 +862,7 @@ mod tests {
                     }
                 }
             },
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         .unwrap_err();
@@ -631,6 +968,7 @@ mod tests {
             &format!("ws://{addr}/backend-api/codex/responses"),
             &HeaderMap::new(),
             1_000,
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         {
@@ -670,6 +1008,7 @@ mod tests {
             &format!("ws://{addr}/backend-api/codex/responses"),
             &HeaderMap::new(),
             1_000,
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         {

@@ -3,7 +3,9 @@ mod hermetic;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use duolane::providers::codex::websocket::clear_codex_websocket_pool_for_tests;
+use duolane::providers::codex::websocket::{
+    clear_codex_websocket_pool_for_tests, reset_codex_websocket_connect_gate_for_tests,
+};
 use duolane::{registry::Registry, server::app};
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
@@ -296,6 +298,7 @@ async fn check_transport_policy(
     stream: bool,
 ) {
     clear_codex_websocket_pool_for_tests();
+    reset_codex_websocket_connect_gate_for_tests();
     let (origin_url, captured, stop, task) = spawn_transport_origin(close_after_send, stream).await;
     let result = {
         let _retry_delay = ZeroRetryDelayGuard::new();

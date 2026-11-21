@@ -26,7 +26,7 @@ pub(super) async fn codex_websocket_request(
     url: &str,
     headers: &HeaderMap,
     body_value: &serde_json::Value,
-    _ctx: &RequestContext,
+    ctx: &RequestContext,
     traffic: Option<&TrafficCapture>,
     connect_timeout_ms: u64,
     idle_timeout_ms: u64,
@@ -84,6 +84,7 @@ pub(super) async fn codex_websocket_request(
                 &ws_url,
                 headers,
                 connect_timeout_ms,
+                &ctx.recovery_budget,
             )
             .await?,
         ))
@@ -109,6 +110,7 @@ pub(super) async fn codex_websocket_request(
                 &ws_url,
                 headers,
                 connect_timeout_ms,
+                &ctx.recovery_budget,
             )
             .await?,
         ));
@@ -262,6 +264,7 @@ pub(super) async fn prepare_codex_websocket(
     reservation: Option<&ContinuationReservation>,
     connect_timeout_ms: u64,
     idle_timeout_ms: u64,
+    budget: &super::recovery::RecoveryBudget,
 ) -> Result<ReadyWebSocket, CodexError> {
     let pool_owner = reservation_pool_owner(reservation);
     let continuation = reservation.map(ContinuationReservation::candidate);
@@ -287,6 +290,7 @@ pub(super) async fn prepare_codex_websocket(
             &ws_url,
             headers,
             connect_timeout_ms,
+            budget,
         )
         .await?;
         Arc::new(PoolEntry::new(stream))
@@ -421,7 +425,7 @@ pub(super) async fn codex_websocket_event_stream(
     url: &str,
     headers: &HeaderMap,
     body_value: &serde_json::Value,
-    _ctx: &RequestContext,
+    ctx: &RequestContext,
     traffic: Option<Arc<TrafficCapture>>,
     connect_timeout_ms: u64,
     idle_timeout_ms: u64,
@@ -445,6 +449,7 @@ pub(super) async fn codex_websocket_event_stream(
         reservation,
         connect_timeout_ms,
         idle_timeout_ms,
+        &ctx.recovery_budget,
     )
     .await?;
     Ok(start_codex_websocket_events(
@@ -628,6 +633,7 @@ mod tests {
             None,
             10_000,
             10_000,
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         .unwrap();
@@ -696,6 +702,7 @@ mod tests {
             Some(&reservation),
             1_000,
             10_000,
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         .unwrap();

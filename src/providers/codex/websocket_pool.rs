@@ -101,6 +101,15 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+pub fn reset_codex_websocket_connect_gate_for_tests() {
+    let mut state = WS_CONNECT_GATE.last_start.lock().unwrap();
+    state.last_start = None;
+    state.spacing = WS_CONNECT_GATE.floor;
+    state.cooldown_until = None;
+    drop(state);
+    WS_CONNECT_GATE.changed.notify_waiters();
+}
+
 pub fn clear_codex_websocket_pool_for_tests() {
     let mut guard = WS_POOL.lock().unwrap();
     guard.clear();
@@ -354,10 +363,24 @@ impl WebSocketConnectGate {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn wait_to_start(
         &self,
         before_start: impl std::future::Future<Output = ()>,
     ) -> tokio::sync::SemaphorePermit<'_> {
+        self.wait_to_start_until(
+            before_start,
+            tokio::time::Instant::now() + Duration::from_secs(3600),
+        )
+        .await
+        .unwrap()
+    }
+
+    pub(super) async fn wait_to_start_until(
+        &self,
+        before_start: impl std::future::Future<Output = ()>,
+        queue_deadline: tokio::time::Instant,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, ()> {
         before_start.await;
         let permit = self.handshakes.acquire().await.unwrap();
         let waiter = {
@@ -373,8 +396,12 @@ impl WebSocketConnectGate {
             notified.as_mut().enable();
             let deadline = {
                 let mut state = self.last_start.lock().unwrap();
+                let now = tokio::time::Instant::now();
+                if now >= queue_deadline {
+                    drop(state);
+                    return Err(());
+                }
                 if state.queue.front() == Some(&waiter.id) {
-                    let now = tokio::time::Instant::now();
                     let deadline = state
                         .last_start
                         .map(|last| last + state.spacing)
@@ -385,7 +412,7 @@ impl WebSocketConnectGate {
                         state.queue.pop_front();
                         drop(state);
                         drop(waiter);
-                        return permit;
+                        return Ok(permit);
                     }
                     Some(deadline)
                 } else {
@@ -409,6 +436,11 @@ impl WebSocketConnectGate {
         }
         drop(state);
         self.changed.notify_waiters();
+    }
+
+    #[cfg(test)]
+    pub(super) fn last_start_for_tests(&self) -> Option<tokio::time::Instant> {
+        self.last_start.lock().unwrap().last_start
     }
 
     #[cfg(test)]
@@ -619,32 +651,64 @@ mod tests {
         let gate = Arc::new(WebSocketConnectGate::new(Duration::from_secs(1)));
         let start = tokio::time::Instant::now();
         drop(gate.wait_to_start(async {}).await);
-        let cancelled_gate = gate.clone();
-        let cancelled =
-            tokio::spawn(async move { drop(cancelled_gate.wait_to_start(async {}).await) });
-        tokio::task::yield_now().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut tasks = Vec::new();
-        for _ in 0..3 {
+        for id in 0..4 {
             let gate = gate.clone();
             let tx = tx.clone();
             tasks.push(tokio::spawn(async move {
                 let _permit = gate.wait_to_start(async {}).await;
-                tx.send(tokio::time::Instant::now()).unwrap();
+                tx.send((id, tokio::time::Instant::now())).unwrap();
             }));
             tokio::task::yield_now().await;
         }
-        cancelled.abort();
-        let _ = cancelled.await;
-        for second in 1..=3 {
+        tasks[1].abort();
+        for (second, expected_id) in [0, 2, 3].into_iter().enumerate() {
+            let (id, started) = rx.recv().await.unwrap();
+            assert_eq!(id, expected_id);
             assert_eq!(
-                rx.recv().await.unwrap().duration_since(start),
-                Duration::from_secs(second)
+                started.duration_since(start),
+                Duration::from_secs(second as u64 + 1)
             );
         }
-        for task in tasks {
-            task.await.unwrap();
+        for (id, task) in tasks.into_iter().enumerate() {
+            if id == 1 {
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                task.await.unwrap();
+            }
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_deadline_does_not_start_handshake() {
+        let gate = WebSocketConnectGate::new(Duration::ZERO);
+        let deadline = tokio::time::Instant::now();
+        assert!(gate.wait_to_start_until(async {}, deadline).await.is_err());
+        assert!(gate.last_start.lock().unwrap().last_start.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn permit_ready_at_deadline_cannot_start() {
+        let gate = Arc::new(WebSocketConnectGate::new(Duration::ZERO));
+        let mut permits = Vec::new();
+        for _ in 0..4 {
+            permits.push(gate.wait_to_start(async {}).await);
+        }
+        let previous = gate.last_start.lock().unwrap().last_start;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let waiter_gate = gate.clone();
+        let waiter = tokio::spawn(async move {
+            waiter_gate
+                .wait_to_start_until(async {}, deadline)
+                .await
+                .is_err()
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        permits.pop();
+        assert!(waiter.await.unwrap());
+        assert_eq!(gate.last_start.lock().unwrap().last_start, previous);
     }
 
     #[tokio::test(start_paused = true)]
@@ -802,6 +866,7 @@ mod tests {
             Some(&continuation),
             50,
             50,
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         {
@@ -875,6 +940,7 @@ mod tests {
             Some(&continuation),
             50,
             50,
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         {
@@ -1061,6 +1127,7 @@ mod tests {
             Some(&continuation),
             1_000,
             1_000,
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         .unwrap();
@@ -1368,6 +1435,7 @@ mod tests {
             &url,
             &HeaderMap::new(),
             1_000,
+            &super::super::recovery::RecoveryBudget::default(),
         )
         .await
         .unwrap()

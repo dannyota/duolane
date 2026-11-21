@@ -95,7 +95,10 @@ pub(super) fn map_codex_error_to_response(err: &client::CodexError) -> Response 
     if is_context_window_overflow(message) {
         return map_codex_failure_to_response(message);
     }
-    if err.is_recovery_exhausted() || err.detail.as_deref() == Some(EMPTY_CODEX_COMPLETION_DETAIL) {
+    if err.is_recovery_exhausted()
+        || err.is_websocket_overload()
+        || err.detail.as_deref() == Some(EMPTY_CODEX_COMPLETION_DETAIL)
+    {
         return (
             [(
                 HeaderName::from_static("x-should-retry"),

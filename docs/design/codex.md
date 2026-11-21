@@ -113,9 +113,13 @@ native server compaction retain their configured transport.
   flight and a 30-second queue deadline. Starts are spaced by one second
   initially and at minimum. An origin upgrade 403 doubles spacing up to eight
   seconds and starts one three-second cooldown; further 403s during it do not
-  stack. Each successful handshake halves spacing toward the floor. Proxy 403s
-  do not affect pacing. Cancelled waiters release their place. Lowering the
-  floor awaits a live A/B check.
+  stack. The origin's 403 headers start the cooldown even if its error body
+  stalls. Each successful handshake halves spacing toward the floor. Proxy 403s
+  do not affect pacing. Cancelled waiters release their place. A queue timeout
+  returns a non-retryable overload error, unless a prior origin 403 must be
+  preserved. Auto can still fall back to HTTP before send. The 403 retry and
+  HTTP fallback spend the request's recovery budget. Lowering the floor awaits a
+  live A/B check.
 - `DUOLANE_CODEX_TRANSPORT` selects `http`, `websocket`, or `auto`. `auto`
   prefers WebSocket and falls back to HTTP only when WebSocket failed before the
   request was sent.

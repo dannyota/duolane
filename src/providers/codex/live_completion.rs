@@ -169,7 +169,7 @@ pub(super) fn is_codex_success_terminal_event(payload: &serde_json::Value) -> bo
 }
 
 pub(super) fn retryable_live_start_codex_error(err: &client::CodexError) -> bool {
-    if err.is_recovery_exhausted() {
+    if err.is_recovery_exhausted() || err.is_websocket_overload() {
         return false;
     }
     if err.origin == client::CodexErrorOrigin::WebSocketHandshake {
