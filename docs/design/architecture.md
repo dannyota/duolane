@@ -99,6 +99,15 @@ request headers:
 It removes hop-by-hop headers, `content-length`, and `content-encoding` from the
 response. `anthropic-*`, `request-id`, and rate limit headers reach Claude Code.
 
+When the owner configures Claude accounts, duolane stops forwarding Claude
+Code's login and instead attaches the selected account's session key. A response
+that reports the account's quota is spent marks it limited and advances the
+selection to the next account for the following request; the failed request
+keeps its quota error. The [accounts design](accounts.md) owns the pools,
+selection, and fallback, and the [security design](security.md#credentials) owns
+the store. With no accounts configured, the route stays the byte-exact
+passthrough above.
+
 ## Codex route
 
 duolane translates Messages requests into Responses API requests and translates

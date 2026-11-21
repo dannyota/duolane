@@ -4,9 +4,10 @@ One topic per record, numbered. The
 [engineering standard](../standards/engineering.md#adr-rules) defines the format
 and how a decision changes.
 
-| ADR                                   | Topic                                         |
-| ------------------------------------- | --------------------------------------------- |
-| [0001](0001-independent-product.md)   | duolane is an independent product             |
-| [0002](0002-claude-and-codex-only.md) | Claude and Codex are the only backends        |
-| [0003](0003-mit-license.md)           | MIT license with inherited copyright retained |
-| [0004](0004-intercept-mode.md)        | Intercept mode keeps Claude Code first-party  |
+| ADR                                   | Topic                                               |
+| ------------------------------------- | --------------------------------------------------- |
+| [0001](0001-independent-product.md)   | duolane is an independent product                   |
+| [0002](0002-claude-and-codex-only.md) | Claude and Codex are the only backends              |
+| [0003](0003-mit-license.md)           | MIT license with inherited copyright retained       |
+| [0004](0004-intercept-mode.md)        | Intercept mode keeps Claude Code first-party        |
+| [0005](0005-account-fallback.md)      | Account fallback rotates a pool on usage exhaustion |
