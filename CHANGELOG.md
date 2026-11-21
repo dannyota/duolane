@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Added
+
+- `DUOLANE_CODEX_REQUEST_COMPRESSION=gzip` compresses Codex HTTP request bodies.
+- With gzip on and `Auto` transport, full-context requests larger than
+  `DUOLANE_CODEX_AUTO_WS_MAX_BYTES` (4 MiB by default) go over HTTP instead of
+  the WebSocket.
+
+### Fixed
+
+- Codex requests are retried after a TLS connection closes before any output,
+  but never after a hosted web search has run.
+- A Codex HTTP stream that drops mid tool arguments is retried, and Claude Code
+  sees only one complete tool call.
+- Transient WebSocket drops after a full-context retry use the normal retry
+  budget, and a client disconnect cancels a stalled WebSocket send.
+- Compaction requests are detected when hook messages follow them.
+- Each Claude Code agent gets its own Codex standalone search identity.
+- Native Codex requests are not resent with another account's token after a
+  login change.
+- The monitor reads Claude usage despite a leading BOM or escaped keys, and
+  ignores absurd token counts.
+- Hosted web search on a Luna alias keeps the Lite decision made at resolution.
+
 ### Changed
 
 - Releases no longer include prebuilt binaries for Intel Macs or Windows on Arm.
