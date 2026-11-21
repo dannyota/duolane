@@ -2,7 +2,7 @@
 
 **Goal:** Turn the inherited proxy into `duolane`: an independent, hardened, current Rust product with Claude and Codex backends, built and documented in the owner's style.
 
-**Architecture:** Each slice is one pull request, or a short series, that leaves `main` green. Remove and rename first so later work touches less code. Harvest comments before other slices rewrite the code they explain.
+**Architecture:** Each slice is one pull request, or a short series, that leaves the default branch green. Remove and rename first so later work touches less code. Harvest comments before other slices rewrite the code they explain.
 
 **Tech stack:** Rust stable, axum, tokio, reqwest with rustls, ratatui, GitHub Actions, cargo-deny, gitleaks, Prettier, markdownlint.
 

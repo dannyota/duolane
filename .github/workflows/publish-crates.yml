@@ -24,7 +24,7 @@ defaults:
 
 jobs:
   verify:
-    if: github.event_name == 'workflow_dispatch' && github.repository == 'dannyota/duolane' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'dannyota/duolane' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -34,9 +34,9 @@ jobs:
       commit: ${{ steps.validate.outputs.commit }}
       toolchain: ${{ steps.validate.outputs.toolchain }}
     steps:
-      - name: Require exact main ref
+      - name: Require exact master ref
         run: |
-          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REF" = refs/heads/master
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -134,7 +134,7 @@ jobs:
     needs: verify
     if: >-
       github.event_name == 'workflow_dispatch' && github.repository == 'dannyota/duolane' &&
-      github.ref == 'refs/heads/main' && inputs.publish && github.run_attempt == '1'
+      github.ref == 'refs/heads/master' && inputs.publish && github.run_attempt == '1'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: crates-io
@@ -147,7 +147,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REF" = refs/heads/master
           test "$GITHUB_REF_PROTECTED" = true
           environment_id=$(gh api "repos/$GITHUB_REPOSITORY/environments/crates-io" | jq -esr '
             select(length == 1) | .[0] | objects

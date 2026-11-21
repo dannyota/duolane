@@ -15,9 +15,10 @@ access and crates.io access.
 
 ## Release gate
 
-- Dispatch `publish-crates.yml` from `main` with a `vMAJOR.MINOR.PATCH` tag. The
-  default is preflight only. Both modes share one concurrency group and require
-  the exact branch name. Publishing additionally requires protected `main`.
+- Dispatch `publish-crates.yml` from `master` with a `vMAJOR.MINOR.PATCH` tag.
+  The default is preflight only. Both modes share one concurrency group and
+  require the exact branch name. Publishing additionally requires protected
+  `master`.
 - Preflight resolves the tag to a commit in the dispatch commit's history. The
   tagged manifest must describe the standalone `duolane` crate, match the tag
   version, and use tracked regular files for explicit README and license paths.
@@ -43,7 +44,7 @@ access and crates.io access.
 ## One-time setup
 
 In GitHub, enable immutable releases before creating the next release. Restrict
-the `crates-io` environment to branch `main` and require owner review. If the
+the `crates-io` environment to branch `master` and require owner review. If the
 dispatcher is the only reviewer, allow self-review. In crates.io, add a [Trusted
 Publisher] for `duolane` with repository `dannyota/duolane`, workflow
 `publish-crates.yml`, and environment `crates-io`. Do not add a crates.io token

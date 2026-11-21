@@ -4,7 +4,7 @@ Bug reports, documentation improvements, and focused fixes are welcome. Open an
 issue first to discuss a larger change. Report vulnerabilities privately as
 explained in [SECURITY.md](SECURITY.md).
 
-Fork the repository and create a branch from `main`. Before changing behavior,
+Fork the repository and create a branch from `master`. Before changing behavior,
 read the [architecture](docs/design/architecture.md) and
 [security design](docs/design/security.md).
 
@@ -29,7 +29,7 @@ make hooks-install
 4. Run `make check`, which runs every check that works offline. `make help`
    lists each target. A change to `Cargo.lock` also needs `make deny` and
    `make crate-age`.
-5. Open a pull request against `main` with a short description and the checks
+5. Open a pull request against `master` with a short description and the checks
    you ran.
 
 Code has no comments, as the

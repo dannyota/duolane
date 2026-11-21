@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Only a `workflow_dispatch` on `refs/heads/main` in `dannyota/duolane` can run preflight or publish. The `publish` boolean defaults to `false`.
+- Only a `workflow_dispatch` on `refs/heads/master` in `dannyota/duolane` can run preflight or publish. The `publish` boolean defaults to `false`.
 - Require `vMAJOR.MINOR.PATCH`, a tag commit in the dispatch commit's history, a matching standalone crate with local manifest file paths, a complete GitHub Release, and the expected registry owner.
 - Only the approved, cache-free `crates-io` job has `id-token: write`. Do not emit tokens or inject dispatch input into shell code. Do not change `release.yml`, the crate version, or external settings in this pull request.
 
@@ -28,7 +28,7 @@
 - A published release can have `targetCommitish: main`. Require a successful `release.yml` push run with both the exact tag and commit instead.
 - Match release asset digests to files from that exact run. An uploaded asset with a different digest does not count even if the name and checksum file are present.
 - Crates.io ownership must list the expected user, not a team. An explicit publish requires an immutable release and confirmed absence of that version before OIDC. Preflight-only can inspect the existing mutable `v0.1.0` release.
-- A dispatch from a fork or a non-`main` branch does not enter preflight checks. A publish requires protected exact `main` and a well-formed owner approval. A tagged symlink or Cargo config, a publish rerun, and the default input must never reach token exchange.
+- A dispatch from a fork or a non-`master` branch does not enter preflight checks. A publish requires protected exact `master` and a well-formed owner approval. A tagged symlink or Cargo config, a publish rerun, and the default input must never reach token exchange.
 
 - [x] Add hermetic `unittest` cases that carry a valid `v0.1.0` through `validate()` and reject a wrong manifest version, a different release-run commit, a swapped asset digest, or a team owner. Run `python3 -I scripts/test/check-crate-release-test.py` and confirm it fails before the validator exists.
 - [x] Implement `validate()` and its CLI. Match `duolane`, `dannyota`, the tag version and exact successful push run. Require `isDraft == false` and all 12 `uploaded` assets from the existing build matrix, each with the SHA-256 of the expected file from its named build artifact. Reject malformed data without dumping API responses. Run the test in the CI `gates` job and locally.
