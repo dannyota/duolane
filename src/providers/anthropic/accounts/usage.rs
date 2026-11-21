@@ -178,7 +178,7 @@ fn reaches_intercept_listener(url: &url::Url, intercept_port: u16) -> bool {
 }
 
 pub(super) fn usage_proxies(
-    env: &impl Fn(&str) -> Option<String>,
+    env: &impl Fn(&str) -> Option<std::ffi::OsString>,
     intercept_port: u16,
 ) -> Result<Vec<(Kind, String)>, Reason> {
     let mut proxies = Vec::new();
@@ -189,6 +189,7 @@ pub(super) fn usage_proxies(
         let Some(raw) = env(upper).or_else(|| env(lower)) else {
             continue;
         };
+        let raw = raw.into_string().map_err(|_| Reason::RequestFailed)?;
         let raw = raw.trim();
         if raw.is_empty() {
             continue;
@@ -280,11 +281,12 @@ pub(super) struct Query {
 
 impl Query {
     pub(super) fn production() -> Self {
-        let env = |name: &str| std::env::var(name).ok();
+        let text_env = |name: &str| std::env::var(name).ok();
+        let os_env = |name: &str| std::env::var_os(name);
         Self {
             reader: system_reader(),
-            client: usage_proxies(&env, crate::intercept::port()).and_then(build_client),
-            endpoint: production_usage_endpoint(&env).to_string(),
+            client: usage_proxies(&os_env, crate::intercept::port()).and_then(build_client),
+            endpoint: production_usage_endpoint(&text_env).to_string(),
         }
     }
 

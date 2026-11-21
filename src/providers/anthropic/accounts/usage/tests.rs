@@ -346,12 +346,34 @@ fn proxies(https: &str, all: &str) -> Result<Vec<(Kind, String)>, Reason> {
     let all = all.to_string();
     usage_proxies(
         &move |name: &str| match name {
-            "HTTPS_PROXY" if !https.is_empty() => Some(https.clone()),
-            "all_proxy" if !all.is_empty() => Some(all.clone()),
+            "HTTPS_PROXY" if !https.is_empty() => Some(https.clone().into()),
+            "all_proxy" if !all.is_empty() => Some(all.clone().into()),
             _ => None,
         },
         18766,
     )
+}
+
+#[test]
+fn a_proxy_variable_that_is_not_utf8_is_invalid_not_absent() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let broken = |name: &str| (name == "HTTPS_PROXY").then(|| OsString::from_vec(vec![0x66, 0xff]));
+    assert_eq!(
+        usage_proxies(&broken, 18766).unwrap_err(),
+        Reason::RequestFailed
+    );
+
+    let broken_lowercase =
+        |name: &str| (name == "all_proxy").then(|| OsString::from_vec(vec![0x66, 0xff]));
+    assert_eq!(
+        usage_proxies(&broken_lowercase, 18766).unwrap_err(),
+        Reason::RequestFailed
+    );
+
+    let absent = |_: &str| None;
+    assert!(usage_proxies(&absent, 18766).unwrap().is_empty());
 }
 
 #[test]
