@@ -57,6 +57,13 @@ impl<S: AuthStorage<StoredAuth>> CodexTokenStore<S> {
     }
 }
 
+pub(crate) fn access_token(doc: &serde_json::Value) -> Option<&str> {
+    doc.get("tokens")?
+        .get("access_token")?
+        .as_str()
+        .filter(|token| !token.is_empty())
+}
+
 pub struct CodexCliAuthStore {
     path: PathBuf,
     lock_timeout: Duration,
@@ -98,11 +105,7 @@ impl AuthStorage<StoredAuth> for CodexCliAuthStore {
         let Some(tokens) = doc.get("tokens") else {
             return Ok(None);
         };
-        let access = tokens
-            .get("access_token")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
+        let access = access_token(&doc).unwrap_or_default().to_string();
         if access.is_empty() {
             return Ok(None);
         }
