@@ -1,6 +1,6 @@
 pub mod auth;
 pub mod chat_completions;
-mod cli;
+pub mod cli;
 pub mod client;
 mod client_body;
 mod client_buffered;
@@ -24,6 +24,7 @@ pub mod images;
 mod live_completion;
 mod live_response;
 pub mod native;
+pub mod profiles;
 #[cfg(test)]
 mod provider_test_support;
 pub mod recovery;
@@ -41,7 +42,6 @@ mod websocket_request;
 mod websocket_stream;
 #[cfg(test)]
 mod websocket_test_support;
-
 use async_trait::async_trait;
 use axum::Json;
 use axum::response::{IntoResponse, Response};

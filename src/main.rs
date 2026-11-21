@@ -396,6 +396,10 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
                 }
                 Ok(())
             }
+            duolane::provider::AuthCommand::List => duolane::providers::codex::cli::list_profiles(),
+            duolane::provider::AuthCommand::Use { name } => {
+                duolane::providers::codex::cli::use_profile(&name)
+            }
             duolane::provider::AuthCommand::Logout => {
                 handlers.logout()?;
                 Ok(())

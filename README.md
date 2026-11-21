@@ -93,6 +93,30 @@ as `/autocompact 500k` for Sol or `/autocompact 272k` for Astra to match Codex.
 Claude Code saves the value for that model
 ([auto-compact window](https://code.claude.com/docs/en/model-config#set-the-auto-compact-window)).
 
+## Codex profiles
+
+On Unix, add named Codex homes to `codex-profiles.json` in the duolane
+configuration directory. Paths must be absolute, and a home directory itself
+must not be a symlink.
+
+```json
+{
+  "work": "/Users/example/.codex-work",
+  "personal": "/Users/example/.codex-personal"
+}
+```
+
+List profiles and select one manually:
+
+```bash
+duolane codex auth list
+duolane codex auth use work
+```
+
+The reserved `default` profile keeps the existing Codex lookup. Profile
+selection is stored now, but Codex requests still use `default` until request
+binding is available. duolane never switches profiles automatically.
+
 ## Intercept mode
 
 Intercept mode keeps Claude Code talking to `api.anthropic.com`, so
