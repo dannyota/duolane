@@ -7,6 +7,7 @@ use crate::monitor::SESSION_TOKEN_BUCKET_SECS;
 use crate::monitor::snapshot::{CompletedSnapshot, MonitorSnapshot};
 use jiff::tz::TimeZone;
 use jiff::{Timestamp, Zoned};
+use ratatui::buffer::CellWidth;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -124,7 +125,7 @@ pub(super) fn project_constraints<'a, K: PartialEq>(
         return widths;
     };
     let desired = projects
-        .map(|value| Span::raw(value.unwrap_or("-")).width())
+        .map(|value| display_width(value.unwrap_or("-")))
         .max()
         .unwrap_or(0)
         .max(columns[project].header.len())
@@ -136,9 +137,16 @@ pub(super) fn project_constraints<'a, K: PartialEq>(
     widths
 }
 
+fn display_width(value: &str) -> usize {
+    Span::raw(value)
+        .styled_graphemes(Style::default())
+        .map(|grapheme| usize::from(grapheme.symbol.cell_width()))
+        .sum()
+}
+
 pub(super) fn ellipsize(value: &str, width: usize) -> String {
     let span = Span::raw(value);
-    if span.width() <= width {
+    if display_width(value) <= width {
         return value.to_string();
     }
     if width == 0 {
@@ -148,7 +156,7 @@ pub(super) fn ellipsize(value: &str, width: usize) -> String {
     let mut result = String::new();
     let mut used = 0;
     for grapheme in span.styled_graphemes(Style::default()) {
-        let grapheme_width = Span::raw(grapheme.symbol).width();
+        let grapheme_width = usize::from(grapheme.symbol.cell_width());
         if used + grapheme_width > width - 1 {
             break;
         }

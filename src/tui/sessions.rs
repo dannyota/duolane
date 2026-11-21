@@ -236,6 +236,16 @@ mod tests {
     }
 
     #[test]
+    fn halfwidth_katakana_project_uses_buffer_cell_width() {
+        let name = "ｶﾞ".repeat(20);
+        let wide = render_project(&name, 280);
+        assert_eq!(wide.matches("ｶﾞ").count(), 20);
+        let narrow = render_project(&name, SESSION_SPARKLINE_MIN_WIDTH + 1);
+        let row = narrow.lines().find(|line| line.contains("ｶﾞ")).unwrap();
+        assert!(row.contains('…'));
+    }
+
+    #[test]
     fn wide_session_displays_full_project() {
         assert!(render_project("iam-policy-automation", 280).contains("iam-policy-automation"));
     }
