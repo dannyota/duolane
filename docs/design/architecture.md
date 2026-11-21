@@ -181,6 +181,18 @@ Checked on 2026-11-20 with Claude Code 2.1.328 against the owner's accounts:
 - Not checked: a token refresh, the `originator` and `User-Agent` values, a
   context window overflow, and a switch while a tool call is pending.
 
+Checked on 2026-11-21 with duolane 0.3.0 and Claude Code 2.1.330 through
+`ANTHROPIC_BASE_URL`:
+
+- The monitor shows rate, input, and output tokens for Claude requests.
+- `luna` resolved to `gpt-6-luna`, the newest Luna in the Codex catalog.
+- `sol` ran a `Read` tool call, and `luna` ran a `WebSearch`, both without
+  retries.
+- Codex accepted gzip request bodies: with `DUOLANE_CODEX_TRANSPORT=http` and
+  `DUOLANE_CODEX_REQUEST_COMPRESSION=gzip`, three requests returned 200. With
+  `Auto` and `DUOLANE_CODEX_AUTO_WS_MAX_BYTES=1024`, four full-context requests
+  went over gzipped HTTP and returned 200.
+
 ## Unverified behavior
 
 These inherited assumptions need a live check:
