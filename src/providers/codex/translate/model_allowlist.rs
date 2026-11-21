@@ -331,13 +331,21 @@ pub fn uses_responses_lite_with_full_lane(model: &str, full_lane: bool) -> bool 
     uses_responses_lite(model)
 }
 
-pub fn full_lane_web_search_model(model: &str) -> Cow<'_, str> {
+pub fn full_lane_web_search_model(resolved: &ResolvedModel) -> Cow<'_, str> {
+    full_lane_web_search_model_in(resolved, catalog_models)
+}
+
+fn full_lane_web_search_model_in(
+    resolved: &ResolvedModel,
+    catalog: impl FnOnce() -> Vec<CatalogModel>,
+) -> Cow<'_, str> {
+    let model = resolved.model.as_str();
     match model {
         "gpt-5.6-luna" => Cow::Borrowed("gpt-5.6-sol"),
         "gpt-6-luna" => Cow::Borrowed("gpt-6-sol"),
-        _ if version(model, "luna").is_some() && uses_responses_lite(model) => {
+        _ if version(model, "luna").is_some() && resolved.uses_responses_lite(false) => {
             let sibling = format!("{}-sol", model.strip_suffix("-luna").unwrap_or(model));
-            let catalog: Vec<_> = catalog_models()
+            let catalog: Vec<_> = catalog()
                 .into_iter()
                 .filter(|entry| {
                     !entry.use_responses_lite || ALLOWED_MODELS.contains(&entry.slug.as_str())
@@ -397,6 +405,26 @@ mod tests {
     }
 
     #[test]
+    fn lite_luna_maps_to_sol_after_catalog_removal() {
+        let resolved = resolve_family_in(
+            "luna",
+            vec![CatalogModel {
+                slug: "gpt-99-luna".to_string(),
+                use_responses_lite: true,
+                supported_in_api: true,
+                listed: true,
+                priority: None,
+                display_name: None,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            full_lane_web_search_model_in(&resolved, Vec::new),
+            "gpt-6.1-sol"
+        );
+    }
+
+    #[test]
     fn haiku_resolves_to_luna() {
         let r = resolve_model_request("haiku");
         assert_eq!(r.model, "gpt-6-luna");
@@ -427,12 +455,17 @@ mod tests {
 
     #[test]
     fn web_search_upgrades_luna_to_full_lane_sibling() {
-        assert_eq!(full_lane_web_search_model("gpt-5.6-luna"), "gpt-5.6-sol");
-        assert_eq!(full_lane_web_search_model("gpt-5.6-sol"), "gpt-5.6-sol");
-        assert_eq!(full_lane_web_search_model("gpt-5.6-terra"), "gpt-5.6-terra");
-        assert_eq!(full_lane_web_search_model("gpt-5.4"), "gpt-5.4");
-        assert_eq!(full_lane_web_search_model("gpt-6-luna"), "gpt-6-sol");
-        assert_eq!(full_lane_web_search_model("gpt-6-sol"), "gpt-6-sol");
+        for (model, expected) in [
+            ("gpt-5.6-luna", "gpt-5.6-sol"),
+            ("gpt-5.6-sol", "gpt-5.6-sol"),
+            ("gpt-5.6-terra", "gpt-5.6-terra"),
+            ("gpt-5.4", "gpt-5.4"),
+            ("gpt-6-luna", "gpt-6-sol"),
+            ("gpt-6-sol", "gpt-6-sol"),
+        ] {
+            let resolved = resolve_tier_model_alias(model);
+            assert_eq!(full_lane_web_search_model(&resolved), expected);
+        }
     }
 
     #[test]

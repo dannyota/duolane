@@ -129,7 +129,7 @@ pub(crate) fn prepare_native_request(
     }
     let hosted_web_search = has_native_hosted_web_search(object);
     if hosted_web_search {
-        resolved.model = full_lane_web_search_model(&resolved.model).to_string();
+        resolved.model = full_lane_web_search_model(&resolved).to_string();
     }
     Ok(NativePrepared {
         use_responses_lite: !hosted_web_search && resolved.uses_responses_lite(full_lane),
