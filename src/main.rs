@@ -110,6 +110,12 @@ enum ProviderGroup {
 enum ClaudeAccountsCommand {
     #[command(about = "List Claude accounts")]
     List,
+    #[command(about = "Add a Claude Code config directory as a Claude account")]
+    Add {
+        #[arg(allow_hyphen_values = true)]
+        name: String,
+        dir: std::path::PathBuf,
+    },
     #[command(about = "Select a Claude account")]
     Use {
         #[arg(allow_hyphen_values = true)]
@@ -430,8 +436,29 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
 fn run_claude_accounts(command: ClaudeAccountsCommand) -> Result<()> {
     match command {
         ClaudeAccountsCommand::List => {
-            for (name, selected) in duolane::providers::anthropic::accounts::list()? {
-                println!("{} {}", if selected { "*" } else { " " }, name);
+            let accounts = duolane::providers::anthropic::accounts::list()?;
+            let width = accounts.iter().map(|account| account.name.len()).max();
+            for account in &accounts {
+                let width = width.unwrap_or(0);
+                println!(
+                    "{} {:<width$}   {}",
+                    if account.selected { "*" } else { " " },
+                    account.name,
+                    account.identity.as_deref().unwrap_or("no login found")
+                );
+            }
+            Ok(())
+        }
+        ClaudeAccountsCommand::Add { name, dir } => {
+            match duolane::providers::anthropic::accounts::add(&name, &dir)? {
+                Some(identity) => println!("Added Claude account {name}: {identity}"),
+                None => {
+                    println!("Added Claude account {name}");
+                    eprintln!(
+                        "warning: no Claude login found there yet; run `CLAUDE_CONFIG_DIR={} claude` and /login",
+                        dir.display()
+                    );
+                }
             }
             Ok(())
         }
@@ -573,6 +600,16 @@ mod tests {
         ));
 
         assert!(Cli::try_parse_from(["duolane", "claude-accounts", "use"]).is_err());
+
+        let cli = Cli::try_parse_from(["duolane", "claude-accounts", "add", "work", "/home/work"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ClaudeAccounts {
+                command: ClaudeAccountsCommand::Add { ref name, ref dir }
+            }) if name == "work" && dir == std::path::Path::new("/home/work")
+        ));
+        assert!(Cli::try_parse_from(["duolane", "claude-accounts", "add", "work"]).is_err());
 
         let cli = Cli::try_parse_from(["duolane", "claude-accounts", "usage"]).unwrap();
         assert!(matches!(

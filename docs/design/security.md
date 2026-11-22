@@ -129,8 +129,21 @@ Rejections use the Anthropic error shape and never echo request values:
   writable by group or others. Reads stop at 16 KiB, and the file holds at most
   16 accounts. Each named directory must be an absolute path without `..`
   components, opened and read the same way as a Codex profile home, under the
-  same ownership and `StrictModes` ancestor rules. The owner edits the store by
-  hand, so duolane only reads it.
+  same ownership and `StrictModes` ancestor rules.
+- `duolane claude-accounts add <name> <dir>` is the only writer of the store. It
+  validates the name, makes the directory absolute, drops `.` components and a
+  trailing slash, and rejects `..`. The directory must already exist and pass
+  the account directory checks above. A name or directory already in the store
+  and a seventeenth account are rejected. The new entry is appended, the whole
+  store is re-validated with the reader's rules, and it is written atomically
+  through a descriptor of the config directory with mode `0600`, the same way as
+  a selection. The command never reads the login inside the directory.
+- The account identity file `.claude.json` in each account directory is opened
+  through the directory descriptor without following symlinks, accepted only as
+  a regular file owned by the user and not writable by group or others, and read
+  up to 4 MiB. Only the fields the [accounts design](accounts.md#identity) names
+  are parsed; any failure leaves the account without an identity and never fails
+  the command.
 - duolane reads the selected account's session key from the login store the
   [accounts design](accounts.md#claude-login-location) names and attaches it to
   an upstream request as `Authorization: Bearer <token>`. The key is never

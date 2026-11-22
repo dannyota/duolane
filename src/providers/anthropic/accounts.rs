@@ -2,7 +2,7 @@ use serde::de::{Error, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use std::collections::BTreeSet;
 use std::fmt;
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const MAX_CONFIG_BYTES: usize = 16 * 1024;
 const MAX_ACCOUNTS: usize = 16;
@@ -47,20 +47,54 @@ pub fn parse_accounts(bytes: &[u8]) -> anyhow::Result<Vec<(String, PathBuf)>> {
     };
     anyhow::ensure!(de.end().is_ok(), "invalid Claude accounts file");
     for (name, path) in &accounts {
+        anyhow::ensure!(valid_name(name), "invalid Claude account name");
         anyhow::ensure!(
-            !name.is_empty()
-                && name.len() <= 32
-                && name
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'),
-            "invalid Claude account name"
-        );
-        anyhow::ensure!(
-            path.is_absolute() && !path.components().any(|c| c == Component::ParentDir),
+            valid_directory(path),
             "Claude account directory must be absolute and contain no parent components"
         );
     }
     Ok(accounts)
+}
+
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+}
+
+fn valid_directory(path: &Path) -> bool {
+    path.is_absolute() && !path.components().any(|c| c == Component::ParentDir)
+}
+
+#[cfg(unix)]
+fn render_accounts(accounts: &[(String, PathBuf)]) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(accounts.len() <= MAX_ACCOUNTS, "too many Claude accounts");
+    let mut entries = Vec::with_capacity(accounts.len());
+    for (name, path) in accounts {
+        let path = path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Claude account directory must be valid UTF-8"))?;
+        entries.push(format!(
+            "  {}: {}",
+            serde_json::to_string(name)?,
+            serde_json::to_string(path)?
+        ));
+    }
+    let data = if entries.is_empty() {
+        b"{}\n".to_vec()
+    } else {
+        format!("{{\n{}\n}}\n", entries.join(",\n")).into_bytes()
+    };
+    parse_accounts(&data)?;
+    Ok(data)
+}
+
+pub struct Listed {
+    pub name: String,
+    pub selected: bool,
+    pub identity: Option<String>,
 }
 
 pub struct UsageReport {
@@ -72,9 +106,11 @@ pub const SELECTION_WARNING: &str =
     "warning: Claude account selection invalid; run duolane claude-accounts use <name>";
 
 #[cfg(unix)]
+mod identity;
+#[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{list, select, usage};
+pub use unix::{add, list, select, usage};
 
 #[cfg(unix)]
 mod usage;
@@ -82,11 +118,12 @@ mod usage;
 #[cfg(not(unix))]
 mod non_unix;
 #[cfg(not(unix))]
-pub use non_unix::{list, select, usage};
+pub use non_unix::{add, list, select, usage};
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::parse_accounts;
+    use super::{parse_accounts, render_accounts};
+    use std::path::PathBuf;
 
     #[test]
     fn account_configuration_rejects_invalid_entries() {
@@ -121,6 +158,20 @@ mod tests {
             let error = parse_accounts(input).unwrap_err();
             assert!(!format!("{error:#}").contains("secret-value"));
         }
+    }
+
+    #[test]
+    fn rendered_accounts_round_trip_in_order() {
+        let accounts = vec![
+            ("zebra".to_string(), PathBuf::from("/z \"quoted\"")),
+            ("alpha".to_string(), PathBuf::from("/a")),
+        ];
+        let data = render_accounts(&accounts).unwrap();
+        assert_eq!(parse_accounts(&data).unwrap(), accounts);
+        assert_eq!(
+            parse_accounts(&render_accounts(&[]).unwrap()).unwrap(),
+            vec![]
+        );
     }
 
     #[test]

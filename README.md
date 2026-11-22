@@ -119,11 +119,19 @@ binding is available. duolane never switches profiles automatically.
 
 ## Claude accounts
 
-On Unix, add named Claude Code configuration directories to
-`claude-accounts.json` in the duolane configuration directory. Accounts keep the
-order they appear in the file. The file must be readable only by you
-(`chmod 600`). Paths must be absolute, and a directory itself must not be a
-symlink.
+On Unix, duolane keeps named Claude Code configuration directories in
+`claude-accounts.json` in the duolane configuration directory. Log in to each
+account once with `CLAUDE_CONFIG_DIR=/Users/example/.claude-work claude` and
+`/login`, then add its directory:
+
+```bash
+duolane claude-accounts add work /Users/example/.claude-work
+duolane claude-accounts add personal ~/.claude-personal
+```
+
+Accounts keep the order they were added. You can also edit the file by hand. It
+must be readable only by you (`chmod 600`), paths must be absolute, and a
+directory itself must not be a symlink:
 
 ```json
 {
@@ -132,9 +140,9 @@ symlink.
 }
 ```
 
-Log in to each account once with
-`CLAUDE_CONFIG_DIR=/Users/example/.claude-work claude` and `/login`. List
-accounts and select one manually:
+`add` shows the email and plan it found in that directory, and refuses a second
+directory signed in to the same account. List accounts, with the email and plan
+of each, and select one manually:
 
 ```bash
 duolane claude-accounts list
@@ -142,7 +150,8 @@ duolane claude-accounts use work
 ```
 
 Show how much of each account's 5-hour and weekly limits is used, and when each
-resets:
+resets. A model's own weekly cap, such as one for Fable, prints after the shared
+week, since it can block an account first:
 
 ```bash
 duolane claude-accounts usage
@@ -198,21 +207,22 @@ Pick a Claude model before you run Claude Code without duolane.
 
 ## Commands
 
-| Command                              | Purpose                                       |
-| ------------------------------------ | --------------------------------------------- |
-| `duolane serve`                      | Start the proxy and its terminal dashboard    |
-| `duolane monitor`                    | Attach a dashboard to a running proxy         |
-| `duolane models`                     | List the models you can use                   |
-| `duolane codex auth status`          | Check the Codex login                         |
-| `duolane codex auth list`            | List Codex profiles                           |
-| `duolane codex auth use <name>`      | Select a Codex profile                        |
-| `duolane claude-accounts list`       | List Claude accounts                          |
-| `duolane claude-accounts use <name>` | Select a Claude account                       |
-| `duolane claude-accounts usage`      | Show each Claude account's usage              |
-| `duolane claude [args]`              | Start Claude Code through the intercept proxy |
-| `duolane intercept setup`            | Route every Claude Code session through it    |
-| `duolane intercept cleanup`          | Remove the intercept settings and files       |
-| `duolane intercept renew`            | Replace the intercept certificate             |
+| Command                               | Purpose                                       |
+| ------------------------------------- | --------------------------------------------- |
+| `duolane serve`                       | Start the proxy and its terminal dashboard    |
+| `duolane monitor`                     | Attach a dashboard to a running proxy         |
+| `duolane models`                      | List the models you can use                   |
+| `duolane codex auth status`           | Check the Codex login                         |
+| `duolane codex auth list`             | List Codex profiles                           |
+| `duolane codex auth use <name>`       | Select a Codex profile                        |
+| `duolane claude-accounts list`        | List Claude accounts                          |
+| `duolane claude-accounts add <n> <d>` | Add a Claude Code config directory            |
+| `duolane claude-accounts use <name>`  | Select a Claude account                       |
+| `duolane claude-accounts usage`       | Show each Claude account's usage              |
+| `duolane claude [args]`               | Start Claude Code through the intercept proxy |
+| `duolane intercept setup`             | Route every Claude Code session through it    |
+| `duolane intercept cleanup`           | Remove the intercept settings and files       |
+| `duolane intercept renew`             | Replace the intercept certificate             |
 
 ## How it works
 

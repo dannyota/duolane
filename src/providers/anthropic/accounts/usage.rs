@@ -18,6 +18,7 @@ pub(super) use login::KeychainReader;
 const ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const BETA: &str = "oauth-2025-04-20";
 const BODY_LIMIT: usize = 64 * 1024;
+const SCOPED_LIMIT: usize = 8;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -110,6 +111,7 @@ pub(super) struct Window {
 pub(super) struct Usage {
     five_hour: Option<Window>,
     seven_day: Option<Window>,
+    scoped: Vec<(String, Window)>,
 }
 
 fn window(value: Option<Value>) -> Option<Window> {
@@ -128,6 +130,46 @@ fn window(value: Option<Value>) -> Option<Window> {
     })
 }
 
+fn model_name(entry: &serde_json::Map<String, Value>) -> Option<String> {
+    let name = entry
+        .get("scope")?
+        .get("model")?
+        .get("display_name")?
+        .as_str()?
+        .trim();
+    ((1..=24).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'-')))
+    .then(|| name.to_string())
+}
+
+fn scoped_windows(value: Option<Value>) -> Vec<(String, Window)> {
+    let Some(Value::Array(entries)) = value else {
+        return Vec::new();
+    };
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let Value::Object(mut entry) = entry else {
+                return None;
+            };
+            if entry.get("kind").and_then(Value::as_str) != Some("weekly_scoped") {
+                return None;
+            }
+            let name = model_name(&entry)?;
+            let percent = entry.remove("percent");
+            let resets_at = entry.remove("resets_at");
+            let mut fields = serde_json::Map::new();
+            fields.extend(percent.map(|value| ("utilization".to_string(), value)));
+            fields.extend(resets_at.map(|value| ("resets_at".to_string(), value)));
+            let window = window(Some(Value::Object(fields)))?;
+            (window != Window::default()).then_some((name, window))
+        })
+        .take(SCOPED_LIMIT)
+        .collect()
+}
+
 fn parse_usage(bytes: &[u8]) -> Result<Usage, Reason> {
     let Ok(Value::Object(mut fields)) = serde_json::from_slice(bytes) else {
         return Err(Reason::ResponseInvalid);
@@ -135,6 +177,7 @@ fn parse_usage(bytes: &[u8]) -> Result<Usage, Reason> {
     Ok(Usage {
         five_hour: window(fields.remove("five_hour")),
         seven_day: window(fields.remove("seven_day")),
+        scoped: scoped_windows(fields.remove("limits")),
     })
 }
 
@@ -265,11 +308,13 @@ fn now_millis() -> u64 {
 
 pub(super) struct Target {
     pub(super) name: String,
+    pub(super) label: Option<String>,
     pub(super) location: Result<(PathBuf, File), Reason>,
 }
 
 pub(super) struct Row {
     pub(super) name: String,
+    pub(super) label: Option<String>,
     pub(super) outcome: Result<Usage, Reason>,
 }
 
@@ -295,6 +340,7 @@ impl Query {
             Row {
                 outcome: self.account(target.location).await,
                 name: target.name,
+                label: target.label,
             }
         }))
         .await
@@ -340,6 +386,10 @@ fn window_text(label: &str, window: Option<&Window>, now: &Zoned) -> String {
 
 pub(super) fn render(rows: &[Row], selected: Option<&str>, now: &Zoned) -> Vec<String> {
     let width = rows.iter().map(|row| row.name.len()).max().unwrap_or(0);
+    let label_width = rows
+        .iter()
+        .filter_map(|row| row.label.as_ref().map(String::len))
+        .max();
     rows.iter()
         .map(|row| {
             let marker = if selected == Some(row.name.as_str()) {
@@ -348,14 +398,23 @@ pub(super) fn render(rows: &[Row], selected: Option<&str>, now: &Zoned) -> Vec<S
                 ' '
             };
             let detail = match &row.outcome {
-                Ok(usage) => format!(
-                    "{}   {}",
-                    window_text("5h", usage.five_hour.as_ref(), now),
-                    window_text("week", usage.seven_day.as_ref(), now)
-                ),
+                Ok(usage) => std::iter::once(window_text("5h", usage.five_hour.as_ref(), now))
+                    .chain(std::iter::once(window_text(
+                        "week",
+                        usage.seven_day.as_ref(),
+                        now,
+                    )))
+                    .chain(usage.scoped.iter().map(|(model, window)| {
+                        window_text(&format!("{model} week"), Some(window), now)
+                    }))
+                    .collect::<Vec<_>>()
+                    .join("   "),
                 Err(reason) => reason.to_string(),
             };
-            format!("{marker} {:<width$}   {detail}", row.name)
+            let label = label_width.map_or_else(String::new, |label_width| {
+                format!("   {:<label_width$}", row.label.as_deref().unwrap_or("-"))
+            });
+            format!("{marker} {:<width$}{label}   {detail}", row.name)
         })
         .collect()
 }

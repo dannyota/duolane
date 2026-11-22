@@ -16,9 +16,10 @@ owns the Codex profile order and eligibility.
 The Claude store maps a name to an absolute Claude Code config directory, the
 directory `CLAUDE_CONFIG_DIR` names. Each directory holds one login, so the
 owner adds an account by signing Claude Code in there
-(`CLAUDE_CONFIG_DIR=<dir> claude`, then `/login`) and recording the directory.
-The file holds at most 16 accounts in at most 16 KiB. A name is 1 to 32
-characters from `[A-Za-z0-9_-]`.
+(`CLAUDE_CONFIG_DIR=<dir> claude`, then `/login`) and recording the directory
+with `duolane claude-accounts add <name> <dir>`, or by editing the store. The
+file holds at most 16 accounts in at most 16 KiB. A name is 1 to 32 characters
+from `[A-Za-z0-9_-]`.
 
 The Codex store already exists and its rules are unchanged; this design adds
 only the Claude side of the fallback below.
@@ -101,11 +102,20 @@ local time. For each account it reads the login as above and sends
 `DUOLANE_ANTHROPIC_BASE_URL` override does not apply, and only tests substitute
 a mock endpoint, always with toy logins.
 
-Only `five_hour` and `seven_day`, each with a numeric `utilization` and an RFC
-3339 `resets_at`, are read. Every other field is ignored, and a missing or
-unparsable window prints as `?`. Output contains only account names, rounded
-percentages, and reset times duolane formats itself; no upstream string is
-echoed.
+`five_hour` and `seven_day`, each with a numeric `utilization` and an RFC 3339
+`resets_at`, are read, and a missing or unparsable window prints as `?`. Since
+2026-07 Anthropic reports a model's own weekly cap only as an entry of the
+`limits` array with `kind` `weekly_scoped`, a `percent`, a `resets_at`, and the
+model family in `scope.model.display_name`. Such a cap can block an account
+while its shared week is below 100%, so each one prints after the shared windows
+as `<model> week`. `is_active` is ignored, because it marks only the binding
+limit. An entry without a percent or a reset is skipped, and at most 8 are
+printed. Every other field is ignored.
+
+The model name is the only upstream string echoed, and only when it is 1 to 24
+characters from `[A-Za-z0-9 .-]`; any other entry is dropped. Everything else in
+the output is account names, the [identity](#identity), rounded percentages, and
+reset times duolane formats itself.
 
 The command reads a snapshot of the store and is independent of the selection.
 With no store or an empty one it reads no login and sends nothing. An unsafe or
@@ -120,6 +130,26 @@ non-Unix systems the command reports that Claude accounts are not supported.
 
 Usage is display only: it never changes the selection, and fallback still
 advances only on a quota signal. `list` stays offline.
+
+## Identity
+
+Claude Code records the signed-in account in `.claude.json` inside the config
+directory, under `oauthAccount`. duolane reads `emailAddress` and the plan
+fields from it so the owner can tell accounts apart. The file is not a
+credential, but it can hold other configuration, so duolane reads only those
+fields and echoes only the email and a plan label from a fixed list.
+
+The email must be 3 to 254 printable ASCII characters with an `@`; otherwise the
+account has no identity. The plan label comes from `organizationType`
+(`claude_max`, `claude_pro`, `claude_team`, `claude_enterprise`) and a `max_5x`
+or `max_20x` suffix on `userRateLimitTier` or `organizationRateLimitTier`, as in
+`Team, Max 5x`. An unknown value prints no plan.
+
+`list` prints the identity after each name, or `no login found`, and stays
+offline. `usage` prints the email after each name. `add` prints the identity it
+found, warns when the directory has none yet, and rejects a directory whose
+email, compared without case, already belongs to another account, because two
+entries for one login would share one quota.
 
 ## Reasoning and conversation
 

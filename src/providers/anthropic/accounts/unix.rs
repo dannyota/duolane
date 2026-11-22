@@ -1,5 +1,9 @@
+use super::identity::{self, Identity};
 use super::usage as usage_query;
-use super::{MAX_CONFIG_BYTES, SELECTION_WARNING, UsageReport, parse_accounts};
+use super::{
+    Listed, MAX_ACCOUNTS, MAX_CONFIG_BYTES, SELECTION_WARNING, UsageReport, parse_accounts,
+    render_accounts, valid_directory, valid_name,
+};
 use crate::secure_fs::{bounded, checked, fingerprint, open_checked_directory, write_atomic};
 use anyhow::{Context, Result, ensure};
 use rustix::fs::{self, FileType, Mode, OFlags};
@@ -9,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 const SELECTOR_LIMIT: u64 = 256;
 const SELECTOR: &str = "claude-account";
+const STORE: &str = "claude-accounts.json";
 
 pub struct AccountSource {
     path: PathBuf,
@@ -26,13 +31,17 @@ impl AccountSource {
     }
 }
 
+fn account_identity(name: &str, accounts: &[(String, PathBuf)]) -> Option<Identity> {
+    identity::read(&open_source(name, accounts).ok()??.dir)
+}
+
 fn accounts() -> Result<Vec<(String, PathBuf)>> {
     let Some((dir, _)) = open_checked_directory(&crate::paths::config_dir(), false, false)? else {
         return Ok(Vec::new());
     };
     let fd = match fs::openat(
         &dir,
-        "claude-accounts.json",
+        STORE,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NOCTTY | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
@@ -123,17 +132,54 @@ pub fn select(name: &str) -> Result<()> {
     write_atomic(&dir, SELECTOR, ".claude-account-", &data)
 }
 
-pub fn list() -> Result<Vec<(String, bool)>> {
+pub fn add(name: &str, dir: &Path) -> Result<Option<String>> {
+    ensure!(valid_name(name), "invalid Claude account name");
+    let configured: PathBuf = std::path::absolute(dir)?.components().collect();
+    ensure!(
+        valid_directory(&configured),
+        "Claude account directory must contain no parent components"
+    );
+    let (account_dir, _) = open_checked_directory(&configured, false, true)?
+        .context("Claude account directory does not exist")?;
+    let added = identity::read(&account_dir);
+    let mut accounts = accounts()?;
+    ensure!(
+        !accounts.iter().any(|(account, _)| account == name),
+        "Claude account name already exists"
+    );
+    ensure!(
+        !accounts.iter().any(|(_, path)| path == &configured),
+        "Claude account directory is already added"
+    );
+    ensure!(accounts.len() < MAX_ACCOUNTS, "too many Claude accounts");
+    if let Some(added) = &added
+        && let Some((existing, _)) = accounts.iter().find(|(existing, _)| {
+            account_identity(existing, &accounts).is_some_and(|other| other.same_login(added))
+        })
+    {
+        anyhow::bail!("this Claude login is already added as {existing}");
+    }
+    accounts.push((name.into(), configured));
+    let data = render_accounts(&accounts)?;
+    let config = open_checked_directory(&crate::paths::config_dir(), true, true)?
+        .context("config directory missing")?
+        .0;
+    write_atomic(&config, STORE, ".claude-accounts-", &data)?;
+    Ok(added.map(|identity| identity.to_string()))
+}
+
+pub fn list() -> Result<Vec<Listed>> {
     let dir = state_dir(false)
         .context("Claude account selection invalid; run `duolane claude-accounts use <name>`")?;
     let accounts = accounts()?;
     let selected = selected_name(dir.as_ref(), &accounts)
         .context("Claude account selection invalid; run `duolane claude-accounts use <name>`")?;
     Ok(accounts
-        .into_iter()
-        .map(|(name, _)| {
-            let is_selected = selected.as_deref() == Some(name.as_str());
-            (name, is_selected)
+        .iter()
+        .map(|(name, _)| Listed {
+            selected: selected.as_deref() == Some(name.as_str()),
+            identity: account_identity(name, &accounts).map(|identity| identity.to_string()),
+            name: name.clone(),
         })
         .collect())
 }
@@ -159,6 +205,7 @@ async fn usage_with(make_query: impl FnOnce() -> usage_query::Query) -> Result<U
         .iter()
         .map(|(name, _)| usage_query::Target {
             name: name.clone(),
+            label: account_identity(name, &accounts).map(|identity| identity.email),
             location: match open_source(name, &accounts) {
                 Ok(Some(source)) => Ok(source.into_login_location()),
                 Ok(None) => Err(usage_query::Reason::LoginNotFound),
@@ -227,7 +274,7 @@ mod tests {
 
         select("work").unwrap();
         assert_eq!(
-            list().unwrap(),
+            names(list().unwrap()),
             vec![("work".to_string(), true), ("personal".to_string(), false)]
         );
     }
@@ -248,7 +295,115 @@ mod tests {
 
         std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(select("work").is_ok());
-        assert_eq!(list().unwrap(), vec![("work".to_string(), true)]);
+        assert_eq!(names(list().unwrap()), vec![("work".to_string(), true)]);
+    }
+
+    fn names(listed: Vec<Listed>) -> Vec<(String, bool)> {
+        listed
+            .into_iter()
+            .map(|account| (account.name, account.selected))
+            .collect()
+    }
+
+    fn write_identity(dir: &Path, email: &str) {
+        let path = dir.join(".claude.json");
+        let body = format!(
+            r#"{{"oauthAccount":{{"emailAddress":"{email}","organizationType":"claude_pro"}}}}"#
+        );
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn add_appends_in_order_and_writes_a_private_store() {
+        let config = crate::paths::config_dir();
+        let _ = std::fs::remove_file(crate::paths::state_dir().join(SELECTOR));
+        let _ = std::fs::remove_file(config.join(STORE));
+        let work = config.join("add-work");
+        let personal = config.join("add-personal");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&personal).unwrap();
+        write_identity(&work, "work@example.com");
+
+        assert_eq!(
+            add("work", &work).unwrap().as_deref(),
+            Some("work@example.com (Pro)")
+        );
+        let mut trailing = personal.clone().into_os_string();
+        trailing.push("/");
+        assert_eq!(add("personal", Path::new(&trailing)).unwrap(), None);
+
+        let listed = list().unwrap();
+        assert_eq!(
+            listed[0].identity.as_deref(),
+            Some("work@example.com (Pro)")
+        );
+        assert_eq!(listed[1].identity, None);
+        assert_eq!(
+            names(listed),
+            vec![("work".to_string(), false), ("personal".to_string(), false)]
+        );
+        let store = config.join(STORE);
+        let mode = std::fs::metadata(&store).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let saved = parse_accounts(&std::fs::read(&store).unwrap()).unwrap();
+        assert_eq!(saved[1].1, personal);
+        select("personal").unwrap();
+        assert_eq!(
+            names(list().unwrap()),
+            vec![("work".to_string(), false), ("personal".to_string(), true)]
+        );
+    }
+
+    #[test]
+    fn add_rejects_bad_names_duplicates_and_unsafe_directories() {
+        let config = crate::paths::config_dir();
+        let _ = std::fs::remove_file(crate::paths::state_dir().join(SELECTOR));
+        let work = config.join("add-work");
+        let other = config.join("add-other");
+        let twin = config.join("add-twin");
+        let real = config.join("add-real");
+        let link = config.join("add-link");
+        let shared = config.join("add-shared");
+        for dir in [&work, &other, &twin, &real, &shared] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let _ = std::fs::remove_file(&link);
+        symlink(&real, &link).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        write_identity(&work, "same@example.com");
+        write_identity(&twin, "SAME@example.com");
+        write_accounts(&[("work", work.clone())]);
+        let before = std::fs::read(config.join(STORE)).unwrap();
+
+        assert!(add("bad name", &other).is_err());
+        assert!(add("", &other).is_err());
+        assert!(add("work", &other).is_err());
+        assert!(add("again", &work).is_err());
+        assert!(add("again", &work.join("../add-work")).is_err());
+        assert!(add("twin", &twin).is_err());
+        assert!(add("missing", &config.join("add-missing")).is_err());
+        assert!(add("link", &link).is_err());
+        assert!(add("shared", &shared).is_err());
+        assert_eq!(std::fs::read(config.join(STORE)).unwrap(), before);
+    }
+
+    #[test]
+    fn add_stops_at_the_account_limit() {
+        let config = crate::paths::config_dir();
+        let dirs: Vec<(String, PathBuf)> = (0..=MAX_ACCOUNTS)
+            .map(|i| (format!("a{i}"), config.join(format!("add-limit-{i}"))))
+            .collect();
+        for (_, dir) in &dirs {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let full: Vec<(&str, PathBuf)> = dirs[..MAX_ACCOUNTS]
+            .iter()
+            .map(|(name, dir)| (name.as_str(), dir.clone()))
+            .collect();
+        write_accounts(&full);
+        let (name, dir) = &dirs[MAX_ACCOUNTS];
+        assert!(add(name, dir).is_err());
     }
 
     #[test]

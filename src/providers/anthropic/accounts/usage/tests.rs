@@ -74,6 +74,7 @@ impl LoginReader for FakeReader {
 fn target(name: &str) -> Target {
     Target {
         name: name.to_string(),
+        label: None,
         location: Ok((
             PathBuf::from(format!("/accounts/{name}")),
             tempfile::tempfile().unwrap(),
@@ -430,4 +431,60 @@ async fn an_unsupported_proxy_fails_every_account_without_sending() {
 
     assert!(render(&rows, None, &fixed_now()) == vec!["  a   usage request failed"]);
     assert!(mock.hits.lock().unwrap().is_empty());
+}
+
+#[test]
+fn model_scoped_weekly_limits_render_after_shared_windows() {
+    let usage = parse_usage(
+        br#"{
+            "five_hour": null,
+            "seven_day": {"utilization": 77, "resets_at": "2025-11-27T19:00:00Z"},
+            "limits": [
+                {"kind": "session", "percent": 5},
+                {"kind": "weekly_scoped", "percent": 100, "resets_at": "2025-11-26T08:00:00Z",
+                 "is_active": true, "scope": {"model": {"display_name": "Fable"}}},
+                {"kind": "weekly_scoped", "percent": 4.6, "is_active": false,
+                 "scope": {"model": {"display_name": "Opus 5.5"}}},
+                {"kind": "weekly_scoped", "percent": 9,
+                 "scope": {"model": {"display_name": "\u001b[2Jbad"}}},
+                {"kind": "weekly_scoped", "percent": 9, "scope": {}},
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Empty"}}},
+                "junk"
+            ]
+        }"#,
+    )
+    .unwrap();
+    let rows = [
+        Row {
+            name: "a".into(),
+            label: Some("a@example.com".into()),
+            outcome: Ok(usage),
+        },
+        Row {
+            name: "bb".into(),
+            label: None,
+            outcome: Err(Reason::LoginNotFound),
+        },
+    ];
+
+    assert!(
+        render(&rows, None, &fixed_now())
+            == vec![
+                "  a    a@example.com   5h    ?   week  77% (resets Nov 27 19:00)   Fable week 100% (resets Nov 26 08:00)   Opus 5.5 week   5% (resets ?)",
+                "  bb   -               login not found",
+            ]
+    );
+}
+
+#[test]
+fn model_scoped_weekly_limits_are_capped() {
+    let entries: Vec<String> = (0..20)
+        .map(|i| {
+            format!(
+                r#"{{"kind":"weekly_scoped","percent":{i},"scope":{{"model":{{"display_name":"M{i}"}}}}}}"#
+            )
+        })
+        .collect();
+    let body = format!(r#"{{"limits":[{}]}}"#, entries.join(","));
+    assert_eq!(parse_usage(body.as_bytes()).unwrap().scoped.len(), 8);
 }
