@@ -32,6 +32,7 @@ pub mod recovery;
 mod request_state;
 pub mod request_summary;
 pub mod search;
+pub mod sources;
 pub mod transcription;
 pub mod translate;
 pub mod websocket;
@@ -96,7 +97,6 @@ impl CodexProvider {
         }
     }
 }
-
 impl CodexProvider {
     async fn handle_messages_inner(
         &self,
