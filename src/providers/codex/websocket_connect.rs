@@ -159,6 +159,7 @@ async fn connect_via_http_proxy_tunnel(
     Ok(websocket)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connect_via_http_upgrade(
     websocket_client: &reqwest::Client,
     url: &str,
@@ -166,6 +167,8 @@ async fn connect_via_http_upgrade(
     gate: &WebSocketConnectGate,
     forbidden_cooldown: Duration,
     forbidden_seen: Arc<AtomicBool>,
+    tracked: bool,
+    headers_latch: Arc<OriginQuotaHeaders>,
 ) -> Result<CodexWebSocketStream, CodexError> {
     let http_url = to_http_upgrade_url(url).map_err(|error| CodexError {
         status: 0,
@@ -204,6 +207,10 @@ async fn connect_via_http_upgrade(
             .get(http::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
+        if tracked && status == 429 {
+            headers_latch.record(retry_after.clone());
+        }
+        let response_headers = response.headers().clone();
         let (detail, usage_limit) =
             if status == http::StatusCode::PROXY_AUTHENTICATION_REQUIRED.as_u16() {
                 (GENERIC_HANDSHAKE_ERROR_DETAIL.to_string(), None)
@@ -211,7 +218,7 @@ async fn connect_via_http_upgrade(
                 let (body, complete) = bounded_handshake_error_body(response).await;
                 (
                     handshake_error_detail(Some(&body)),
-                    handshake_quota(status, &body, complete),
+                    handshake_quota(status, &body, complete, &response_headers),
                 )
             };
         return Err(CodexError {
@@ -219,8 +226,15 @@ async fn connect_via_http_upgrade(
             message: format!("WebSocket upgrade rejected with status {status}"),
             detail: Some(detail),
             retry_after,
+            origin: if tracked
+                && usage_limit.is_none()
+                && matches!(status, 500 | 502 | 503 | 504 | 529)
+            {
+                CodexErrorOrigin::WebSocketTransient
+            } else {
+                CodexErrorOrigin::WebSocketHandshake
+            },
             usage_limit,
-            origin: CodexErrorOrigin::WebSocketHandshake,
         });
     }
 
@@ -292,6 +306,8 @@ async fn connect_once_inner(
             gate,
             forbidden_cooldown,
             forbidden_seen,
+            tracked,
+            headers_latch,
         )
         .await
         .map_err(ConnectAttemptError::Origin)
@@ -425,7 +441,7 @@ pub(super) async fn connect_with_timeout(
                 &WS_CONNECT_GATE,
                 WEBSOCKET_CONNECT_FORBIDDEN_COOLDOWN,
                 seen,
-                budget.buffered_websocket(),
+                budget.typed_websocket(),
                 headers_latch,
             )
         },
@@ -434,13 +450,13 @@ pub(super) async fn connect_with_timeout(
     .await
     .map_err(|mut error| {
         if error.origin == CodexErrorOrigin::WebSocketValidation {
-            if budget.buffered_websocket() {
+            if budget.typed_websocket() {
                 budget.mark_final_only();
             } else {
                 error.origin = CodexErrorOrigin::WebSocketHandshake;
             }
         }
-        if budget.buffered_websocket() {
+        if budget.typed_websocket() {
             if error.usage_limit.is_some() {
                 error.detail = Some(GENERIC_HANDSHAKE_ERROR_DETAIL.to_string());
             }
@@ -1174,5 +1190,102 @@ mod tests {
         assert_eq!(err.detail.as_deref(), Some(GENERIC_HANDSHAKE_ERROR_DETAIL));
         assert_eq!(err.retry_after.as_deref(), Some("3"));
         assert_eq!(err.origin, CodexErrorOrigin::WebSocketHandshake);
+    }
+    #[tokio::test]
+    async fn tracked_direct_quota_headers_survive_body_timeout_and_supply_reset() {
+        use super::super::sources::ReplayGate;
+        for complete in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let peer = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 2048];
+                assert!(socket.read(&mut request).await.unwrap() > 0);
+                let body = br#"{"error":{"type":"usage_limit_reached","message":"limit"}}"#;
+                let headers = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3\r\nX-Codex-Primary-Reset-At: 1234567890\r\nX-Codex-Primary-Window-Minutes: 300\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(headers.as_bytes()).await.unwrap();
+                if complete {
+                    socket.write_all(body).await.unwrap();
+                } else {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                }
+            });
+            let budget = super::super::recovery::RecoveryBudget::with_gate(ReplayGate::new(false));
+            budget.enable_typed_websocket();
+            let result = connect_with_timeout(
+                &test_websocket_client(),
+                &WebSocketProxyConfig::direct(),
+                &format!("ws://{addr}/responses"),
+                &HeaderMap::new(),
+                200,
+                &budget,
+            )
+            .await;
+            let error = match result {
+                Ok(_) => panic!("expected failure"),
+                Err(error) => error,
+            };
+            assert_eq!(error.status, 429);
+            assert_eq!(error.retry_after.as_deref(), Some("3"));
+            if complete {
+                assert_eq!(
+                    error.usage_limit.as_ref().unwrap().resets_at,
+                    Some(1234567890)
+                );
+            } else {
+                assert!(error.usage_limit.is_none());
+            }
+            peer.await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn tracked_origin_504_is_distinct_from_invalid_url() {
+        use super::super::sources::ReplayGate;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket
+                .write_all(b"HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let budget = super::super::recovery::RecoveryBudget::with_gate(ReplayGate::new(false));
+        budget.enable_typed_websocket();
+        let client = test_websocket_client();
+        let result = connect_with_timeout(
+            &client,
+            &WebSocketProxyConfig::direct(),
+            &format!("ws://{addr}/responses"),
+            &HeaderMap::new(),
+            1000,
+            &budget,
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("expected failure"),
+            Err(error) => error,
+        };
+        assert_eq!(error.origin, CodexErrorOrigin::WebSocketTransient);
+        let result = connect_with_timeout(
+            &client,
+            &WebSocketProxyConfig::direct(),
+            "invalid url",
+            &HeaderMap::new(),
+            1000,
+            &budget,
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("expected failure"),
+            Err(error) => error,
+        };
+        assert_ne!(error.origin, CodexErrorOrigin::WebSocketTransient);
+        peer.await.unwrap();
     }
 }

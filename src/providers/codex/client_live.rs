@@ -168,7 +168,7 @@ impl CodexHttpClient {
                 }
                 result = start => match result {
                     Ok(stream) => stream,
-                    Err(err) if err.status == 401 && !auth_refresh_attempted && !forwarded_any => {
+                    Err(err) if err.status == 401 && !auth_refresh_attempted && !forwarded_any && !ctx.recovery_budget.hosted() => {
                         auth_refresh_attempted = true;
                         ctx.recovery_budget.start();
                         invalidate_live_continuation_pool(continuation.as_ref());
@@ -208,7 +208,7 @@ impl CodexHttpClient {
                         continuation_retry_available = false;
                         continue 'attempt;
                     }
-                    Err(err) if continuation_retry_available && is_continuation_retry_error(&err) => {
+                    Err(err) if continuation_retry_available && !ctx.recovery_budget.hosted() && is_continuation_retry_error(&err) => {
                         if !ctx.recovery_budget.try_retry(std::time::Duration::ZERO, false) {
                             let _ = tx.send(Err(CodexError::recovery_exhausted())).await;
                             return;

@@ -439,7 +439,19 @@ where
                 break;
             }
             Some(Err(error)) => {
-                terminal_item = Some(Err(websocket_transport_error("stream", &error)));
+                let mut failure = websocket_transport_error("stream", &error);
+                if budget.typed_websocket()
+                    && matches!(
+                        error,
+                        tokio_tungstenite::tungstenite::Error::Io(_)
+                            | tokio_tungstenite::tungstenite::Error::Protocol(
+                                tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake
+                            )
+                    )
+                {
+                    failure.origin = CodexErrorOrigin::WebSocketTransient;
+                }
+                terminal_item = Some(Err(failure));
                 break;
             }
         }
@@ -518,6 +530,65 @@ mod tests {
 
         fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
             Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn abrupt_loopback_eof_is_transient_only_for_tracked_websocket() {
+        use super::super::recovery::{RecoveryBudget, live_retry_exhausted};
+        use super::super::sources::{FailureKind, ReplayGate};
+        for (tracked, hosted) in [(true, false), (true, true), (false, false)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let peer = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let socket = WebSocketStream::from_raw_socket(socket, Role::Server, None).await;
+                drop(socket);
+            });
+            let socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let mut socket = WebSocketStream::from_raw_socket(socket, Role::Client, None).await;
+            let gate = ReplayGate::new(hosted);
+            let budget = if tracked {
+                RecoveryBudget::with_gate(gate.clone())
+            } else {
+                RecoveryBudget::default()
+            };
+            if tracked {
+                budget.enable_typed_websocket();
+            }
+            let (tx, _rx) = mpsc::channel(1);
+            let (_, terminal) = stream_ws_events(&mut socket, 1_000, None, &tx, &budget).await;
+            let error = terminal.unwrap().unwrap_err();
+            assert_eq!(
+                error.origin,
+                if tracked {
+                    CodexErrorOrigin::WebSocketTransient
+                } else {
+                    CodexErrorOrigin::WebSocket
+                }
+            );
+            if hosted {
+                gate.mark_hosted();
+            }
+            let ctx = crate::provider::RequestContext {
+                recovery_budget: budget.clone(),
+                req_id: "test".into(),
+                session_id: None,
+                traffic: None,
+                monitor: None,
+                passthrough: None,
+            };
+            let exhausted =
+                live_retry_exhausted(&ctx, crate::config::CodexTransport::WebSocket, &error);
+            assert_eq!(
+                budget.failure(exhausted).kind,
+                if tracked && !hosted {
+                    FailureKind::TransientExhausted
+                } else {
+                    FailureKind::Final
+                }
+            );
+            peer.await.unwrap();
         }
     }
 

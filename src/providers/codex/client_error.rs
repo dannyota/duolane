@@ -27,6 +27,7 @@ const CODEX_GZIP_INPUT_LIMIT_DETAIL: &str = "codex_gzip_input_limit";
 pub enum CodexErrorOrigin {
     Http,
     WebSocket,
+    WebSocketTransient,
     WebSocketHandshake,
     WebSocketValidation,
     WebSocketOverload,
@@ -250,7 +251,7 @@ pub(super) fn should_retry_codex_status(status: u16) -> bool {
 pub(super) fn codex_error_origin_name(origin: CodexErrorOrigin) -> &'static str {
     match origin {
         CodexErrorOrigin::Http => "http",
-        CodexErrorOrigin::WebSocket => "websocket",
+        CodexErrorOrigin::WebSocket | CodexErrorOrigin::WebSocketTransient => "websocket",
         CodexErrorOrigin::WebSocketHandshake | CodexErrorOrigin::WebSocketValidation => {
             "websocket_handshake"
         }
@@ -275,7 +276,10 @@ pub(super) fn is_retryable_transport_error(err: &CodexError) -> bool {
     ) {
         return false;
     }
-    if err.origin == CodexErrorOrigin::WebSocketHandshake {
+    if matches!(
+        err.origin,
+        CodexErrorOrigin::WebSocketHandshake | CodexErrorOrigin::WebSocketTransient
+    ) {
         if err.detail.as_deref() == Some(super::websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL) {
             return false;
         }

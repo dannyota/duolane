@@ -30,7 +30,7 @@ impl CodexHttpClient {
             );
         }
         if transport == CodexTransport::WebSocket {
-            ctx.recovery_budget.enable_buffered_websocket();
+            ctx.recovery_budget.enable_typed_websocket();
             ctx.recovery_budget.begin_websocket();
         }
         let mut auth = if transport == CodexTransport::Http

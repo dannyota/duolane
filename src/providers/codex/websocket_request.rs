@@ -399,7 +399,15 @@ pub(super) fn start_codex_websocket_events(
             }
             socket_id_publisher.publish(None);
             let error = match send_result {
-                Some(Ok(Err(error))) => Some(websocket_transport_error("send", &error)),
+                Some(Ok(Err(error))) => {
+                    let mut failure = websocket_transport_error("send", &error);
+                    if budget.typed_websocket()
+                        && matches!(error, tokio_tungstenite::tungstenite::Error::Io(_))
+                    {
+                        failure.origin = CodexErrorOrigin::WebSocketTransient;
+                    }
+                    Some(failure)
+                }
                 Some(Err(_)) => Some(websocket_stream_error("WebSocket send timed out")),
                 _ => None,
             };

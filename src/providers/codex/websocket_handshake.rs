@@ -164,6 +164,7 @@ pub(super) fn handshake_quota(
     status: u16,
     body: &[u8],
     complete: bool,
+    headers: &HeaderMap,
 ) -> Option<Box<super::events::CodexUsageLimit>> {
     if status != 429
         || !complete
@@ -182,7 +183,24 @@ pub(super) fn handshake_quota(
     {
         return None;
     }
-    let mut limit = super::events::usage_limit_from_response(body, &[])?;
+    let headers: Vec<(String, String)> = [
+        "x-codex-primary-reset-at",
+        "x-codex-primary-reset-after-seconds",
+        "x-codex-primary-window-minutes",
+        "x-codex-secondary-reset-at",
+        "x-codex-secondary-reset-after-seconds",
+        "x-codex-secondary-window-minutes",
+    ]
+    .iter()
+    .filter_map(|name| {
+        headers
+            .get(*name)
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| v.len() <= 64)
+            .map(|v| ((*name).to_string(), v.to_string()))
+    })
+    .collect();
+    let mut limit = super::events::usage_limit_from_response(body, &headers)?;
     limit.message = GENERIC_HANDSHAKE_ERROR_DETAIL.to_string();
     Some(Box::new(limit))
 }
@@ -250,6 +268,7 @@ pub(super) async fn tracked_tunnel_upgrade(
         if status == 429 {
             headers_latch.record(retry_after.clone());
         }
+        let response_headers = response.headers().clone();
         let mut body = Vec::new();
         let mut complete = false;
         if status == 429 {
@@ -278,8 +297,12 @@ pub(super) async fn tracked_tunnel_upgrade(
             message: format!("WebSocket upgrade rejected with status {status}"),
             detail: Some(GENERIC_HANDSHAKE_ERROR_DETAIL.to_string()),
             retry_after,
-            usage_limit: handshake_quota(status, &body, complete),
-            origin: CodexErrorOrigin::WebSocketHandshake,
+            usage_limit: handshake_quota(status, &body, complete, &response_headers),
+            origin: if matches!(status, 500 | 502 | 503 | 504 | 529) {
+                CodexErrorOrigin::WebSocketTransient
+            } else {
+                CodexErrorOrigin::WebSocketHandshake
+            },
         });
     }
     validate_websocket_upgrade(response.version(), response.headers(), key, protocols).map_err(
@@ -369,7 +392,7 @@ pub(super) fn tungstenite_handshake_error(
                     .and_then(|value| value.to_str().ok())
                     .and_then(|value| value.parse::<usize>().ok())
                     == Some(body.len());
-            handshake_quota(status, body, complete)
+            handshake_quota(status, body, complete, response.headers())
         });
         return CodexError {
             status,
@@ -533,7 +556,7 @@ mod tests {
     fn handshake_quota_rejects_sse_frames() {
         let body =
             b"data: {\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"limit\"}}\n\n";
-        assert!(handshake_quota(429, body, true).is_none());
+        assert!(handshake_quota(429, body, true, &HeaderMap::new()).is_none());
     }
 
     #[test]

@@ -12,7 +12,7 @@ struct AttemptTrace {
     credential: Option<CredentialId>,
     final_only: bool,
     websocket_started: bool,
-    buffered_websocket: bool,
+    typed_websocket: bool,
 }
 
 impl std::fmt::Debug for AttemptTrace {
@@ -29,7 +29,7 @@ impl Default for AttemptTrace {
             credential: None,
             final_only: false,
             websocket_started: false,
-            buffered_websocket: false,
+            typed_websocket: false,
         }
     }
 }
@@ -102,33 +102,33 @@ impl RecoveryBudget {
                 send
             };
             let websocket_started = trace.websocket_started;
-            let buffered_websocket = trace.buffered_websocket;
+            let typed_websocket = trace.typed_websocket;
             *trace = AttemptTrace {
                 kind,
                 send,
                 credential,
                 final_only: false,
                 websocket_started,
-                buffered_websocket,
+                typed_websocket,
             };
         }
     }
 
-    pub(super) fn enable_buffered_websocket(&self) {
+    pub(super) fn enable_typed_websocket(&self) {
         if let Some(trace) = &self.trace {
             trace
                 .lock()
                 .unwrap_or_else(|err| err.into_inner())
-                .buffered_websocket = true;
+                .typed_websocket = true;
         }
     }
 
-    pub(super) fn buffered_websocket(&self) -> bool {
+    pub(super) fn typed_websocket(&self) -> bool {
         self.trace.as_ref().is_some_and(|trace| {
             trace
                 .lock()
                 .unwrap_or_else(|err| err.into_inner())
-                .buffered_websocket
+                .typed_websocket
         })
     }
 
@@ -407,6 +407,58 @@ impl RecoveryBudget {
         state.attempts += 1;
         state.empty_attempts += u32::from(empty);
         true
+    }
+}
+
+pub(super) fn websocket_event_origin(
+    tracked: bool,
+    failure: &super::events::CodexEventFailure,
+    payload: &serde_json::Value,
+) -> super::client::CodexErrorOrigin {
+    use super::client::CodexErrorOrigin;
+    let known_code = super::events::event_error(payload).is_some_and(|error| {
+        ["code", "type"].iter().any(|key| {
+            matches!(
+                error.get(key).and_then(serde_json::Value::as_str),
+                Some(
+                    "server_error"
+                        | "internal_server_error"
+                        | "internal_error"
+                        | "server_is_overloaded"
+                        | "slow_down"
+                        | "overloaded_error"
+                )
+            )
+        })
+    });
+    if tracked
+        && (failure
+            .explicit_status
+            .is_some_and(|status| matches!(status, 429 | 500 | 502 | 503 | 504 | 529))
+            || known_code)
+    {
+        CodexErrorOrigin::WebSocketTransient
+    } else {
+        CodexErrorOrigin::WebSocket
+    }
+}
+
+pub(super) fn live_retry_exhausted(
+    ctx: &crate::provider::RequestContext,
+    transport: crate::config::CodexTransport,
+    error: &super::client::CodexError,
+) -> super::client::CodexError {
+    if transport == crate::config::CodexTransport::WebSocket
+        && ctx.recovery_budget.is_tracked()
+        && !ctx.recovery_budget.hosted()
+        && !super::live_completion::is_empty_completion_error(error)
+        && !super::live_completion::is_missing_previous_response_error(error)
+        && error.usage_limit.is_none()
+        && error.origin == super::client::CodexErrorOrigin::WebSocketTransient
+    {
+        ctx.recovery_budget.transient_exhausted()
+    } else {
+        super::client::CodexError::recovery_exhausted()
     }
 }
 

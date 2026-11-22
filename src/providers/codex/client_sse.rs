@@ -405,6 +405,80 @@ pub(super) fn write_codex_sse_event_capture(traffic: &TrafficCapture, body: &[u8
     }
 }
 
+pub(super) fn record_live_stream_progress(ctx: &crate::provider::RequestContext, chunk: &[u8]) {
+    if let Some(monitor) = ctx.monitor.as_ref() {
+        let (input_tokens, output_tokens) = crate::anthropic::sse::usage_from_anthropic_sse(chunk);
+        monitor.stream_progress(
+            &ctx.req_id,
+            chunk.len() as u64,
+            super::request_state::count_sse_events(chunk),
+            input_tokens,
+            output_tokens,
+        );
+    }
+}
+
+pub(super) fn append_live_metadata_payload(
+    buffer: &mut Vec<u8>,
+    payload: &serde_json::Value,
+    is_http: bool,
+) {
+    if is_http
+        && payload["type"] == "response.output_item.done"
+        && super::events::is_function_call_item(payload)
+        && let Some(index) = payload["output_index"].as_u64()
+    {
+        let item = &payload["item"];
+        append_upstream_sse_payload(
+            buffer,
+            &serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": index,
+                "item": {"type": "function_call", "call_id": item["call_id"], "name": item["name"]}
+            }),
+        );
+    }
+    append_upstream_sse_payload(buffer, payload);
+}
+
+fn append_upstream_sse_payload(buffer: &mut Vec<u8>, payload: &serde_json::Value) {
+    let text = payload.to_string();
+    for line in text.lines() {
+        buffer.extend_from_slice(b"data: ");
+        buffer.extend_from_slice(line.as_bytes());
+        buffer.push(b'\n');
+    }
+    buffer.push(b'\n');
+}
+
+pub(super) fn translate_live_stream_payload(
+    translator: &mut super::translate::live_stream::LiveStreamTranslator,
+    payload: &serde_json::Value,
+    traffic: Option<&crate::traffic::TrafficCapture>,
+) -> Result<(Vec<u8>, bool), String> {
+    let chunk = translator.accept(payload, traffic)?;
+    let terminal = super::events::event_is_terminal(payload) || translator.is_finished();
+    Ok((chunk, terminal))
+}
+
+pub(super) fn single_live_stream_response(chunk: Vec<u8>) -> axum::response::Response {
+    event_stream_response(futures_util::stream::once(async move {
+        Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(chunk))
+    }))
+}
+
+pub(super) fn event_stream_response<S>(stream: S) -> axum::response::Response
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
+{
+    let headers = [
+        (http::header::CONTENT_TYPE, "text/event-stream"),
+        (http::header::CACHE_CONTROL, "no-cache"),
+        (http::header::CONNECTION, "keep-alive"),
+    ];
+    axum::response::IntoResponse::into_response((headers, axum::body::Body::from_stream(stream)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
