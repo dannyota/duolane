@@ -215,11 +215,28 @@ Checked on 2026-11-21 with duolane 0.3.0 and Claude Code 2.1.330 through
   `Auto` and `DUOLANE_CODEX_AUTO_WS_MAX_BYTES=1024`, four full-context requests
   went over gzipped HTTP and returned 200.
 
+Checked on 2026-11-22 with duolane 0.4.1 and Claude Code 2.1.330 through
+intercept mode and `ANTHROPIC_BASE_URL`:
+
+- Codex accepted the default `originator: duolane` and
+  `User-Agent: duolane/<version>`: `sol` and `luna` requests returned 200.
+- A streaming request over the context window returned 400 with
+  `prompt is too long` in under 3 seconds, for both a 2.6 MB and a 4.7 MB body.
+- A non-streaming request over the context window went through Responses Lite.
+  Codex answered HTTP 500, duolane retried three times, and returned 503
+  `Codex completed without producing output` after about 25 seconds.
+- A switch while a tool call is pending works both ways. A `--max-turns 1` turn
+  stopped after one model's `Read` call and its result; resuming the session
+  with the other model (Sol to Opus, Opus to Sol) answered from that result.
+- Not checked: a token refresh. See [unverified behavior](#unverified-behavior).
+
 ## Unverified behavior
 
 These inherited assumptions need a live check:
 
-- Switching backends while a tool call is pending.
+- A live Codex token refresh. duolane refreshes only near expiry and logs no
+  refresh event, and forcing one would mean editing the Codex login file.
+  Hermetic tests cover the refresh paths.
 - Claude Code recording `request-id` as `requestId`.
 - Claude Code running web search through a client-side `WebSearch` tool and an
   isolated inner request, which would keep hosted search blocks out of the outer
