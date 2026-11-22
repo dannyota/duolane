@@ -5,7 +5,9 @@ use std::path::Path;
 use serde::Serialize;
 use serde::de::IgnoredAny;
 
-use crate::providers::codex::translate::model_allowlist::{ALLOWED_MODELS, FAMILY_ALIASES};
+use crate::providers::codex::translate::model_allowlist::{
+    ALLOWED_MODELS, FAMILY_ALIASES, resolve_family_in, split_tier_suffix_with,
+};
 use crate::providers::codex::translate::model_catalog::{self, CatalogModel, valid_slug};
 
 use super::settings;
@@ -40,16 +42,29 @@ impl Lineup {
 }
 
 pub(super) fn lineup() -> Option<Lineup> {
-    build(&model_catalog::catalog_models())
+    let override_model = crate::config::codex_model();
+    build(&model_catalog::catalog_models(), override_model.as_deref())
 }
 
-fn build(catalog: &[CatalogModel]) -> Option<Lineup> {
+fn build(catalog: &[CatalogModel], override_model: Option<&str>) -> Option<Lineup> {
+    let is_allowed = |model: &str| {
+        ALLOWED_MODELS.contains(&model)
+            || catalog
+                .iter()
+                .any(|entry| entry.slug == model && entry.supported_in_api)
+    };
+    let override_known = override_model
+        .filter(|model| !model.is_empty())
+        .is_none_or(|model| {
+            let base = split_tier_suffix_with(model, is_allowed).map_or(model, |(base, _)| base);
+            known_context(base) && is_allowed(base)
+        });
     let mut options: Vec<Row> = if catalog.is_empty() {
         ALLOWED_MODELS
             .iter()
             .rev()
             .filter(|id| valid_slug(id))
-            .map(|id| row(id, None))
+            .map(|id| row(id, None, override_known && known_context(id)))
             .collect()
     } else {
         let mut listed: Vec<&CatalogModel> = catalog
@@ -63,7 +78,13 @@ fn build(catalog: &[CatalogModel]) -> Option<Lineup> {
         listed.sort_by_key(|model| (model.priority.is_none(), model.priority));
         listed
             .into_iter()
-            .map(|model| row(&model.slug, model.display_name.as_deref()))
+            .map(|model| {
+                row(
+                    &model.slug,
+                    model.display_name.as_deref(),
+                    override_known && known_context(&model.slug),
+                )
+            })
             .collect()
     };
     for (i, alias) in FAMILY_ALIASES.iter().enumerate() {
@@ -73,7 +94,9 @@ fn build(catalog: &[CatalogModel]) -> Option<Lineup> {
             "luna" => "Luna",
             _ => "Astra",
         };
-        options.insert(i, row(alias, Some(name)));
+        let known = resolve_family_in(alias, catalog)
+            .is_some_and(|resolved| known_context(&resolved.model));
+        options.insert(i, row(alias, Some(name), override_known && known));
     }
     options.truncate(MAX_ROWS);
     let lineup = Lineup { options };
@@ -81,7 +104,25 @@ fn build(catalog: &[CatalogModel]) -> Option<Lineup> {
     (!lineup.options.is_empty() && size <= MAX_BYTES).then_some(lineup)
 }
 
-fn row(id: &str, display_name: Option<&str>) -> Row {
+fn known_context(id: &str) -> bool {
+    matches!(
+        id,
+        "gpt-5.4"
+            | "gpt-5.5"
+            | "gpt-5.6-luna"
+            | "gpt-5.6-sol"
+            | "gpt-5.6-terra"
+            | "gpt-6-astra"
+            | "gpt-6-sol"
+            | "gpt-6.1-sol"
+            | "gpt-6.1-terra"
+            | "gpt-6-luna"
+            | "gpt-6.2-astra"
+            | "gpt-6.2-sol"
+    )
+}
+
+fn row(id: &str, display_name: Option<&str>, one_million: bool) -> Row {
     let name = display_name
         .filter(|name| {
             !name.trim().is_empty()
@@ -92,7 +133,11 @@ fn row(id: &str, display_name: Option<&str>) -> Row {
         })
         .unwrap_or(id);
     Row {
-        model: id.to_string(),
+        model: if one_million {
+            format!("{id}[1m]")
+        } else {
+            id.to_string()
+        },
         label: format!("{name} (Codex)"),
     }
 }
@@ -285,7 +330,7 @@ mod tests {
             model("gpt-b", 2, true, Some(&long)),
         ];
         catalog.extend((0..MAX_ROWS).map(|index| model(&format!("gpt-x{index}"), 10, true, None)));
-        let options = build(&catalog).unwrap().options;
+        let options = build(&catalog, None).unwrap().options;
         assert_eq!(options.len(), MAX_ROWS);
         let labels: Vec<(&str, &str)> = options
             .iter()
@@ -295,10 +340,10 @@ mod tests {
         assert_eq!(
             labels,
             [
-                ("terra", "Terra (Codex)"),
-                ("sol", "Sol (Codex)"),
-                ("astra", "Astra (Codex)"),
-                ("luna", "Luna (Codex)"),
+                ("terra[1m]", "Terra (Codex)"),
+                ("sol[1m]", "Sol (Codex)"),
+                ("astra[1m]", "Astra (Codex)"),
+                ("luna[1m]", "Luna (Codex)"),
                 ("gpt-a", "gpt-a (Codex)"),
                 ("gpt-b", "gpt-b (Codex)"),
                 ("gpt-c", "Gamma (Codex)")
@@ -310,10 +355,53 @@ mod tests {
                 .all(|row| row.model != "gpt-hidden" && row.model != "gpt-a-fast")
         );
 
-        let fallback = build(&[]).unwrap().options;
+        let fallback = build(&[], None).unwrap().options;
         assert_eq!(fallback.len(), ALLOWED_MODELS.len() + FAMILY_ALIASES.len());
         let newest = ALLOWED_MODELS[ALLOWED_MODELS.len() - 1];
-        assert_eq!(fallback[4].model, newest);
+        assert_eq!(fallback[4].model, format!("{newest}[1m]"));
         assert_eq!(fallback[4].label, format!("{newest} (Codex)"));
+    }
+    #[test]
+    fn unknown_newest_family_does_not_advertise_older_context() {
+        let options = build(
+            &[
+                model("gpt-6.2-sol", 1, true, None),
+                model("gpt-6.99-sol", 2, true, None),
+            ],
+            None,
+        )
+        .unwrap()
+        .options;
+        assert_eq!(options[1].model, "sol");
+        assert_eq!(options[4].model, "gpt-6.2-sol[1m]");
+        assert_eq!(options[5].model, "gpt-6.99-sol");
+    }
+
+    #[test]
+    fn override_must_also_have_known_context() {
+        let catalog = [
+            model("gpt-6.2-sol", 1, true, None),
+            model("gpt-6.99-sol", 2, true, None),
+        ];
+        let smaller = build(&catalog, Some("gpt-5.4-mini")).unwrap();
+        assert_eq!(smaller.options[4].model, "gpt-6.2-sol");
+        let large = build(&catalog, Some("gpt-5.4-fast")).unwrap();
+        assert_eq!(large.options[4].model, "gpt-6.2-sol[1m]");
+        assert_eq!(large.options[5].model, "gpt-6.99-sol");
+    }
+    #[test]
+    fn catalog_override_requires_supported_entry() {
+        let row = model("gpt-6.1-sol", 1, true, None);
+        let mut override_entry = model("gpt-6.2-astra", 2, false, None);
+        override_entry.supported_in_api = false;
+        for catalog in [vec![row.clone()], vec![row.clone(), override_entry.clone()]] {
+            let lineup = build(&catalog, Some("gpt-6.2-astra")).unwrap();
+            assert_eq!(lineup.options[4].model, "gpt-6.1-sol");
+        }
+        override_entry.supported_in_api = true;
+        for name in ["gpt-6.2-astra", "gpt-6.2-astra-fast"] {
+            let lineup = build(&[row.clone(), override_entry.clone()], Some(name)).unwrap();
+            assert_eq!(lineup.options[4].model, "gpt-6.1-sol[1m]");
+        }
     }
 }

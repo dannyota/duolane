@@ -63,6 +63,18 @@ It is opt-in, because every Claude Code surface then depends on duolane running.
   `--settings '{"modelPicker":…}'` ahead of the owner's arguments, so nothing
   persistent changes. The value holds only `modelPicker`, because other local
   users can read process arguments.
+- Picker IDs end in `[1m]` when the resolved model has at least 1 million
+  context tokens in the
+  [OpenAI model docs](https://developers.openai.com/api/docs/models). Family
+  aliases use the same catalog as the exact IDs in the picker. Unknown models
+  and models with smaller windows keep their plain IDs. A local Codex model
+  override must also be supported and have a documented window of at least 1
+  million tokens. The hints reflect the catalog and override when the lineup is
+  built; rerun `duolane intercept setup` to refresh a saved duolane lineup.
+  `[1m]` is a
+  [Claude Code hint](https://code.claude.com/docs/en/model-config#correct-the-window-for-a-gateway-or-custom-model-id),
+  not an upstream setting. duolane strips it before routing and does not set
+  Claude Code's compaction window.
 - It adds none, and says why on stderr, when the first owner argument is not an
   option (it may be a subcommand such as `remote-control`, which refuses global
   flags before it); when an argument before `--` is `--settings` or starts with
@@ -254,6 +266,10 @@ Checked on 2026-11-20 with Claude Code 2.1.328:
   file wrote eight variables and an 11-row `modelPicker`, then restored the file
   byte for byte and removed the intercept directory.
 
+With Claude Code 2.1.330 and a loopback mock, `--model sol` warned that the
+model was unrecognized. `--model 'sol[1m]'` did not. Both sent `sol` to the
+mock.
+
 ## Spike results
 
 Checked on 2026-11-19 with Claude Code 2.1.327 behind an existing intercepting
@@ -284,6 +300,5 @@ proxy, before any duolane code:
 
 - No first-party feature needs a protocol upgrade on the intercepted host.
 - The first-byte timeout variable exists and behaves as documented.
-- Whether the wrapper must set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to correct the
-  window Claude Code assumes for a Codex model
-  ([model configuration](https://code.claude.com/docs/en/model-config)).
+- Whether remote Claude Code surfaces preserve the picker hint when switching
+  models.
