@@ -101,5 +101,9 @@ entire `projects` directory would expose more projects than needed.
 A live check on Claude Code 2.1.330 used two distinct subscription logins and
 one linked project folder. The second login resumed by ID, recalled the first
 turn, and appended to the original file without changing its inode or creating a
-second transcript. The check did not exercise the duolane wrapper or establish
-cross-account compatibility for every model or stored tool state.
+second transcript. A second check ran the duolane wrapper with the default login
+and a profile created by `duolane accounts login`: a session started under the
+default login, `accounts use` switched profiles, and `duolane claude --resume`
+asked for consent, linked the folder, recalled the first turn, and appended to
+the same file. Neither check establishes cross-account compatibility for every
+model or stored tool state.
