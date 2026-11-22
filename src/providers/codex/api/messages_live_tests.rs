@@ -187,3 +187,123 @@ async fn live_hosted_small_results_succeed_under_output_bound() {
     assert!(!output.contains("event: error"));
     server.abort();
 }
+
+#[tokio::test]
+async fn handle_recovers_stream_and_delegates_buffered() {
+    use crate::config::codex_auth::AuthSource;
+    use crate::providers::codex::{
+        api::messages::handle,
+        auth::api_key::OpenAiKey,
+        sources::{ReplayGate, SourceAttempt},
+        translate::model_allowlist::resolve_tier_model_alias,
+    };
+    use axum::{Router, http::StatusCode, routing::post};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = url::Url::parse(&format!("http://{}/v1", listener.local_addr().unwrap())).unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/v1/responses", post(move || { let counter = counter.clone(); async move {
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 { (StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "0")], "") } else { (StatusCode::OK, [("retry-after", "0")], concat!("data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n", "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hello\"}\n\n", "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n", "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")) }
+    }}))).await.unwrap()
+    });
+    let api = super::ApiClient::new(url, OpenAiKey::parse(b"toy-key").unwrap()).unwrap();
+    let model = resolve_tier_model_alias("gpt-5.5");
+    for stream in [true, false] {
+        let gate = ReplayGate::new(false);
+        let attempt = SourceAttempt::new(AuthSource::ApiKey, &test_context(), gate.clone());
+        let body = serde_json::from_value(json!({"model":"client","stream":stream,"messages":[{"role":"user","content":"hello"}]})).unwrap();
+        let response = match handle(&body, None, &model, &api, &attempt).await {
+            Ok(response) => response,
+            Err(_) => panic!("expected success"),
+        };
+        assert!(gate.committed());
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        if stream {
+            assert!(
+                std::str::from_utf8(&bytes)
+                    .unwrap()
+                    .contains("event: message_stop")
+            );
+        } else {
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["content"][0]["text"], "hello");
+        }
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    server.abort();
+}
+
+#[tokio::test]
+async fn handle_hosted_veto_and_transient_exhaustion() {
+    use crate::config::codex_auth::AuthSource;
+    use crate::providers::codex::{
+        api::{SendEvidence, messages::handle},
+        auth::api_key::OpenAiKey,
+        sources::{FailureKind, ReplayGate, SourceAttempt},
+        translate::model_allowlist::resolve_tier_model_alias,
+    };
+    use axum::{Router, http::StatusCode, routing::post};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = url::Url::parse(&format!("http://{}/v1", listener.local_addr().unwrap())).unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/v1/responses",
+                post(move || {
+                    let counter = counter.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            [("retry-after", "0")],
+                            "private sentinel",
+                        )
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap()
+    });
+    let api = super::ApiClient::new(url, OpenAiKey::parse(b"toy-key").unwrap()).unwrap();
+    let model = resolve_tier_model_alias("gpt-5.5");
+    for hosted in [true, false] {
+        let gate = ReplayGate::new(hosted);
+        let attempt = SourceAttempt::new(AuthSource::ApiKey, &test_context(), gate.clone());
+        let body = serde_json::from_value(if hosted { json!({"stream":true,"messages":[{"role":"user","content":"hello"}],"tools":[{"type":"web_search_20250305","name":"web_search"}]}) } else { json!({"stream":true,"messages":[{"role":"user","content":"hello"}]}) }).unwrap();
+        let failure = match handle(&body, None, &model, &api, &attempt).await {
+            Ok(_) => panic!("expected failure"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            failure.kind,
+            if hosted {
+                FailureKind::Final
+            } else {
+                FailureKind::TransientExhausted
+            }
+        );
+        assert_eq!(failure.send, SendEvidence::OutcomeUnknown);
+        assert!(failure.credential == Some(api.credential_id()));
+        assert_eq!(failure.error.status, 503);
+        assert!(!failure.error.message.contains("private sentinel"));
+        assert_eq!(gate.ambiguous_hosted(), hosted);
+        assert!(!gate.committed());
+        assert_eq!(calls.load(Ordering::SeqCst), if hosted { 1 } else { 5 });
+    }
+    server.abort();
+}

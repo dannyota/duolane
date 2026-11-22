@@ -35,6 +35,58 @@ pub fn build_request(
 }
 
 #[allow(clippy::result_large_err)]
+pub async fn handle(
+    body: &MessagesRequest,
+    _identity: Option<&crate::request_identity::ConversationIdentity>,
+    resolved: &ResolvedModel,
+    api: &super::ApiClient,
+    attempt: &crate::providers::codex::sources::SourceAttempt,
+) -> std::result::Result<axum::response::Response, crate::providers::codex::sources::SourceFailure>
+{
+    use crate::providers::codex::api::ApiFailureKind;
+    use crate::providers::codex::sources::FailureKind;
+
+    if !body.stream {
+        return handle_buffered(body, resolved, api, attempt).await;
+    }
+    let mut retries = 0;
+    loop {
+        let failure = match super::messages_live::stream_once(body, resolved, api, attempt).await {
+            Ok(response) => return Ok(response),
+            Err(failure) => failure,
+        };
+        let kind = match failure.kind {
+            ApiFailureKind::Quota => FailureKind::UsageLimit,
+            ApiFailureKind::Rejected => FailureKind::RejectedCredential,
+            _ => FailureKind::Final,
+        };
+        if failure.kind != ApiFailureKind::Transient
+            || attempt.gate.hosted()
+            || attempt.gate.ambiguous_hosted()
+            || attempt.gate.committed()
+        {
+            return Err(source_failure(api, failure, kind));
+        }
+        let backoff =
+            crate::retry::compute_backoff_delay(retries, failure.error.retry_after.as_deref());
+        if backoff.exceeds_budget
+            || !attempt
+                .context
+                .recovery_budget
+                .wait_retry(backoff.wait_ms, false)
+                .await
+        {
+            return Err(source_failure(
+                api,
+                failure,
+                FailureKind::TransientExhausted,
+            ));
+        }
+        retries += 1;
+    }
+}
+
+#[allow(clippy::result_large_err)]
 pub async fn handle_buffered(
     body: &MessagesRequest,
     resolved: &ResolvedModel,
