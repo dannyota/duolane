@@ -140,14 +140,15 @@ On macOS and Linux, use Claude Code's own sign-in to add a profile and select it
 for the next `duolane claude` launch:
 
 ```bash
-duolane accounts login
-duolane accounts use
+duolane accounts login backup
+duolane accounts use backup
 duolane claude --resume <session-id>
 ```
 
-Choose `default` in `accounts use` to return to your original profile. Plain
-`claude` and an explicit `CLAUDE_CONFIG_DIR` ignore the selection. This does not
-switch an open session or copy credentials.
+Run `duolane accounts use default` to return to your original profile. Without a
+name, `login` asks for one and `use` shows a menu. Plain `claude` and an
+explicit `CLAUDE_CONFIG_DIR` ignore the selection. This does not switch an open
+session or copy credentials.
 
 A named profile asks before sharing a project's default transcript folder for
 the first time. Resuming then writes to the original transcript without a fork.
@@ -170,18 +171,18 @@ agent file.
 
 ## Commands
 
-| Command                     | Purpose                                       |
-| --------------------------- | --------------------------------------------- |
-| `duolane serve`             | Start the proxy and its terminal dashboard    |
-| `duolane monitor`           | Attach a dashboard to a running proxy         |
-| `duolane models`            | List the models you can use                   |
-| `duolane codex auth status` | Check the Codex login                         |
-| `duolane claude [args]`     | Start Claude Code through the intercept proxy |
-| `duolane accounts login`    | Sign in to a named Claude Code profile        |
-| `duolane accounts use`      | Select the profile for the next Claude launch |
-| `duolane intercept setup`   | Route every Claude Code session through it    |
-| `duolane intercept cleanup` | Remove the intercept settings and files       |
-| `duolane intercept renew`   | Replace the intercept certificate             |
+| Command                         | Purpose                                       |
+| ------------------------------- | --------------------------------------------- |
+| `duolane serve`                 | Start the proxy and its terminal dashboard    |
+| `duolane monitor`               | Attach a dashboard to a running proxy         |
+| `duolane models`                | List the models you can use                   |
+| `duolane codex auth status`     | Check the Codex login                         |
+| `duolane claude [args]`         | Start Claude Code through the intercept proxy |
+| `duolane accounts login [name]` | Sign in to a named Claude Code profile        |
+| `duolane accounts use [name]`   | Select the profile for the next Claude launch |
+| `duolane intercept setup`       | Route every Claude Code session through it    |
+| `duolane intercept cleanup`     | Remove the intercept settings and files       |
+| `duolane intercept renew`       | Replace the intercept certificate             |
 
 ## How it works
 

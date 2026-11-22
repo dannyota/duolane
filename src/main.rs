@@ -95,8 +95,16 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum AccountsCommand {
-    Login,
-    Use,
+    #[command(about = "Sign in to a named Claude profile")]
+    Login {
+        #[arg(value_name = "NAME")]
+        name: Option<String>,
+    },
+    #[command(about = "Choose the profile for the next duolane claude launch")]
+    Use {
+        #[arg(value_name = "NAME")]
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -291,8 +299,8 @@ fn main() -> Result<()> {
         }
         Commands::Codex { command } => run_provider_cli("codex", command),
         Commands::Accounts { command } => match command {
-            AccountsCommand::Login => duolane::claude_accounts::login(),
-            AccountsCommand::Use => duolane::claude_accounts::select(),
+            AccountsCommand::Login { name } => duolane::claude_accounts::login(name),
+            AccountsCommand::Use { name } => duolane::claude_accounts::select(name),
         },
         Commands::Claude { args } => duolane::intercept::run_claude(args),
         Commands::Agents { command } => match command {

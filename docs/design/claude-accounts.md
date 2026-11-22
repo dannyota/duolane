@@ -6,18 +6,19 @@ switches a running process or falls back on a quota error. Codex is unchanged.
 
 ## Commands
 
-- `duolane accounts login` asks for a name and runs `claude auth login` with
-  `CLAUDE_CONFIG_DIR` set to `<duolane config>/claude-accounts/<name>`. A name
-  is 1–32 lowercase ASCII letters, digits, hyphens, or underscores, starts with
-  a letter or digit, and is not `default`. Reusing a name signs in to that
-  profile again. A new profile is selectable only after the login command
-  succeeds. Concurrent managed logins for one profile are refused. The lock is
-  released when the login command returns, even if it left a background process;
-  if duolane itself is killed, the lock lasts until the login command and its
-  children exit. Close any Claude Code process using that profile before logging
-  in again.
-- `duolane accounts use` offers `default` and the registered profile names. It
-  saves only the selected name, atomically, to
+- `duolane accounts login [name]` takes a name, or asks for one, and runs
+  `claude auth login` with `CLAUDE_CONFIG_DIR` set to
+  `<duolane config>/claude-accounts/<name>`. A name is 1–32 lowercase ASCII
+  letters, digits, hyphens, or underscores, starts with a letter or digit, and
+  is not `default`. Reusing a name signs in to that profile again. A new profile
+  is selectable only after the login command succeeds. Concurrent managed logins
+  for one profile are refused. The lock is released when the login command
+  returns, even if it left a background process; if duolane itself is killed,
+  the lock lasts until the login command and its children exit. Close any Claude
+  Code process using that profile before logging in again.
+- `duolane accounts use [name]` accepts `default` or a registered profile name,
+  or offers them in a menu. An unknown or unsafe name is an error. It saves only
+  the selected name, atomically, to
   `<duolane config>/claude-accounts/.selected`. Storing it beside the profiles
   scopes it to that config directory, whatever path alias or letter case reaches
   it. `default` restores the original behavior. This command never starts a
