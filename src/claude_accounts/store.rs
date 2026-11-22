@@ -319,7 +319,6 @@ fn publish_new(dir: &File, temp: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-// rustix 1.1.6 does not expose renameat_with on every Unix target.
 #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
 fn publish_new(_: &File, _: &str, _: &str) -> Result<()> {
     bail!("atomic no-replace publication unavailable on this platform")
