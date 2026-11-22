@@ -107,6 +107,15 @@ impl RecoveryBudget {
         }
     }
 
+    pub(super) fn is_final_only(&self) -> bool {
+        self.trace.as_ref().is_some_and(|trace| {
+            trace
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .final_only
+        })
+    }
+
     pub(super) fn send(&self) -> SendEvidence {
         self.trace
             .as_ref()
@@ -167,10 +176,42 @@ impl RecoveryBudget {
         CodexError::recovery_exhausted()
     }
 
+    pub(super) fn hosted(&self) -> bool {
+        self.gate.as_ref().is_some_and(|gate| gate.hosted())
+    }
+
     pub(super) fn mark_hosted(&self) {
         if let Some(gate) = &self.gate {
             gate.mark_hosted();
         }
+    }
+
+    pub(super) fn quota_denied_before_execution(status: u16, body: &[u8], hosted: bool) -> bool {
+        status == 429
+            && !hosted
+            && serde_json::from_slice::<serde_json::Value>(body)
+                .ok()
+                .is_some_and(|payload| {
+                    payload.as_object().is_some_and(|object| {
+                        object.len() == 1
+                            && object
+                                .get("error")
+                                .and_then(serde_json::Value::as_object)
+                                .is_some_and(|error| {
+                                    error.keys().all(|key| {
+                                        matches!(
+                                            key.as_str(),
+                                            "type"
+                                                | "message"
+                                                | "code"
+                                                | "plan_type"
+                                                | "resets_at"
+                                                | "resets_in_seconds"
+                                        )
+                                    })
+                                })
+                    })
+                })
     }
 
     #[cfg(test)]

@@ -81,7 +81,7 @@ pub(super) async fn live_stream_response(
         let upstream_events = match transport {
             config::CodexTransport::Http => {
                 client
-                    .stream_codex_http_events_for_owner(&request_body, &ctx, &http_body)
+                    .stream_codex_http_events_for_owner_tracked(&request_body, &ctx, &http_body)
                     .await
             }
             config::CodexTransport::WebSocket => {

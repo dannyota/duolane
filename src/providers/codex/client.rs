@@ -6,8 +6,10 @@ use std::time::{Duration, Instant};
 use super::auth::constants::CODEX_API_ENDPOINT;
 use super::auth::manager::CodexAuthManager;
 use super::auth::token_store::{DefaultCodexAuthStore, StoredAuth, file_store};
-use super::client_body::CodexHttpBodyCache;
-use super::client_capture::write_upstream_response_capture;
+use super::client_body::{CodexHttpBody, CodexHttpBodyCache};
+use super::client_capture::{
+    write_upstream_response_capture, write_upstream_response_headers_capture,
+};
 pub use super::client_error::*;
 pub use super::client_headers::*;
 use super::client_proxy::*;
@@ -190,6 +192,114 @@ impl CodexHttpClient {
             .await
             .map_err(auth_refresh_error)?;
         bind_account(&account, auth)
+    }
+
+    pub(super) async fn start_http_event_attempt(
+        &self,
+        auth: &mut StoredAuth,
+        http_body: &CodexHttpBody,
+        ctx: &RequestContext,
+        use_responses_lite: bool,
+        auth_refresh_attempted: &mut bool,
+        tracked: bool,
+    ) -> Result<(reqwest::Response, Vec<(String, String)>, Instant), CodexError> {
+        loop {
+            if tracked {
+                ctx.recovery_budget.begin_http_attempt();
+            }
+            let result = if tracked {
+                self.start_post_http_inner(auth, http_body, ctx, use_responses_lite, true)
+                    .await
+            } else {
+                self.start_post_http(auth, http_body, ctx, use_responses_lite)
+                    .await
+            };
+            if tracked
+                && result.is_err()
+                && ctx.recovery_budget.send() == super::api::SendEvidence::OutcomeUnknown
+            {
+                ctx.recovery_budget.mark_ambiguous_hosted();
+            }
+            let (resp, started_at) = result?;
+            if tracked && resp.status().is_server_error() {
+                ctx.recovery_budget.mark_ambiguous_hosted();
+            }
+
+            if resp.status().as_u16() == 401 && !*auth_refresh_attempted {
+                *auth_refresh_attempted = true;
+                ctx.recovery_budget.start();
+                let refreshed = if tracked {
+                    self.refreshed_auth_buffered_http(auth, &ctx.recovery_budget)
+                        .await
+                } else {
+                    self.refreshed_auth(auth).await
+                };
+                *auth = refreshed.inspect_err(|error| {
+                    if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
+                        ctx.recovery_budget.cancel_unspent_start();
+                    }
+                })?;
+                if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
+                    return Err(CodexError::recovery_exhausted());
+                }
+                continue;
+            }
+
+            if !resp.status().is_success() {
+                let mut hosted = false;
+                let response = if tracked {
+                    self.collect_http_response_inner(resp, started_at, ctx, &mut hosted, true)
+                        .await
+                        .inspect_err(|_| ctx.recovery_budget.mark_ambiguous_hosted())?
+                } else {
+                    self.collect_http_response(resp, started_at, ctx, &mut hosted)
+                        .await?
+                };
+                if tracked {
+                    if explicit_permanent_buffered_error(&response.body).is_some()
+                        || codex_status_error_message(&response.body).is_some_and(|message| {
+                            super::events::is_context_overflow(None, &message)
+                        })
+                    {
+                        ctx.recovery_budget.mark_final_only();
+                        let mut error = codex_status_error(response);
+                        error.origin = CodexErrorOrigin::Http;
+                        return Err(error);
+                    }
+                    if super::events::usage_limit_from_response(&response.body, &response.headers)
+                        .is_some()
+                    {
+                        ctx.recovery_budget
+                            .set_kind(super::sources::FailureKind::UsageLimit);
+                        if super::recovery::RecoveryBudget::quota_denied_before_execution(
+                            response.status,
+                            &response.body,
+                            hosted,
+                        ) {
+                            ctx.recovery_budget
+                                .set_send(super::api::SendEvidence::DeniedBeforeExecution);
+                        } else {
+                            ctx.recovery_budget.mark_ambiguous_hosted();
+                        }
+                    }
+                }
+                let mut error = codex_status_error(response);
+                error.origin = CodexErrorOrigin::Http;
+                return Err(error);
+            }
+
+            let status = resp.status().as_u16();
+            let headers = response_headers(&resp);
+            if let Some(traffic) = ctx.traffic.as_deref() {
+                write_upstream_response_headers_capture(
+                    traffic,
+                    status,
+                    started_at.elapsed(),
+                    &headers,
+                );
+            }
+            return Ok((resp, headers, started_at));
+        }
     }
 
     pub(super) async fn auth_for_buffered_http(

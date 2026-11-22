@@ -196,7 +196,7 @@ pub(super) fn codex_status_error(response: CodexResponse) -> CodexError {
     }
 }
 
-fn codex_status_error_message(body: &[u8]) -> Option<String> {
+pub(super) fn codex_status_error_message(body: &[u8]) -> Option<String> {
     let (text, code) = match serde_json::from_slice::<serde_json::Value>(body) {
         Ok(value) => (
             value

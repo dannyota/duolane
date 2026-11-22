@@ -263,31 +263,12 @@ impl CodexHttpClient {
                 if transport == CodexTransport::Http {
                     ctx.recovery_budget
                         .set_kind(super::sources::FailureKind::UsageLimit);
-                    let pre_execution = response.status == 429
-                        && !response.hosted_tool_executed
-                        && serde_json::from_slice::<serde_json::Value>(&response.body)
-                            .ok()
-                            .is_some_and(|payload| {
-                                payload.as_object().is_some_and(|object| {
-                                    object.len() == 1
-                                        && object
-                                            .get("error")
-                                            .and_then(serde_json::Value::as_object)
-                                            .is_some_and(|error| {
-                                                error.keys().all(|key| {
-                                                    matches!(
-                                                        key.as_str(),
-                                                        "type"
-                                                            | "message"
-                                                            | "code"
-                                                            | "plan_type"
-                                                            | "resets_at"
-                                                            | "resets_in_seconds"
-                                                    )
-                                                })
-                                            })
-                                })
-                            });
+                    let pre_execution =
+                        super::recovery::RecoveryBudget::quota_denied_before_execution(
+                            response.status,
+                            &response.body,
+                            response.hosted_tool_executed,
+                        );
                     if pre_execution {
                         ctx.recovery_budget
                             .set_send(super::api::SendEvidence::DeniedBeforeExecution);
@@ -616,7 +597,7 @@ impl CodexHttpClient {
             .await
     }
 
-    async fn start_post_http_inner(
+    pub(super) async fn start_post_http_inner(
         &self,
         auth: &StoredAuth,
         http_body: &CodexHttpBody,
