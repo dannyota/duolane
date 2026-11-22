@@ -2,8 +2,10 @@ use http::StatusCode;
 use serde_json::{Map, Value, json};
 
 use crate::providers::codex::translate::{
-    model_allowlist::{allowed_models_display, is_family_alias, resolve_model_request},
-    request::{Effort, resolve_effort_override, to_codex_effort},
+    model_allowlist::{
+        ResolvedModel, allowed_models_display, is_family_alias, resolve_model_request,
+    },
+    request::{Effort, ServiceTier, resolve_effort_override, to_codex_effort},
 };
 use crate::{config, registry::normalize_incoming_model};
 
@@ -40,27 +42,47 @@ fn translate_request_with_override(
     body: Value,
     effort_override: Option<&str>,
 ) -> Result<TranslatedRequest, ChatError> {
+    translate_with_source(&body, effort_override, None)
+}
+
+pub fn translate_api_request(
+    body: &Value,
+    resolved: &ResolvedModel,
+) -> Result<TranslatedRequest, ChatError> {
+    translate_with_source(body, None, Some(resolved))
+}
+
+fn translate_with_source(
+    body: &Value,
+    effort_override: Option<&str>,
+    api_resolved: Option<&ResolvedModel>,
+) -> Result<TranslatedRequest, ChatError> {
     let object = body
         .as_object()
         .ok_or_else(|| ChatError::invalid("Request body must be a JSON object", None, None))?;
     reject_unsupported_fields(object)?;
 
     let requested_model = required_string(object, "model")?;
-    let normalized = normalize_incoming_model(&requested_model);
-    let resolved = resolve_model_request(&normalized);
-    resolved.assert_allowed().map_err(|error| {
-        ChatError::invalid(
-            format!(
-                "Model '{requested_model}' resolves to unsupported model '{}'. Supported: {}",
-                error.model,
-                allowed_models_display()
-            ),
-            Some("model"),
-            Some("model_not_supported"),
-        )
-    })?;
-    let full_lane = is_family_alias(&normalized) && config::codex_full_lane();
-    let use_responses_lite = resolved.uses_responses_lite(full_lane);
+    let (resolved, use_responses_lite) = if let Some(resolved) = api_resolved {
+        (resolved.clone(), false)
+    } else {
+        let normalized = normalize_incoming_model(&requested_model);
+        let resolved = resolve_model_request(&normalized);
+        resolved.assert_allowed().map_err(|error| {
+            ChatError::invalid(
+                format!(
+                    "Model '{requested_model}' resolves to unsupported model '{}'. Supported: {}",
+                    error.model,
+                    allowed_models_display()
+                ),
+                Some("model"),
+                Some("model_not_supported"),
+            )
+        })?;
+        let full_lane = is_family_alias(&normalized) && config::codex_full_lane();
+        let lite = resolved.uses_responses_lite(full_lane);
+        (resolved, lite)
+    };
 
     let messages = object
         .get("messages")
@@ -126,14 +148,28 @@ fn translate_request_with_override(
         ("client_metadata".to_string(), json!({"lite":"true"})),
         ("text".to_string(), Value::Object(text)),
     ]);
+    if api_resolved.is_some() {
+        upstream.remove("client_metadata");
+    }
     if let Some(tier) = resolved.service_tier {
+        let tier = if api_resolved.is_some() && tier == ServiceTier::Ultrafast {
+            ServiceTier::Priority
+        } else {
+            tier
+        };
         upstream.insert(
             "service_tier".to_string(),
             serde_json::to_value(tier).unwrap(),
         );
     }
-    let mut reasoning = Map::from_iter([("context".to_string(), json!("all_turns"))]);
-    if let Some(effort) = effort.as_ref().filter(|effort| **effort != Effort::None) {
+    let mut reasoning = Map::new();
+    if api_resolved.is_none() {
+        reasoning.insert("context".to_string(), json!("all_turns"));
+    }
+    if let Some(effort) = effort
+        .as_ref()
+        .filter(|effort| api_resolved.is_some() || **effort != Effort::None)
+    {
         reasoning.insert("effort".to_string(), json!(effort));
     }
     upstream.insert("reasoning".to_string(), Value::Object(reasoning));
@@ -443,6 +479,57 @@ mod tests {
     }
 
     #[test]
+    fn api_request_uses_resolved_model_and_platform_wire() {
+        let mut body = base();
+        body["model"] = json!("gpt-99-terra");
+        body["stream"] = json!(true);
+        body["stream_options"] = json!({"include_usage":true});
+        body["temperature"] = json!(0.2);
+        let resolved = resolve_model_request("gpt-99-terra");
+        let translated = translate_api_request(&body, &resolved).unwrap();
+        assert_eq!(translated.model, "gpt-99-terra");
+        assert_eq!(translated.requested_model, "gpt-99-terra");
+        assert_eq!(translated.upstream["model"], "gpt-99-terra");
+        assert_eq!(translated.upstream["store"], false);
+        assert_eq!(translated.upstream["stream"], true);
+        assert_eq!(translated.upstream["temperature"], 0.2);
+        assert!(translated.upstream.get("client_metadata").is_none());
+        assert!(translated.upstream["reasoning"].get("context").is_none());
+        assert!(translated.upstream.get("previous_response_id").is_none());
+        assert!(translated.stream && translated.include_usage && !translated.use_responses_lite);
+        let legacy = translate_request(base()).unwrap();
+        assert!(translated.upstream["input"] == legacy.upstream["input"]);
+        assert_eq!(
+            translated.upstream["reasoning"]["effort"],
+            legacy.upstream["reasoning"]["effort"]
+        );
+        assert_eq!(legacy.upstream["client_metadata"]["lite"], "true");
+        assert_eq!(legacy.upstream["reasoning"]["context"], "all_turns");
+    }
+
+    #[test]
+    fn api_rejects_token_limits_like_chatgpt_and_maps_ultrafast() {
+        let mut body = base();
+        body["model"] = json!("gpt-6-astra-ultrafast");
+        let resolved = resolve_model_request("gpt-6-astra-ultrafast");
+        let api = translate_api_request(&body, &resolved).unwrap();
+        let legacy = translate_request(body.clone()).unwrap();
+        assert_eq!(api.upstream["service_tier"], "priority");
+        assert_eq!(legacy.upstream["service_tier"], "ultrafast");
+        for field in ["max_tokens", "max_completion_tokens"] {
+            let mut invalid = body.clone();
+            invalid[field] = json!(5);
+            let api_error = translate_api_request(&invalid, &resolved).unwrap_err();
+            let legacy_error = translate_request(invalid).unwrap_err();
+            assert_eq!(api_error.message, legacy_error.message);
+            assert_eq!(api_error.kind, legacy_error.kind);
+            assert_eq!(api_error.code, legacy_error.code);
+            assert_eq!(api_error.param.as_deref(), Some(field));
+            assert_eq!(api_error.param, legacy_error.param);
+        }
+    }
+
+    #[test]
     fn translates_messages_and_responses_lite_fields() {
         let translated = translate_request(base()).unwrap();
         assert_eq!(translated.upstream["input"][0]["role"], "developer");
@@ -485,6 +572,17 @@ mod tests {
         let mut body = base();
         body["model"] = json!("gpt-6-sol-ultrafast");
         assert!(translate_request(body).is_err());
+    }
+
+    #[test]
+    fn api_preserves_none_effort_without_changing_chatgpt_wire() {
+        let mut body = base();
+        body["reasoning_effort"] = json!("none");
+        let resolved = resolve_model_request("gpt-5.6-sol");
+        let api = translate_api_request(&body, &resolved).unwrap();
+        let legacy = translate_request_with_override(body, None).unwrap();
+        assert_eq!(api.upstream["reasoning"]["effort"], "none");
+        assert!(legacy.upstream["reasoning"].get("effort").is_none());
     }
 
     #[test]
