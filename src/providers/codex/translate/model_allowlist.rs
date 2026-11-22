@@ -82,16 +82,16 @@ pub(in crate::providers::codex) fn resolve_family(model: &str) -> Option<Resolve
     if !is_family_alias(model) {
         return None;
     }
-    resolve_family_in(model, catalog_models())
+    resolve_family_in(model, &catalog_models())
 }
 
-fn resolve_family_in(model: &str, catalog: Vec<CatalogModel>) -> Option<ResolvedModel> {
+pub(crate) fn resolve_family_in(model: &str, catalog: &[CatalogModel]) -> Option<ResolvedModel> {
     let family = model.strip_prefix("anthropic-").unwrap_or(model);
     let mut candidates: Vec<_> = catalog
-        .into_iter()
+        .iter()
         .filter(|entry| entry.listed && entry.supported_in_api)
         .filter_map(|entry| {
-            version(&entry.slug, family).map(|v| (entry.slug, v, entry.use_responses_lite))
+            version(&entry.slug, family).map(|v| (entry.slug.clone(), v, entry.use_responses_lite))
         })
         .collect();
     if candidates.is_empty() {
@@ -206,13 +206,20 @@ const FAST_SUFFIX: &str = "-fast";
 const ULTRAFAST_SUFFIX: &str = "-ultrafast";
 
 pub fn split_tier_suffix(model: &str) -> Option<(&str, ServiceTier)> {
+    split_tier_suffix_with(model, is_allowed_model)
+}
+
+pub(crate) fn split_tier_suffix_with(
+    model: &str,
+    is_allowed: impl FnOnce(&str) -> bool,
+) -> Option<(&str, ServiceTier)> {
     if let Some(base) = model.strip_suffix(ULTRAFAST_SUFFIX) {
         return ULTRAFAST_MODELS
             .contains(&base)
             .then_some((base, ServiceTier::Ultrafast));
     }
     let base = model.strip_suffix(FAST_SUFFIX)?;
-    is_allowed_model(base).then_some((base, ServiceTier::Priority))
+    is_allowed(base).then_some((base, ServiceTier::Priority))
 }
 
 pub fn tier_model_variants(model: &str) -> Vec<String> {
@@ -358,7 +365,7 @@ fn full_lane_web_search_model_in(
             {
                 Cow::Owned(sibling)
             } else {
-                resolve_family_in("sol", catalog)
+                resolve_family_in("sol", &catalog)
                     .map(|resolved| Cow::Owned(resolved.model))
                     .unwrap_or(Cow::Borrowed(model))
             }
@@ -388,7 +395,7 @@ mod tests {
         for lite in [true, false] {
             let resolved = resolve_family_in(
                 "anthropic-sol",
-                vec![CatalogModel {
+                &[CatalogModel {
                     slug: id.to_string(),
                     use_responses_lite: lite,
                     supported_in_api: true,
@@ -408,7 +415,7 @@ mod tests {
     fn lite_luna_maps_to_sol_after_catalog_removal() {
         let resolved = resolve_family_in(
             "luna",
-            vec![CatalogModel {
+            &[CatalogModel {
                 slug: "gpt-99-luna".to_string(),
                 use_responses_lite: true,
                 supported_in_api: true,

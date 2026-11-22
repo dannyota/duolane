@@ -232,6 +232,8 @@ async fn claude_starts_with_the_intercept_environment_and_the_lineup_before_the_
     let (port, password) = listen().await;
     let sandbox = Sandbox::new(hermetic_config());
     let catalog = json!({"models": [
+        {"slug": "gpt-6.2-sol", "supported_in_api": true, "visibility": "list", "priority": 3},
+        {"slug": "gpt-5.4-mini", "supported_in_api": true, "visibility": "list", "priority": 4},
         {"slug": "gpt-toy-late", "supported_in_api": true, "visibility": "list", "priority": 2, "display_name": "Toy Late"},
         {"slug": "gpt-toy-early", "supported_in_api": true, "visibility": "list", "priority": 1, "display_name": "Toy Early"}
     ]});
@@ -258,12 +260,14 @@ async fn claude_starts_with_the_intercept_environment_and_the_lineup_before_the_
     assert_eq!(received[0], "--settings");
     let lineup: Value = serde_json::from_str(&received[1]).unwrap();
     let expected = json!({"modelPicker": {"options": [
-        {"model": "terra", "label": "Terra (Codex)"},
-        {"model": "sol", "label": "Sol (Codex)"},
-        {"model": "astra", "label": "Astra (Codex)"},
-        {"model": "luna", "label": "Luna (Codex)"},
+        {"model": "terra[1m]", "label": "Terra (Codex)"},
+        {"model": "sol[1m]", "label": "Sol (Codex)"},
+        {"model": "astra[1m]", "label": "Astra (Codex)"},
+        {"model": "luna[1m]", "label": "Luna (Codex)"},
         {"model": "gpt-toy-early", "label": "Toy Early (Codex)"},
-        {"model": "gpt-toy-late", "label": "Toy Late (Codex)"}
+        {"model": "gpt-toy-late", "label": "Toy Late (Codex)"},
+        {"model": "gpt-6.2-sol[1m]", "label": "gpt-6.2-sol (Codex)"},
+        {"model": "gpt-5.4-mini", "label": "gpt-5.4-mini (Codex)"}
     ]}});
     assert_eq!(lineup, expected);
     assert_eq!(received[2..], arguments);
