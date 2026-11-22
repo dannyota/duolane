@@ -166,6 +166,14 @@ impl RecoveryBudget {
         }
     }
 
+    pub(super) fn http_exhausted(&self, tracked: bool) -> CodexError {
+        if tracked {
+            self.transient_exhausted()
+        } else {
+            CodexError::recovery_exhausted()
+        }
+    }
+
     pub(super) fn transient_exhausted(&self) -> CodexError {
         if let Some(trace) = &self.trace {
             let mut trace = trace.lock().unwrap_or_else(|err| err.into_inner());
@@ -178,6 +186,24 @@ impl RecoveryBudget {
 
     pub(super) fn hosted(&self) -> bool {
         self.gate.as_ref().is_some_and(|gate| gate.hosted())
+    }
+
+    pub(super) fn mark_committed(&self) {
+        if let Some(gate) = &self.gate {
+            gate.mark_committed();
+        }
+    }
+
+    pub(super) fn failed_http_body(&self, decoder: &super::client_sse::HttpSseDecoder) {
+        self.body_uncertain();
+        if decoder.pending_hosted() {
+            self.mark_hosted();
+        }
+    }
+
+    pub(super) fn body_uncertain(&self) {
+        self.set_send(SendEvidence::OutcomeUnknown);
+        self.mark_ambiguous_hosted();
     }
 
     pub(super) fn mark_hosted(&self) {

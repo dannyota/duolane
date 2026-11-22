@@ -79,7 +79,7 @@ impl BufferedHttpSseEvidence {
     }
 }
 
-fn payload_confirms_hosted(payload: &serde_json::Value) -> bool {
+pub(super) fn payload_confirms_hosted(payload: &serde_json::Value) -> bool {
     super::events::event_confirms_hosted_tool_execution(payload)
         || payload
             .pointer("/response/output")
@@ -89,6 +89,96 @@ fn payload_confirms_hosted(payload: &serde_json::Value) -> bool {
                     item.get("type").and_then(serde_json::Value::as_str) == Some("web_search_call")
                 })
             })
+}
+
+pub(super) fn http_payload_hosted(payload: &serde_json::Value, tracked: bool) -> bool {
+    if tracked {
+        payload_confirms_hosted(payload)
+    } else {
+        super::events::event_confirms_hosted_tool_execution(payload)
+    }
+}
+
+pub(super) fn record_live_stream_downstream_capture(
+    ctx: &crate::provider::RequestContext,
+    chunk: &[u8],
+) {
+    let Some(traffic) = ctx.traffic.as_ref() else {
+        return;
+    };
+    for event in parse_sse_events(chunk) {
+        let Ok(data) = serde_json::from_str::<serde_json::Value>(&event.data) else {
+            continue;
+        };
+        traffic.write_json_event(
+            "050-downstream-event",
+            &serde_json::json!({
+                "event": event.event.as_deref().unwrap_or("message"),
+                "data": data,
+            }),
+        );
+    }
+}
+
+pub(super) fn translated_content_ready(chunk: &[u8]) -> bool {
+    parse_sse_events(chunk).into_iter().any(|event| {
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.data) else {
+            return false;
+        };
+        match event.event.as_deref() {
+            Some("content_block_delta") => payload
+                .get("delta")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|delta| {
+                    delta.iter().any(|(key, value)| {
+                        key != "type" && value.as_str().is_some_and(|text| !text.is_empty())
+                    })
+                }),
+            Some("content_block_start") => payload.get("content_block").is_some_and(|block| {
+                match block.get("type").and_then(serde_json::Value::as_str) {
+                    Some("text") => block
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|text| !text.is_empty()),
+                    Some("thinking") => block
+                        .get("thinking")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|text| !text.is_empty()),
+                    Some("tool_use" | "server_tool_use" | "web_search_tool_result") => true,
+                    _ => false,
+                }
+            }),
+            _ => false,
+        }
+    })
+}
+
+pub(super) fn trace_http_failure(
+    payload: &serde_json::Value,
+    headers: &[(String, String)],
+    budget: &super::recovery::RecoveryBudget,
+) -> Option<CodexError> {
+    if let Some(failure) = serde_json::to_vec(payload)
+        .ok()
+        .and_then(|body| explicit_permanent_buffered_error(&body))
+    {
+        budget.mark_final_only();
+        let context_window = failure.context_window;
+        let mut error = codex_event_failure_error(failure);
+        if context_window {
+            error.detail = Some(format!("{} (context_length_exceeded)", error.message));
+        }
+        return Some(error);
+    }
+    if super::events::usage_limit_from_event_with_headers(payload, headers).is_some() {
+        budget.body_uncertain();
+        budget.set_kind(super::sources::FailureKind::UsageLimit);
+    } else if super::events::classify_event_failure(payload)
+        .is_some_and(|failure| failure.retryable())
+    {
+        budget.body_uncertain();
+    }
+    None
 }
 
 pub(super) struct DecodedHttpSseEvent {
@@ -105,6 +195,7 @@ pub(super) struct HttpEventStreamState {
     pub(super) auth_refresh_attempted: bool,
     pub(super) use_responses_lite: bool,
     pub(super) retries: u32,
+    pub(super) tracked: bool,
 }
 
 impl HttpSseDecoder {
@@ -140,6 +231,13 @@ impl HttpSseDecoder {
                 "Codex SSE stream ended with an incomplete frame",
             ))
         }
+    }
+
+    pub(super) fn pending_hosted(&self) -> bool {
+        parse_sse_events(&self.frame)
+            .into_iter()
+            .filter_map(|event| serde_json::from_str(&event.data).ok())
+            .any(|payload| payload_confirms_hosted(&payload))
     }
 
     fn push_byte(&mut self, byte: u8) -> Result<(), CodexError> {
