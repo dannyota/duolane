@@ -1,11 +1,13 @@
 use crate::config;
 use crate::logging::create_logger;
-use crate::provider::RequestContext;
+use crate::provider::{MAX_BUFFERED_RESPONSE_BYTES, RequestContext};
+use std::time::{Duration, Instant};
 
 use super::auth::constants::CODEX_API_ENDPOINT;
 use super::auth::manager::CodexAuthManager;
 use super::auth::token_store::{DefaultCodexAuthStore, StoredAuth, file_store};
 use super::client_body::CodexHttpBodyCache;
+use super::client_capture::write_upstream_response_capture;
 pub use super::client_error::*;
 pub use super::client_headers::*;
 use super::client_proxy::*;
@@ -78,6 +80,8 @@ pub struct CodexHttpClient {
     pub(super) body_idle_timeout_ms: u64,
     pub(super) request_compression: config::CodexRequestCompression,
     pub(super) auto_ws_max_bytes: usize,
+    #[cfg(test)]
+    pub(super) buffered_response_limit: usize,
 }
 
 impl Default for CodexHttpClient {
@@ -102,6 +106,8 @@ impl CodexHttpClient {
             body_idle_timeout_ms: HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS,
             request_compression: config::codex_request_compression(),
             auto_ws_max_bytes: config::codex_auto_ws_max_bytes(),
+            #[cfg(test)]
+            buffered_response_limit: MAX_BUFFERED_RESPONSE_BYTES,
         }
     }
 
@@ -126,6 +132,8 @@ impl CodexHttpClient {
             body_idle_timeout_ms: HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS,
             request_compression: config::codex_request_compression(),
             auto_ws_max_bytes: config::codex_auto_ws_max_bytes(),
+            #[cfg(test)]
+            buffered_response_limit: MAX_BUFFERED_RESPONSE_BYTES,
         }
     }
 
@@ -148,6 +156,7 @@ impl CodexHttpClient {
             body_idle_timeout_ms,
             request_compression: config::CodexRequestCompression::Off,
             auto_ws_max_bytes: 4 * 1024 * 1024,
+            buffered_response_limit: MAX_BUFFERED_RESPONSE_BYTES,
         }
     }
 
@@ -181,6 +190,240 @@ impl CodexHttpClient {
             .await
             .map_err(auth_refresh_error)?;
         bind_account(&account, auth)
+    }
+
+    pub(super) async fn auth_for_buffered_http(
+        &self,
+        account: &ReasoningAccount,
+        budget: &super::recovery::RecoveryBudget,
+    ) -> Result<StoredAuth, CodexError> {
+        let auth = self.auth_manager.get_auth().await.map_err(|error| {
+            trace_auth_failure(budget, &error);
+            CodexError {
+                status: 401,
+                message: "Auth error".to_string(),
+                detail: Some(error.to_string()),
+                retry_after: None,
+                usage_limit: None,
+                origin: CodexErrorOrigin::Auth,
+            }
+        })?;
+        let auth = bind_account(account, auth)?;
+        budget.set_credential(super::sources::CredentialId::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            auth.refresh.as_bytes(),
+        ));
+        Ok(auth)
+    }
+
+    pub(super) async fn refreshed_auth_buffered_http(
+        &self,
+        current: &StoredAuth,
+        budget: &super::recovery::RecoveryBudget,
+    ) -> Result<StoredAuth, CodexError> {
+        let account = ReasoningAccount::new(current.account_id.as_deref());
+        let auth = self
+            .auth_manager
+            .force_refresh(&current.access)
+            .await
+            .map_err(|error| {
+                trace_auth_failure(budget, &error);
+                auth_refresh_error(error)
+            })?;
+        let auth = bind_account(&account, auth)?;
+        budget.set_credential(super::sources::CredentialId::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            auth.refresh.as_bytes(),
+        ));
+        Ok(auth)
+    }
+
+    pub(super) async fn read_buffered_body(
+        &self,
+        resp: &mut reqwest::Response,
+        ctx: &RequestContext,
+        label: &str,
+        hosted_http: &mut bool,
+        terminal: &mut bool,
+    ) -> Result<Vec<u8>, CodexError> {
+        self.read_buffered_body_inner(resp, ctx, label, hosted_http, terminal, false)
+            .await
+    }
+
+    pub(super) async fn read_buffered_body_tracked(
+        &self,
+        resp: &mut reqwest::Response,
+        ctx: &RequestContext,
+        label: &str,
+        hosted_http: &mut bool,
+        terminal: &mut bool,
+    ) -> Result<Vec<u8>, CodexError> {
+        self.read_buffered_body_inner(resp, ctx, label, hosted_http, terminal, true)
+            .await
+    }
+
+    async fn read_buffered_body_inner(
+        &self,
+        resp: &mut reqwest::Response,
+        ctx: &RequestContext,
+        label: &str,
+        hosted_http: &mut bool,
+        terminal: &mut bool,
+        tracked: bool,
+    ) -> Result<Vec<u8>, CodexError> {
+        let body_error = |message: String| CodexError {
+            status: 0,
+            message,
+            detail: Some("http_response_body".to_string()),
+            retry_after: None,
+            usage_limit: None,
+            origin: CodexErrorOrigin::Http,
+        };
+        let mut body = Vec::new();
+        let mut response_started = false;
+        let mut evidence = super::client_sse::BufferedHttpSseEvidence::default();
+        loop {
+            let chunk = tokio::time::timeout(
+                Duration::from_millis(self.body_idle_timeout_ms),
+                resp.chunk(),
+            )
+            .await;
+            let chunk = match chunk {
+                Ok(Ok(chunk)) => Ok(chunk),
+                Ok(Err(error)) => Err(body_error(format!(
+                    "Transport error reading {label}: {error}"
+                ))),
+                Err(_) => Err(body_error(format!(
+                    "Timed out waiting {}ms for the next {label} chunk",
+                    self.body_idle_timeout_ms
+                ))),
+            };
+            if tracked && !matches!(chunk, Ok(Some(_))) {
+                evidence.finish_hosted();
+                *hosted_http |= evidence.hosted;
+                if evidence.hosted {
+                    ctx.recovery_budget.mark_hosted();
+                }
+            }
+            let Some(chunk) = chunk? else {
+                return Ok(body);
+            };
+            evidence.push(&chunk);
+            *hosted_http |= evidence.hosted;
+            if tracked && evidence.hosted {
+                ctx.recovery_budget.mark_hosted();
+            }
+            *terminal |= evidence.terminal;
+            #[cfg(test)]
+            let body_limit = self.buffered_response_limit;
+            #[cfg(not(test))]
+            let body_limit = MAX_BUFFERED_RESPONSE_BYTES;
+            if body.len().saturating_add(chunk.len()) > body_limit {
+                if tracked {
+                    evidence.finish_hosted();
+                    *hosted_http |= evidence.hosted;
+                    if evidence.hosted {
+                        ctx.recovery_budget.mark_hosted();
+                    }
+                    ctx.recovery_budget.mark_final_only();
+                }
+                return Err(body_error(format!("{label} exceeds the size limit")));
+            }
+            if !response_started {
+                if let Some(monitor) = ctx.monitor.as_ref() {
+                    monitor.generation_started(&ctx.req_id);
+                }
+                response_started = true;
+            }
+            body.extend_from_slice(&chunk);
+        }
+    }
+
+    pub(super) async fn collect_http_response(
+        &self,
+        resp: reqwest::Response,
+        started_at: Instant,
+        ctx: &RequestContext,
+        hosted_http: &mut bool,
+    ) -> Result<CodexResponse, CodexError> {
+        self.collect_http_response_inner(resp, started_at, ctx, hosted_http, false)
+            .await
+    }
+
+    pub(super) async fn collect_http_response_inner(
+        &self,
+        mut resp: reqwest::Response,
+        started_at: Instant,
+        ctx: &RequestContext,
+        hosted_http: &mut bool,
+        tracked: bool,
+    ) -> Result<CodexResponse, CodexError> {
+        let status = resp.status();
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+
+        let mut terminal = false;
+        let body_result = if tracked {
+            self.read_buffered_body_tracked(
+                &mut resp,
+                ctx,
+                "Codex response body",
+                hosted_http,
+                &mut terminal,
+            )
+            .await
+        } else {
+            self.read_buffered_body(
+                &mut resp,
+                ctx,
+                "Codex response body",
+                hosted_http,
+                &mut terminal,
+            )
+            .await
+        };
+        let body_bytes = body_result.map_err(|mut error| {
+            if !status.is_success() {
+                error.status = status.as_u16();
+                error.detail = Some(error.message.clone());
+                error.retry_after = headers.iter().find_map(|(name, value)| {
+                    name.eq_ignore_ascii_case("retry-after")
+                        .then(|| value.clone())
+                });
+            }
+            error
+        })?;
+        if status.is_success()
+            && *hosted_http
+            && !terminal
+            && !(tracked
+                && super::events::usage_limit_from_response(&body_bytes, &headers).is_some())
+        {
+            return Err(super::client_sse::http_sse_error(
+                "Codex SSE stream ended without a terminal event",
+            ));
+        }
+        let status = status.as_u16();
+
+        if let Some(traffic) = ctx.traffic.as_deref() {
+            write_upstream_response_capture(
+                traffic,
+                status,
+                started_at.elapsed(),
+                &headers,
+                &body_bytes,
+            );
+        }
+
+        Ok(CodexResponse {
+            body: body_bytes,
+            status,
+            headers,
+            transport: ActualTransport::Http,
+        })
     }
 
     pub fn body_idle_timeout_ms(&self) -> u64 {
@@ -224,6 +467,57 @@ pub(super) fn response_headers(resp: &reqwest::Response) -> Vec<(String, String)
         .iter()
         .map(|(key, value)| (key.to_string(), value.to_str().unwrap_or("").to_string()))
         .collect()
+}
+
+pub(super) fn explicit_permanent_buffered_error(
+    body: &[u8],
+) -> Option<super::events::CodexEventFailure> {
+    let direct = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .into_iter();
+    let events = crate::anthropic::sse::parse_sse_events(body)
+        .into_iter()
+        .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.data).ok());
+    direct.chain(events).find_map(|mut payload| {
+        let error = super::events::event_error(&payload)?;
+        let code = error.get("code").and_then(serde_json::Value::as_str);
+        let kind = error.get("type").and_then(serde_json::Value::as_str);
+        let explicit = matches!(
+            code,
+            Some(
+                "context_length_exceeded"
+                    | "invalid_prompt"
+                    | "cyber_policy"
+                    | "bio_policy"
+                    | "insufficient_quota"
+                    | "usage_not_included"
+            )
+        ) || kind == Some("invalid_request_error");
+        if !explicit {
+            return None;
+        }
+        if payload.get("type").is_none()
+            && let Some(object) = payload.as_object_mut()
+        {
+            object.insert("type".to_string(), serde_json::json!("error"));
+        }
+        let mut failure = super::events::classify_event_failure(&payload)?;
+        failure.kind = super::events::CodexFailureKind::Permanent;
+        failure.status = 400;
+        Some(failure)
+    })
+}
+
+fn trace_auth_failure(budget: &super::recovery::RecoveryBudget, error: &anyhow::Error) {
+    if let super::auth::manager::AuthFailure::Rejected(id) =
+        super::auth::manager::classify_auth_failure(error)
+    {
+        budget.stamp(
+            super::sources::FailureKind::RejectedCredential,
+            super::api::SendEvidence::NotSent,
+            Some(id),
+        );
+    }
 }
 
 fn bind_account(account: &ReasoningAccount, auth: StoredAuth) -> Result<StoredAuth, CodexError> {

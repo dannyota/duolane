@@ -1,6 +1,34 @@
+use super::api::SendEvidence;
+use super::client::CodexError;
+use super::sources::{CredentialId, FailureKind, SourceFailure};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
+
+#[derive(Clone, Copy)]
+struct AttemptTrace {
+    kind: FailureKind,
+    send: SendEvidence,
+    credential: Option<CredentialId>,
+    final_only: bool,
+}
+
+impl std::fmt::Debug for AttemptTrace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttemptTrace").finish_non_exhaustive()
+    }
+}
+
+impl Default for AttemptTrace {
+    fn default() -> Self {
+        Self {
+            kind: FailureKind::Final,
+            send: SendEvidence::OutcomeUnknown,
+            credential: None,
+            final_only: false,
+        }
+    }
+}
 
 const MAX_RECOVERY_ATTEMPTS: u32 = 3;
 const MAX_EMPTY_RECOVERY_ATTEMPTS: u32 = 2;
@@ -17,6 +45,8 @@ struct State {
 pub struct RecoveryBudget {
     state: Arc<Mutex<State>>,
     window: Duration,
+    gate: Option<super::sources::ReplayGate>,
+    trace: Option<Arc<Mutex<AttemptTrace>>>,
 }
 
 impl Default for RecoveryBudget {
@@ -24,16 +54,132 @@ impl Default for RecoveryBudget {
         Self {
             state: Arc::default(),
             window: RECOVERY_WINDOW,
+            gate: None,
+            trace: None,
         }
     }
 }
 
 impl RecoveryBudget {
+    pub(super) fn with_gate(gate: super::sources::ReplayGate) -> Self {
+        Self {
+            gate: Some(gate),
+            trace: Some(Arc::default()),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn stamp(
+        &self,
+        kind: FailureKind,
+        send: SendEvidence,
+        credential: Option<CredentialId>,
+    ) {
+        if let Some(trace) = &self.trace {
+            *trace.lock().unwrap_or_else(|err| err.into_inner()) = AttemptTrace {
+                kind,
+                send,
+                credential,
+                final_only: false,
+            };
+        }
+    }
+
+    pub(super) fn is_tracked(&self) -> bool {
+        self.trace.is_some()
+    }
+
+    pub(super) fn begin_http_attempt(&self) {
+        if let Some(trace) = &self.trace {
+            let mut trace = trace.lock().unwrap_or_else(|err| err.into_inner());
+            trace.kind = FailureKind::Final;
+            trace.send = SendEvidence::NotSent;
+            trace.final_only = false;
+        }
+    }
+
+    pub(super) fn mark_final_only(&self) {
+        if let Some(trace) = &self.trace {
+            trace
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .final_only = true;
+        }
+    }
+
+    pub(super) fn send(&self) -> SendEvidence {
+        self.trace
+            .as_ref()
+            .map(|trace| trace.lock().unwrap_or_else(|err| err.into_inner()).send)
+            .unwrap_or(SendEvidence::OutcomeUnknown)
+    }
+
+    pub(super) fn set_send(&self, send: SendEvidence) {
+        if let Some(trace) = &self.trace {
+            trace.lock().unwrap_or_else(|err| err.into_inner()).send = send;
+        }
+    }
+
+    pub(super) fn set_kind(&self, kind: FailureKind) {
+        if let Some(trace) = &self.trace {
+            trace.lock().unwrap_or_else(|err| err.into_inner()).kind = kind;
+        }
+    }
+
+    pub(super) fn set_credential(&self, credential: CredentialId) {
+        if let Some(trace) = &self.trace {
+            trace
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .credential = Some(credential);
+        }
+    }
+
+    pub(super) fn failure(&self, error: CodexError) -> SourceFailure {
+        let trace = self
+            .trace
+            .as_ref()
+            .map(|trace| *trace.lock().unwrap_or_else(|err| err.into_inner()))
+            .unwrap_or_default();
+        SourceFailure {
+            kind: trace.kind,
+            send: trace.send,
+            credential: trace.credential,
+            error,
+        }
+    }
+
+    pub(super) fn mark_ambiguous_hosted(&self) {
+        if let Some(gate) = &self.gate
+            && gate.has_hosted_tool()
+        {
+            gate.mark_ambiguous_hosted();
+        }
+    }
+
+    pub(super) fn transient_exhausted(&self) -> CodexError {
+        if let Some(trace) = &self.trace {
+            let mut trace = trace.lock().unwrap_or_else(|err| err.into_inner());
+            if !trace.final_only {
+                trace.kind = FailureKind::TransientExhausted;
+            }
+        }
+        CodexError::recovery_exhausted()
+    }
+
+    pub(super) fn mark_hosted(&self) {
+        if let Some(gate) = &self.gate {
+            gate.mark_hosted();
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn with_window(window: Duration) -> Self {
         Self {
             state: Arc::default(),
             window,
+            gate: None,
+            trace: None,
         }
     }
 

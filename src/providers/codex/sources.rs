@@ -45,7 +45,7 @@ const HOSTED: u8 = 1;
 const AMBIGUOUS: u8 = 2;
 const COMMITTED: u8 = 4;
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ReplayGate {
     marks: Arc<AtomicU8>,
     has_hosted_tool: bool,
@@ -57,6 +57,10 @@ impl ReplayGate {
             has_hosted_tool,
             ..Self::default()
         }
+    }
+
+    pub(super) fn has_hosted_tool(&self) -> bool {
+        self.has_hosted_tool
     }
 
     pub fn mark_hosted(&self) {
@@ -100,9 +104,13 @@ pub struct SourceAttempt {
 }
 
 impl SourceAttempt {
+    pub fn failure(&self, error: CodexError) -> SourceFailure {
+        self.context.recovery_budget.failure(error)
+    }
+
     pub fn new(source: AuthSource, context: &RequestContext, gate: ReplayGate) -> Self {
         let mut context = context.clone();
-        context.recovery_budget = RecoveryBudget::default();
+        context.recovery_budget = RecoveryBudget::with_gate(gate.clone());
         Self {
             source,
             context,

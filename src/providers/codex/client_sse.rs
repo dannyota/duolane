@@ -40,8 +40,7 @@ impl BufferedHttpSseEvidence {
                         && let Ok(Some(event)) = decode_http_sse_frame(&self.frame)
                         && let Some(payload) = event.payload
                     {
-                        self.hosted |=
-                            super::events::event_confirms_hosted_tool_execution(&payload);
+                        self.hosted |= payload_confirms_hosted(&payload);
                         self.terminal |= super::events::event_is_terminal(&payload);
                     }
                     self.frame.clear();
@@ -57,6 +56,17 @@ impl BufferedHttpSseEvidence {
         }
     }
 
+    pub(super) fn finish_hosted(&mut self) {
+        if self.discard {
+            return;
+        }
+        for event in parse_sse_events(&self.frame) {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.data) {
+                self.hosted |= payload_confirms_hosted(&payload);
+            }
+        }
+    }
+
     fn append(&mut self, byte: u8) {
         if !self.discard {
             if self.frame.len() >= MAX_UPSTREAM_FRAME_BYTES {
@@ -67,6 +77,18 @@ impl BufferedHttpSseEvidence {
             }
         }
     }
+}
+
+fn payload_confirms_hosted(payload: &serde_json::Value) -> bool {
+    super::events::event_confirms_hosted_tool_execution(payload)
+        || payload
+            .pointer("/response/output")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|output| {
+                output.iter().any(|item| {
+                    item.get("type").and_then(serde_json::Value::as_str) == Some("web_search_call")
+                })
+            })
 }
 
 pub(super) struct DecodedHttpSseEvent {
