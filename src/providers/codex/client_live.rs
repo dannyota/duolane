@@ -52,11 +52,24 @@ impl CodexHttpClient {
         websocket_sent: Arc<std::sync::atomic::AtomicBool>,
         prepared: Option<(StoredAuth, super::websocket::ReadyWebSocket)>,
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
+        ctx.recovery_budget.begin_websocket();
         let (auth, ready) = match prepared {
             Some((auth, ready)) => (auth, Some(ready)),
+            None if ctx.recovery_budget.is_tracked() => (
+                self.auth_for_buffered_http(&body.reasoning_account, &ctx.recovery_budget)
+                    .await?,
+                None,
+            ),
             None => (self.auth_for(&body.reasoning_account).await?, None),
         };
 
+        if ctx.recovery_budget.is_tracked() {
+            ctx.recovery_budget
+                .set_credential(super::sources::CredentialId::new(
+                    crate::config::codex_auth::AuthSource::ChatGpt,
+                    auth.refresh.as_bytes(),
+                ));
+        }
         let turn_id = continuation.and_then(super::continuation::ContinuationReservation::turn_id);
         if should_reset_websocket_pool(continuation)
             && let Some(owner) = websocket_pool_owner(continuation)
@@ -159,8 +172,8 @@ impl CodexHttpClient {
                         auth_refresh_attempted = true;
                         ctx.recovery_budget.start();
                         invalidate_live_continuation_pool(continuation.as_ref());
-                        let refresh = self.refreshed_auth(&auth);
-                        auth = match refresh.await {
+                        let refresh = if ctx.recovery_budget.is_tracked() { self.refreshed_auth_buffered_http(&auth, &ctx.recovery_budget).await } else { self.refreshed_auth(&auth).await };
+                        auth = match refresh {
                             Ok(auth) => {
                                 if tx.is_closed() {
                                     abort_abandoned_live_continuation(
@@ -262,12 +275,18 @@ impl CodexHttpClient {
                     && !auth_refresh_attempted
                     && !forwarded_any
                     && !hosted_tool_executed
+                    && !ctx.recovery_budget.hosted()
                 {
                     auth_refresh_attempted = true;
                     ctx.recovery_budget.start();
                     invalidate_live_continuation_pool(continuation.as_ref());
-                    let refresh = self.refreshed_auth(&auth);
-                    auth = match refresh.await {
+                    let refresh = if ctx.recovery_budget.is_tracked() {
+                        self.refreshed_auth_buffered_http(&auth, &ctx.recovery_budget)
+                            .await
+                    } else {
+                        self.refreshed_auth(&auth).await
+                    };
+                    auth = match refresh {
                         Ok(auth) => {
                             if tx.is_closed() {
                                 if let Some(reservation) = continuation.as_ref() {
@@ -329,6 +348,7 @@ impl CodexHttpClient {
                     && is_continuation_retry_error(err)
                     && !forwarded_any
                     && !hosted_tool_executed
+                    && !ctx.recovery_budget.hosted()
                 {
                     if !ctx
                         .recovery_budget

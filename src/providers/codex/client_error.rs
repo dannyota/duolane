@@ -28,6 +28,7 @@ pub enum CodexErrorOrigin {
     Http,
     WebSocket,
     WebSocketHandshake,
+    WebSocketValidation,
     WebSocketOverload,
     Auth,
     BufferedHttp,
@@ -250,7 +251,9 @@ pub(super) fn codex_error_origin_name(origin: CodexErrorOrigin) -> &'static str 
     match origin {
         CodexErrorOrigin::Http => "http",
         CodexErrorOrigin::WebSocket => "websocket",
-        CodexErrorOrigin::WebSocketHandshake => "websocket_handshake",
+        CodexErrorOrigin::WebSocketHandshake | CodexErrorOrigin::WebSocketValidation => {
+            "websocket_handshake"
+        }
         CodexErrorOrigin::WebSocketOverload => "websocket_overload",
         CodexErrorOrigin::Auth => "auth",
         CodexErrorOrigin::BufferedHttp => "buffered_http",
@@ -260,7 +263,10 @@ pub(super) fn codex_error_origin_name(origin: CodexErrorOrigin) -> &'static str 
 }
 
 pub(super) fn is_retryable_transport_error(err: &CodexError) -> bool {
-    if err.is_recovery_exhausted() || err.is_websocket_overload() {
+    if err.is_recovery_exhausted()
+        || err.is_websocket_overload()
+        || err.origin == CodexErrorOrigin::WebSocketValidation
+    {
         return false;
     }
     if matches!(

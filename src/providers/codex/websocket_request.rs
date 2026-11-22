@@ -35,13 +35,16 @@ pub(super) async fn codex_websocket_request(
 ) -> Result<OwnerAwareCodexResponse, CodexError> {
     let continuation = reservation.map(ContinuationReservation::candidate);
     let pool_owner = reservation_pool_owner(reservation);
-    let ws_url = to_websocket_url(url).map_err(|e| CodexError {
-        status: 0,
-        message: e.message,
-        detail: None,
-        retry_after: None,
-        usage_limit: None,
-        origin: CodexErrorOrigin::WebSocketHandshake,
+    let ws_url = to_websocket_url(url).map_err(|e| {
+        ctx.recovery_budget.mark_final_only();
+        CodexError {
+            status: 0,
+            message: e.message,
+            detail: None,
+            retry_after: None,
+            usage_limit: None,
+            origin: CodexErrorOrigin::WebSocketHandshake,
+        }
     })?;
     let body_json = serde_json::to_string(body_value).unwrap_or_default();
     if let Some(tc) = traffic {
@@ -119,6 +122,8 @@ pub(super) async fn codex_websocket_request(
     }
 
     websocket_sent.store(true, std::sync::atomic::Ordering::Release);
+    ctx.recovery_budget
+        .set_send(super::api::SendEvidence::OutcomeUnknown);
     guard
         .send(Message::text(body_json))
         .await
@@ -126,15 +131,17 @@ pub(super) async fn codex_websocket_request(
             if let Some(owner) = &pool_owner {
                 pool_remove_entry(owner, &entry);
             }
+            ctx.recovery_budget.mark_ambiguous_hosted();
             websocket_transport_error("send", &error)
         })?;
 
-    let collected = collect_ws_events(
+    let collected = collect_ws_events_tracked(
         &mut guard,
         idle_timeout_ms,
         pool_owner.as_ref(),
         Some(&entry),
         traffic,
+        &ctx.recovery_budget,
     )
     .await;
     drop(guard);
@@ -252,6 +259,7 @@ pub(super) struct ReadyWebSocket {
     traffic: Option<Arc<TrafficCapture>>,
     idle_timeout_ms: u64,
     send_timeout_ms: u64,
+    budget: super::recovery::RecoveryBudget,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -318,6 +326,7 @@ pub(super) async fn prepare_codex_websocket(
         traffic,
         idle_timeout_ms,
         send_timeout_ms: connect_timeout_ms,
+        budget: budget.clone(),
     })
 }
 
@@ -365,18 +374,25 @@ pub(super) fn start_codex_websocket_events(
             traffic,
             idle_timeout_ms,
             send_timeout_ms,
+            budget,
         } = ready;
         let pool_owner = reservation_pool_owner(reservation.as_ref());
         websocket_sent.store(true, std::sync::atomic::Ordering::Release);
         let send_result = tokio::select! {
             biased;
             _ = tx.closed() => None,
-            result = tokio::time::timeout(
-                Duration::from_millis(send_timeout_ms),
-                guard.send(Message::text(body_json)),
-            ) => Some(result),
+            result = async {
+                budget.set_send(super::api::SendEvidence::OutcomeUnknown);
+                tokio::time::timeout(
+                    Duration::from_millis(send_timeout_ms),
+                    guard.send(Message::text(body_json)),
+                ).await
+            } => Some(result),
         };
         if !matches!(send_result, Some(Ok(Ok(())))) {
+            if budget.send() == super::api::SendEvidence::OutcomeUnknown {
+                budget.mark_ambiguous_hosted();
+            }
             drop(guard);
             if let Some(owner) = &pool_owner {
                 pool_remove_entry(owner, &entry);
@@ -393,7 +409,7 @@ pub(super) fn start_codex_websocket_events(
             return;
         }
         let (reusable, terminal_item) =
-            stream_ws_events(&mut guard, idle_timeout_ms, traffic, &tx).await;
+            stream_ws_events(&mut guard, idle_timeout_ms, traffic, &tx, &budget).await;
         drop(guard);
 
         let origin_reinserted = if reusable {

@@ -279,9 +279,9 @@ async fn live_stream_response_once(
     accept_empty: bool,
 ) -> LiveStreamStart {
     let is_http = upstream_events.is_http();
-    let tracked_http = is_http
-        && configured_transport == config::CodexTransport::Http
-        && ctx.recovery_budget.is_tracked();
+    let tracked_http = ctx.recovery_budget.is_tracked()
+        && ((is_http && configured_transport == config::CodexTransport::Http)
+            || (!is_http && configured_transport == config::CodexTransport::WebSocket));
     let mut semantic_ready = false;
     let mut translator = LiveStreamTranslator::for_request(message_id, model, &request_body)
         .with_http_tool_commits(is_http);
@@ -395,7 +395,7 @@ async fn live_stream_response_once(
             && !pending_chunk.is_empty()
             && (!tracked_http || semantic_ready)
         {
-            if configured_transport == config::CodexTransport::Http && is_http {
+            if tracked_http {
                 ctx.recovery_budget.mark_committed();
             }
             record_live_stream_downstream_capture(&ctx, &pending_chunk);
@@ -424,10 +424,7 @@ async fn live_stream_response_once(
             ));
         }
         if terminal {
-            if configured_transport == config::CodexTransport::Http
-                && is_http
-                && is_codex_success_terminal_event(&payload)
-            {
+            if tracked_http && is_codex_success_terminal_event(&payload) {
                 ctx.recovery_budget.mark_committed();
             }
             update_continuation_from_upstream(

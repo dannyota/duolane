@@ -108,6 +108,8 @@ async fn connect_via_http_proxy_tunnel(
     route: WebSocketProxyRoute,
     url: &str,
     headers: &HeaderMap,
+    tracked: bool,
+    headers_latch: Arc<OriginQuotaHeaders>,
 ) -> Result<CodexWebSocketStream, ConnectAttemptError> {
     let (host, authority) = websocket_destination(url).map_err(ConnectAttemptError::Origin)?;
     let stream = connect_to_http_proxy(&route, proxy_config.tls_config.clone())
@@ -128,6 +130,17 @@ async fn connect_via_http_proxy_tunnel(
     let subprotocols = requested_subprotocols(headers);
     let request = tunneled_websocket_request(url, headers, &websocket_key)
         .map_err(ConnectAttemptError::Origin)?;
+    if tracked {
+        return tracked_tunnel_upgrade(
+            stream,
+            request,
+            &websocket_key,
+            &subprotocols,
+            &headers_latch,
+        )
+        .await
+        .map_err(ConnectAttemptError::Origin);
+    }
     let (websocket, response) =
         tokio_tungstenite::client_async_with_config(request, stream, Some(websocket_config()))
             .await
@@ -139,7 +152,10 @@ async fn connect_via_http_proxy_tunnel(
         &websocket_key,
         &subprotocols,
     )
-    .map_err(ConnectAttemptError::Origin)?;
+    .map_err(|mut error| {
+        error.origin = CodexErrorOrigin::WebSocketValidation;
+        ConnectAttemptError::Origin(error)
+    })?;
     Ok(websocket)
 }
 
@@ -188,18 +204,22 @@ async fn connect_via_http_upgrade(
             .get(http::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let detail = if status == http::StatusCode::PROXY_AUTHENTICATION_REQUIRED.as_u16() {
-            GENERIC_HANDSHAKE_ERROR_DETAIL.to_string()
-        } else {
-            let body = bounded_handshake_error_body(response).await;
-            handshake_error_detail(Some(&body))
-        };
+        let (detail, usage_limit) =
+            if status == http::StatusCode::PROXY_AUTHENTICATION_REQUIRED.as_u16() {
+                (GENERIC_HANDSHAKE_ERROR_DETAIL.to_string(), None)
+            } else {
+                let (body, complete) = bounded_handshake_error_body(response).await;
+                (
+                    handshake_error_detail(Some(&body)),
+                    handshake_quota(status, &body, complete),
+                )
+            };
         return Err(CodexError {
             status,
             message: format!("WebSocket upgrade rejected with status {status}"),
             detail: Some(detail),
             retry_after,
-            usage_limit: None,
+            usage_limit,
             origin: CodexErrorOrigin::WebSocketHandshake,
         });
     }
@@ -209,7 +229,11 @@ async fn connect_via_http_upgrade(
         response.headers(),
         &websocket_key,
         &subprotocols,
-    )?;
+    )
+    .map_err(|mut error| {
+        error.origin = CodexErrorOrigin::WebSocketValidation;
+        error
+    })?;
     let upgraded = response
         .upgrade()
         .await
@@ -218,6 +242,7 @@ async fn connect_via_http_upgrade(
     Ok(WebSocketStream::from_raw_socket(upgraded, Role::Client, Some(websocket_config())).await)
 }
 
+#[cfg(test)]
 pub(super) async fn connect_once(
     websocket_client: &reqwest::Client,
     proxy_config: &WebSocketProxyConfig,
@@ -227,11 +252,38 @@ pub(super) async fn connect_once(
     forbidden_cooldown: Duration,
     forbidden_seen: Arc<AtomicBool>,
 ) -> Result<CodexWebSocketStream, ConnectAttemptError> {
+    connect_once_inner(
+        websocket_client,
+        proxy_config,
+        url,
+        headers,
+        gate,
+        forbidden_cooldown,
+        forbidden_seen,
+        false,
+        Arc::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn connect_once_inner(
+    websocket_client: &reqwest::Client,
+    proxy_config: &WebSocketProxyConfig,
+    url: &str,
+    headers: &HeaderMap,
+    gate: &WebSocketConnectGate,
+    forbidden_cooldown: Duration,
+    forbidden_seen: Arc<AtomicBool>,
+    tracked: bool,
+    headers_latch: Arc<OriginQuotaHeaders>,
+) -> Result<CodexWebSocketStream, ConnectAttemptError> {
     if let Some(route) = proxy_config
         .http_connect_route(url)
         .map_err(ConnectAttemptError::Origin)?
     {
-        connect_via_http_proxy_tunnel(proxy_config, route, url, headers).await
+        connect_via_http_proxy_tunnel(proxy_config, route, url, headers, tracked, headers_latch)
+            .await
     } else {
         connect_via_http_upgrade(
             websocket_client,
@@ -264,7 +316,7 @@ async fn connect_with_policy<T, P, PFut, F, Fut>(
 where
     P: FnMut() -> PFut,
     PFut: std::future::Future<Output = ()>,
-    F: FnMut(Arc<AtomicBool>) -> Fut,
+    F: FnMut(Arc<AtomicBool>, Arc<OriginQuotaHeaders>) -> Fut,
     Fut: std::future::Future<Output = Result<T, ConnectAttemptError>>,
 {
     let mut forbidden = None;
@@ -297,21 +349,34 @@ where
             return Err(CodexError::recovery_exhausted());
         }
         let forbidden_seen = Arc::new(AtomicBool::new(false));
-        let result = tokio::time::timeout(connect_timeout, connect(forbidden_seen.clone()))
-            .await
-            .unwrap_or_else(|_| {
-                let error = if forbidden_seen.load(AtomicOrdering::Acquire) {
-                    CodexError {
-                        status: 403,
-                        message: "WebSocket upgrade rejected with status 403".to_string(),
-                        detail: Some(GENERIC_HANDSHAKE_ERROR_DETAIL.to_string()),
-                        ..websocket_protocol_error("WebSocket upgrade rejected with status 403")
-                    }
-                } else {
-                    connect_timeout_error(connect_timeout)
-                };
-                Err(ConnectAttemptError::Origin(error))
-            });
+        let headers_latch = Arc::new(OriginQuotaHeaders::default());
+        let result = tokio::time::timeout(
+            connect_timeout,
+            connect(forbidden_seen.clone(), headers_latch.clone()),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            let error = if let Some(retry_after) = headers_latch.read() {
+                CodexError {
+                    status: 429,
+                    message: "WebSocket upgrade rejected with status 429".to_string(),
+                    detail: Some(GENERIC_HANDSHAKE_ERROR_DETAIL.to_string()),
+                    retry_after,
+                    usage_limit: None,
+                    origin: CodexErrorOrigin::WebSocketHandshake,
+                }
+            } else if forbidden_seen.load(AtomicOrdering::Acquire) {
+                CodexError {
+                    status: 403,
+                    message: "WebSocket upgrade rejected with status 403".to_string(),
+                    detail: Some(GENERIC_HANDSHAKE_ERROR_DETAIL.to_string()),
+                    ..websocket_protocol_error("WebSocket upgrade rejected with status 403")
+                }
+            } else {
+                connect_timeout_error(connect_timeout)
+            };
+            Err(ConnectAttemptError::Origin(error))
+        });
         if result
             .as_ref()
             .is_err_and(ConnectAttemptError::is_origin_forbidden)
@@ -351,8 +416,8 @@ pub(super) async fn connect_with_timeout(
         Duration::from_millis(connect_timeout_ms),
         WEBSOCKET_CONNECT_FORBIDDEN_COOLDOWN,
         || async { cleanup_pool_before_connect() },
-        |seen| {
-            connect_once(
+        |seen, headers_latch| {
+            connect_once_inner(
                 websocket_client,
                 proxy_config,
                 url,
@@ -360,11 +425,30 @@ pub(super) async fn connect_with_timeout(
                 &WS_CONNECT_GATE,
                 WEBSOCKET_CONNECT_FORBIDDEN_COOLDOWN,
                 seen,
+                budget.buffered_websocket(),
+                headers_latch,
             )
         },
         budget,
     )
     .await
+    .map_err(|mut error| {
+        if error.origin == CodexErrorOrigin::WebSocketValidation {
+            if budget.buffered_websocket() {
+                budget.mark_final_only();
+            } else {
+                error.origin = CodexErrorOrigin::WebSocketHandshake;
+            }
+        }
+        if budget.buffered_websocket() {
+            if error.usage_limit.is_some() {
+                error.detail = Some(GENERIC_HANDSHAKE_ERROR_DETAIL.to_string());
+            }
+        } else {
+            error.usage_limit = None;
+        }
+        error
+    })
 }
 
 #[cfg(test)]
@@ -389,6 +473,57 @@ mod tests {
         ConnectAttemptError::Origin(handshake_error(http::StatusCode::FORBIDDEN.as_u16()))
     }
 
+    #[tokio::test]
+    async fn tracked_tunnel_stalled_quota_body_preserves_origin_headers() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (client, mut server) = tokio::io::duplex(4096);
+        let peer = tokio::spawn(async move {
+            let mut request = [0; 2048];
+            let _ = server.read(&mut request).await.unwrap();
+            server.write_all(b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 100\r\nretry-after: 120\r\n\r\n").await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let gate = WebSocketConnectGate::new(Duration::ZERO);
+        let mut client = Some(client);
+        let error = match connect_with_policy(
+            &gate,
+            Duration::from_millis(100),
+            Duration::ZERO,
+            || async {},
+            |_, headers_latch| {
+                let client = client.take().unwrap();
+                async move {
+                    let request = tunneled_websocket_request(
+                        "wss://example.invalid/responses",
+                        &HeaderMap::new(),
+                        "dGhlIHNhbXBsZSBub25jZQ==",
+                    )
+                    .unwrap();
+                    tracked_tunnel_upgrade(
+                        Box::new(client),
+                        request,
+                        "dGhlIHNhbXBsZSBub25jZQ==",
+                        &[],
+                        &headers_latch,
+                    )
+                    .await
+                    .map_err(ConnectAttemptError::Origin)
+                }
+            },
+            &super::super::recovery::RecoveryBudget::default(),
+        )
+        .await
+        {
+            Ok(_) => panic!("expected timeout"),
+            Err(error) => error,
+        };
+        assert_eq!(error.status, 429);
+        assert_eq!(error.retry_after.as_deref(), Some("120"));
+        assert!(error.usage_limit.is_none());
+        peer.abort();
+        let _ = peer.await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn connect_queue_wait_has_a_deadline() {
         let gate = WebSocketConnectGate::new(Duration::ZERO);
@@ -402,7 +537,7 @@ mod tests {
             Duration::from_secs(1),
             Duration::from_secs(3),
             || async {},
-            |_| async { Ok::<(), ConnectAttemptError>(()) },
+            |_, _| async { Ok::<(), ConnectAttemptError>(()) },
             &super::super::recovery::RecoveryBudget::default(),
         )
         .await;
@@ -437,7 +572,7 @@ mod tests {
                 Duration::from_secs(10),
                 Duration::from_secs(3),
                 || async {},
-                |_| {
+                |_, _| {
                     let rx = release_rx.take();
                     if let Some(tx) = started_tx.take() {
                         tx.send(()).unwrap();
@@ -481,7 +616,7 @@ mod tests {
             Duration::from_secs(1),
             Duration::from_secs(3),
             || async {},
-            |_| async { Ok::<(), ConnectAttemptError>(()) },
+            |_, _| async { Ok::<(), ConnectAttemptError>(()) },
             &budget,
         )
         .await
@@ -503,7 +638,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(3),
             || async {},
-            |_| {
+            |_, _| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 async { Ok::<(), ConnectAttemptError>(()) }
             },
@@ -524,7 +659,7 @@ mod tests {
             Duration::from_secs(1),
             Duration::from_secs(31),
             || async {},
-            |_| async { Err::<(), _>(origin_forbidden_error()) },
+            |_, _| async { Err::<(), _>(origin_forbidden_error()) },
             &budget,
         )
         .await;
@@ -546,7 +681,7 @@ mod tests {
             Duration::from_secs(1),
             Duration::ZERO,
             || async {},
-            |_| {
+            |_, _| {
                 attempts.fetch_add(1, Ordering::SeqCst);
                 async { Err::<(), _>(origin_forbidden_error()) }
             },
@@ -568,7 +703,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(3),
             || async {},
-            |_| {
+            |_, _| {
                 attempts.fetch_add(1, Ordering::SeqCst);
                 starts.lock().unwrap().push(tokio::time::Instant::now());
                 async {
@@ -589,7 +724,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(3),
             || async {},
-            |_| {
+            |_, _| {
                 starts.lock().unwrap().push(tokio::time::Instant::now());
                 async { Ok::<(), ConnectAttemptError>(()) }
             },
@@ -613,7 +748,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(3),
             || async {},
-            |_| {
+            |_, _| {
                 let attempt = attempts.fetch_add(1, Ordering::SeqCst);
                 starts.lock().unwrap().push(tokio::time::Instant::now());
                 async move {
@@ -657,7 +792,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(3),
             || async {},
-            |_| {
+            |_, _| {
                 attempts.fetch_add(1, Ordering::SeqCst);
                 async {
                     Err::<(), ConnectAttemptError>(ConnectAttemptError::ProxyTunnel(
@@ -708,7 +843,7 @@ mod tests {
             Duration::from_secs(60),
             Duration::from_millis(20),
             || async {},
-            |seen| {
+            |seen, _| {
                 let attempt = attempts.fetch_add(1, Ordering::SeqCst);
                 let (client, proxy, url, headers, gate) = (&client, &proxy, &url, &headers, &gate);
                 async move {
@@ -831,7 +966,7 @@ mod tests {
             Duration::from_secs(1),
             Duration::ZERO,
             || async {},
-            |seen| {
+            |seen, _| {
                 connect_once(
                     &client,
                     &proxy_config,
@@ -869,7 +1004,7 @@ mod tests {
             Duration::from_secs(2),
             Duration::from_secs(3),
             || async {},
-            |_| {
+            |_, _| {
                 let attempt = attempts.fetch_add(1, Ordering::SeqCst);
                 async move {
                     if attempt == 0 {

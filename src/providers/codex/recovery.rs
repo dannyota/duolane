@@ -11,6 +11,8 @@ struct AttemptTrace {
     send: SendEvidence,
     credential: Option<CredentialId>,
     final_only: bool,
+    websocket_started: bool,
+    buffered_websocket: bool,
 }
 
 impl std::fmt::Debug for AttemptTrace {
@@ -26,7 +28,24 @@ impl Default for AttemptTrace {
             send: SendEvidence::OutcomeUnknown,
             credential: None,
             final_only: false,
+            websocket_started: false,
+            buffered_websocket: false,
         }
+    }
+}
+
+pub(super) fn buffered_transient_exhausted(
+    ctx: &crate::provider::RequestContext,
+    transport: crate::config::CodexTransport,
+) -> CodexError {
+    if (transport == crate::config::CodexTransport::Http
+        || (transport == crate::config::CodexTransport::WebSocket
+            && ctx.recovery_budget.is_tracked()))
+        && !ctx.recovery_budget.hosted()
+    {
+        ctx.recovery_budget.transient_exhausted()
+    } else {
+        CodexError::recovery_exhausted()
     }
 }
 
@@ -76,12 +95,50 @@ impl RecoveryBudget {
         credential: Option<CredentialId>,
     ) {
         if let Some(trace) = &self.trace {
-            *trace.lock().unwrap_or_else(|err| err.into_inner()) = AttemptTrace {
+            let mut trace = trace.lock().unwrap_or_else(|err| err.into_inner());
+            let send = if trace.websocket_started && trace.send == SendEvidence::OutcomeUnknown {
+                SendEvidence::OutcomeUnknown
+            } else {
+                send
+            };
+            let websocket_started = trace.websocket_started;
+            let buffered_websocket = trace.buffered_websocket;
+            *trace = AttemptTrace {
                 kind,
                 send,
                 credential,
                 final_only: false,
+                websocket_started,
+                buffered_websocket,
             };
+        }
+    }
+
+    pub(super) fn enable_buffered_websocket(&self) {
+        if let Some(trace) = &self.trace {
+            trace
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .buffered_websocket = true;
+        }
+    }
+
+    pub(super) fn buffered_websocket(&self) -> bool {
+        self.trace.as_ref().is_some_and(|trace| {
+            trace
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .buffered_websocket
+        })
+    }
+
+    pub(super) fn begin_websocket(&self) {
+        if let Some(trace) = &self.trace {
+            let mut trace = trace.lock().unwrap_or_else(|err| err.into_inner());
+            if !trace.websocket_started {
+                trace.websocket_started = true;
+                trace.send = SendEvidence::NotSent;
+            }
         }
     }
 
@@ -96,6 +153,52 @@ impl RecoveryBudget {
             trace.send = SendEvidence::NotSent;
             trace.final_only = false;
         }
+    }
+
+    pub(super) fn record_websocket_handshake_error(&self, error: &CodexError) {
+        if self.is_tracked()
+            && error.origin == super::client::CodexErrorOrigin::WebSocketHandshake
+            && error.usage_limit.is_some()
+        {
+            self.set_kind(FailureKind::UsageLimit);
+        }
+    }
+
+    pub(super) fn websocket_permanent_error(
+        &self,
+        response: &super::client::OwnerAwareCodexResponse,
+    ) -> Option<CodexError> {
+        if !self.is_tracked() {
+            return None;
+        }
+        let permanent = super::client::explicit_permanent_buffered_error(&response.body);
+        let context = super::client::codex_status_error_message(&response.body)
+            .filter(|message| super::events::is_context_overflow(None, message));
+        if permanent.is_none() && context.is_none() {
+            return None;
+        }
+        self.mark_final_only();
+        let (status, message, retry_after) = if let Some(failure) = permanent {
+            (
+                failure.status,
+                failure.anthropic_message(),
+                failure.retry_after,
+            )
+        } else {
+            (
+                400,
+                super::events::context_window_message(true, &context.unwrap_or_default()),
+                None,
+            )
+        };
+        Some(CodexError {
+            status,
+            message: message.clone(),
+            detail: Some(message),
+            retry_after,
+            usage_limit: None,
+            origin: super::client::CodexErrorOrigin::BufferedWebSocket,
+        })
     }
 
     pub(super) fn mark_final_only(&self) {
@@ -288,6 +391,9 @@ impl RecoveryBudget {
     }
 
     pub(super) fn try_retry(&self, delay: Duration, empty: bool) -> bool {
+        if self.hosted() {
+            return false;
+        }
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         let deadline = *state
             .deadline

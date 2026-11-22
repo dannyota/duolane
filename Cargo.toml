@@ -38,7 +38,7 @@ rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"]
 rustls-native-certs = "0.8"
 socket2 = { version = "0.6", features = ["all"] }
 webpki-roots = "1"
-hyper = { version = "1", features = ["http1", "server"] }
+hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["client-proxy", "http1", "server-auto", "server-graceful", "service", "tokio"] }
 url = "2"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
