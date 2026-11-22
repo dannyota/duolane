@@ -271,7 +271,19 @@ impl CodexHttpClient {
                     Err(err) => err.status == 401,
                     Ok(payload) => super::websocket::event_error_status(payload) == Some(401),
                 };
+                let allow_refresh = if unauthorized && ctx.recovery_budget.is_tracked() {
+                    item.as_ref().map_or(true, |payload| {
+                        let (allow, permanent) = unauthorized_event_policy(payload);
+                        if permanent {
+                            ctx.recovery_budget.mark_final_only();
+                        }
+                        allow
+                    })
+                } else {
+                    true
+                };
                 if unauthorized
+                    && allow_refresh
                     && !auth_refresh_attempted
                     && !forwarded_any
                     && !hosted_tool_executed
@@ -496,8 +508,23 @@ pub(super) fn should_reset_websocket_pool(
     reason != "disabled"
 }
 
+fn unauthorized_event_policy(payload: &serde_json::Value) -> (bool, bool) {
+    let permanent = super::client_sse::explicit_permanent_event(payload).is_some()
+        || super::events::classify_event_failure(payload)
+            .is_some_and(|failure| super::events::is_context_overflow(None, &failure.message));
+    let quota = super::events::usage_limit_from_event(payload).is_some();
+    (!permanent && !quota, permanent)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plain_unauthorized_event_remains_refreshable() {
+        let payload =
+            serde_json::json!({"type":"error", "status":401, "error":{"message":"unauthorized"}});
+        assert_eq!(super::unauthorized_event_policy(&payload), (true, false));
+    }
+
     use futures_util::StreamExt;
     use tokio::net::TcpListener;
 

@@ -8,7 +8,7 @@ use super::client::*;
 use super::client_live::*;
 pub use super::events::CodexUsageLimit;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CodexError {
     pub status: u16,
     pub message: String,
@@ -347,7 +347,10 @@ pub(super) fn should_refresh_after_unauthorized(
 }
 
 pub(super) fn should_fallback_to_http(err: &CodexError) -> bool {
-    (err.origin == CodexErrorOrigin::WebSocketHandshake || err.is_websocket_overload())
+    (err.origin == CodexErrorOrigin::WebSocketHandshake
+        || (err.origin == CodexErrorOrigin::WebSocketTransient
+            && matches!(err.status, 500 | 502 | 503 | 504 | 529))
+        || err.is_websocket_overload())
         && err.status != http::StatusCode::PROXY_AUTHENTICATION_REQUIRED.as_u16()
         && err.detail.as_deref() != Some(super::websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL)
 }
@@ -505,6 +508,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn transient_upgrade_failure_can_fallback() {
+        let err = CodexError {
+            status: 502,
+            message: "upgrade failed".into(),
+            detail: None,
+            retry_after: None,
+            usage_limit: None,
+            origin: CodexErrorOrigin::WebSocketTransient,
+        };
+        assert!(should_fallback_to_http(&err));
     }
 
     #[test]

@@ -37,16 +37,32 @@ impl Default for AttemptTrace {
 pub(super) fn buffered_transient_exhausted(
     ctx: &crate::provider::RequestContext,
     transport: crate::config::CodexTransport,
+    typed_transient: bool,
 ) -> CodexError {
+    if !typed_transient {
+        ctx.recovery_budget.mark_final_only();
+    }
     if (transport == crate::config::CodexTransport::Http
-        || (transport == crate::config::CodexTransport::WebSocket
-            && ctx.recovery_budget.is_tracked()))
+        || (transport != crate::config::CodexTransport::Http && ctx.recovery_budget.is_tracked()))
         && !ctx.recovery_budget.hosted()
     {
         ctx.recovery_budget.transient_exhausted()
     } else {
         CodexError::recovery_exhausted()
     }
+}
+
+pub(super) fn buffered_websocket_transient(body: &[u8]) -> bool {
+    crate::anthropic::sse::parse_sse_events(body)
+        .into_iter()
+        .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.data).ok())
+        .find_map(|payload| {
+            super::events::classify_event_failure(&payload).map(|failure| {
+                websocket_event_origin(true, &failure, &payload)
+                    == super::client::CodexErrorOrigin::WebSocketTransient
+            })
+        })
+        .unwrap_or(false)
 }
 
 const MAX_RECOVERY_ATTEMPTS: u32 = 3;
@@ -66,6 +82,7 @@ pub struct RecoveryBudget {
     window: Duration,
     gate: Option<super::sources::ReplayGate>,
     trace: Option<Arc<Mutex<AttemptTrace>>>,
+    last_cause: Option<Arc<Mutex<Option<CodexError>>>>,
 }
 
 impl Default for RecoveryBudget {
@@ -75,6 +92,7 @@ impl Default for RecoveryBudget {
             window: RECOVERY_WINDOW,
             gate: None,
             trace: None,
+            last_cause: None,
         }
     }
 }
@@ -84,6 +102,7 @@ impl RecoveryBudget {
         Self {
             gate: Some(gate),
             trace: Some(Arc::default()),
+            last_cause: Some(Arc::default()),
             ..Self::default()
         }
     }
@@ -150,6 +169,7 @@ impl RecoveryBudget {
         if let Some(trace) = &self.trace {
             let mut trace = trace.lock().unwrap_or_else(|err| err.into_inner());
             trace.kind = FailureKind::Final;
+            trace.websocket_started = false;
             trace.send = SendEvidence::NotSent;
             trace.final_only = false;
         }
@@ -245,6 +265,24 @@ impl RecoveryBudget {
                 .unwrap_or_else(|err| err.into_inner())
                 .credential = Some(credential);
         }
+    }
+
+    pub(super) fn record_cause(&self, error: &CodexError) {
+        if let Some(cause) = &self.last_cause {
+            *cause.lock().unwrap_or_else(|err| err.into_inner()) = Some(error.clone());
+        }
+    }
+
+    pub(super) fn failure_with_cause(&self, error: CodexError) -> SourceFailure {
+        let mut failure = self.failure(error);
+        if failure.kind == FailureKind::TransientExhausted
+            && failure.error.is_recovery_exhausted()
+            && let Some(cause) = &self.last_cause
+            && let Some(error) = cause.lock().unwrap_or_else(|err| err.into_inner()).clone()
+        {
+            failure.error = error;
+        }
+        failure
     }
 
     pub(super) fn failure(&self, error: CodexError) -> SourceFailure {
@@ -350,6 +388,7 @@ impl RecoveryBudget {
             window,
             gate: None,
             trace: None,
+            last_cause: None,
         }
     }
 
@@ -448,7 +487,7 @@ pub(super) fn live_retry_exhausted(
     transport: crate::config::CodexTransport,
     error: &super::client::CodexError,
 ) -> super::client::CodexError {
-    if transport == crate::config::CodexTransport::WebSocket
+    if transport != crate::config::CodexTransport::Http
         && ctx.recovery_budget.is_tracked()
         && !ctx.recovery_budget.hosted()
         && !super::live_completion::is_empty_completion_error(error)
@@ -465,6 +504,22 @@ pub(super) fn live_retry_exhausted(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_after_presend_websocket_does_not_retain_websocket_send() {
+        let gate = super::super::sources::ReplayGate::new(true);
+        let budget = RecoveryBudget::with_gate(gate.clone());
+        budget.begin_websocket();
+        budget.begin_http_attempt();
+        budget.set_send(SendEvidence::OutcomeUnknown);
+        budget.stamp(
+            FailureKind::RejectedCredential,
+            SendEvidence::DeniedBeforeExecution,
+            None,
+        );
+        let failure = budget.failure(CodexError::recovery_exhausted());
+        assert!(gate.may_switch(failure.kind, failure.send));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn refresh_wait_counts_against_recovery_window() {

@@ -153,21 +153,25 @@ pub(super) fn translated_content_ready(chunk: &[u8]) -> bool {
     })
 }
 
+pub(super) fn explicit_permanent_event(payload: &serde_json::Value) -> Option<CodexError> {
+    let failure = serde_json::to_vec(payload)
+        .ok()
+        .and_then(|body| explicit_permanent_buffered_error(&body))?;
+    let context_window = failure.context_window;
+    let mut error = codex_event_failure_error(failure);
+    if context_window {
+        error.detail = Some(format!("{} (context_length_exceeded)", error.message));
+    }
+    Some(error)
+}
+
 pub(super) fn trace_http_failure(
     payload: &serde_json::Value,
     headers: &[(String, String)],
     budget: &super::recovery::RecoveryBudget,
 ) -> Option<CodexError> {
-    if let Some(failure) = serde_json::to_vec(payload)
-        .ok()
-        .and_then(|body| explicit_permanent_buffered_error(&body))
-    {
+    if let Some(error) = explicit_permanent_event(payload) {
         budget.mark_final_only();
-        let context_window = failure.context_window;
-        let mut error = codex_event_failure_error(failure);
-        if context_window {
-            error.detail = Some(format!("{} (context_length_exceeded)", error.message));
-        }
         return Some(error);
     }
     if super::events::usage_limit_from_event_with_headers(payload, headers).is_some() {

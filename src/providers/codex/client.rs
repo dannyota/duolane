@@ -1,8 +1,3 @@
-use crate::config;
-use crate::logging::create_logger;
-use crate::provider::{MAX_BUFFERED_RESPONSE_BYTES, RequestContext};
-use std::time::{Duration, Instant};
-
 use super::auth::constants::CODEX_API_ENDPOINT;
 use super::auth::manager::CodexAuthManager;
 use super::auth::token_store::{DefaultCodexAuthStore, StoredAuth, file_store};
@@ -16,31 +11,29 @@ use super::client_proxy::*;
 pub use super::events::{CodexLimitWindow, CodexUsageLimit};
 use super::translate::reasoning_signature::ReasoningAccount;
 use super::translate::request::ResponsesRequest;
-
+use crate::config;
+use crate::logging::create_logger;
+use crate::provider::{MAX_BUFFERED_RESPONSE_BYTES, RequestContext};
+use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActualTransport {
     Http,
     WebSocket,
 }
-
 pub struct CodexResponse {
     pub body: Vec<u8>,
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub transport: ActualTransport,
 }
-
 pub type CodexHttpEventReceiver =
     tokio::sync::mpsc::Receiver<Result<serde_json::Value, CodexError>>;
-
 pub(crate) const MAX_UPSTREAM_FRAME_BYTES: usize = 8 * 1024 * 1024;
-
 pub(crate) struct OwnerAwareCodexResponse {
     response: CodexResponse,
     pub(crate) socket_id: Option<u64>,
     pub(super) hosted_tool_executed: bool,
 }
-
 impl OwnerAwareCodexResponse {
     pub(crate) fn new(response: CodexResponse, socket_id: Option<u64>) -> Self {
         Self {
@@ -49,27 +42,22 @@ impl OwnerAwareCodexResponse {
             hosted_tool_executed: false,
         }
     }
-
     pub(super) fn into_response(self) -> CodexResponse {
         self.response
     }
 }
-
 impl std::ops::Deref for OwnerAwareCodexResponse {
     type Target = CodexResponse;
-
     fn deref(&self) -> &Self::Target {
         &self.response
     }
 }
-
 pub(super) const MAX_BUFFERED_TRANSPORT_RETRIES: u32 = 3;
 pub(super) const MAX_BUFFERED_TRANSPORT_ATTEMPTS: u32 = MAX_BUFFERED_TRANSPORT_RETRIES + 1;
 const HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS: u64 = 300_000;
 pub(super) const IMAGE_HEADER_TIMEOUT_MS: u64 = 300_000;
 pub(super) const HTTP_RESPONSE_HEADERS_DETAIL: &str = "http_response_headers";
 pub(super) const LOOPBACK_NO_PROXY: &str = "localhost,127.0.0.0/8,::1,::ffff:127.0.0.0/104";
-
 pub struct CodexHttpClient {
     pub(super) client: reqwest::Client,
     pub(super) native_client: reqwest::Client,
@@ -85,13 +73,11 @@ pub struct CodexHttpClient {
     #[cfg(test)]
     pub(super) buffered_response_limit: usize,
 }
-
 impl Default for CodexHttpClient {
     fn default() -> Self {
         Self::new()
     }
 }
-
 impl CodexHttpClient {
     pub fn new() -> Self {
         let timeout_ms = config::codex_header_timeout_ms();
@@ -112,7 +98,6 @@ impl CodexHttpClient {
             buffered_response_limit: MAX_BUFFERED_RESPONSE_BYTES,
         }
     }
-
     pub fn new_with_client(
         client: reqwest::Client,
         auth_manager: CodexAuthManager<DefaultCodexAuthStore>,
@@ -138,7 +123,6 @@ impl CodexHttpClient {
             buffered_response_limit: MAX_BUFFERED_RESPONSE_BYTES,
         }
     }
-
     #[cfg(test)]
     pub fn new_for_test(
         client: reqwest::Client,
@@ -161,11 +145,9 @@ impl CodexHttpClient {
             buffered_response_limit: MAX_BUFFERED_RESPONSE_BYTES,
         }
     }
-
     pub fn auth_manager(&self) -> &CodexAuthManager<DefaultCodexAuthStore> {
         &self.auth_manager
     }
-
     pub(super) async fn auth_for(
         &self,
         account: &ReasoningAccount,
@@ -180,7 +162,6 @@ impl CodexHttpClient {
         })?;
         bind_account(account, auth)
     }
-
     pub(super) async fn refreshed_auth(
         &self,
         current: &StoredAuth,
@@ -193,7 +174,6 @@ impl CodexHttpClient {
             .map_err(auth_refresh_error)?;
         bind_account(&account, auth)
     }
-
     pub(super) async fn start_http_event_attempt(
         &self,
         auth: &mut StoredAuth,
@@ -226,6 +206,24 @@ impl CodexHttpClient {
             }
 
             if resp.status().as_u16() == 401 && !*auth_refresh_attempted {
+                if tracked {
+                    let mut hosted = false;
+                    let response = self
+                        .collect_http_response_inner(resp, started_at, ctx, &mut hosted, true)
+                        .await
+                        .inspect_err(|_| ctx.recovery_budget.mark_ambiguous_hosted())?;
+                    if hosted
+                        || explicit_permanent_buffered_error(&response.body).is_some()
+                        || codex_status_error_message(&response.body).is_some_and(|message| {
+                            super::events::is_context_overflow(None, &message)
+                        })
+                    {
+                        ctx.recovery_budget.mark_final_only();
+                        let mut error = codex_status_error(response);
+                        error.origin = CodexErrorOrigin::Http;
+                        return Err(error);
+                    }
+                }
                 *auth_refresh_attempted = true;
                 ctx.recovery_budget.start();
                 let refreshed = if tracked {
