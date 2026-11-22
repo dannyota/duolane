@@ -50,16 +50,16 @@ Direct owner instructions and platform safety rules come first. An accepted ADR 
 |Role|Who|Duty|
 |-|-|-|
 |Primary|The session the owner talks to|Designs, writes documentation, decides, briefs, verifies, owns Git|
-|Implementer|Codex Terra high for all work (owner, 2026-11-21)|One bounded task in named paths, with tests; never commits|
-|Reviewer|Codex read-only: Sol high for Terra's work, Astra high for the primary's work|Independent review of designs, ADRs, and code|
+|Implementer|GPT Terra for all work (owner, 2026-11-21)|One bounded task in named paths, with tests; never commits|
+|Reviewer|GPT Sol for Terra's work, GPT Astra for the primary's work|Independent review of designs, ADRs, and code; never edits files or changes Git|
 
-|Codex model|Current id|Claude stand-in when Codex is unavailable|
+|GPT model|Model alias|Claude stand-in when GPT is unavailable|
 |-|-|-|
-|Terra|`gpt-6.1-terra`|Sonnet|
-|Sol|`gpt-6.2-sol`|Opus|
-|Astra|`gpt-6.2-astra`|Fable|
+|Terra|`terra`|Sonnet|
+|Sol|`sol`|Opus|
+|Astra|`astra`|Fable|
 
-Always use the latest model of each family, and update these ids when a newer one ships (owner, 2026-11-18). Astra and Fable design and review only; they never write code. A reviewer always runs on a different model from the author. The owner chooses the primary session's model.
+Use the family alias, not a pinned id: duolane resolves it to the newest model of that family (owner, 2026-11-18). Astra and Fable design and review only; they never write code. A reviewer always runs on a different model from the author. The owner chooses the primary session's model.
 
 ## Rules for every task
 
