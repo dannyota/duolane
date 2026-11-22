@@ -139,10 +139,13 @@ Two formats live in Claude Code transcripts, outside duolane:
 | Codex signature | `duolane:codex:v1:<account tag>:<base64url item id>:<encrypted content>` |
 | Reasoning text  | `<previous_reasoning>\n<text>\n</previous_reasoning>`                    |
 
-The account tag is the first 16 hexadecimal characters of the SHA-256 of the
-ChatGPT account id. Without a known account id, duolane issues no Codex
-signature. Both formats are frozen from the first release. A new version adds a
-new prefix, and duolane keeps recognizing every released one.
+The account tag is the first 16 hexadecimal characters of a SHA-256. For the
+ChatGPT login it hashes the ChatGPT account id, unchanged since the first
+release. For an [OpenAI API key](openai-api-key.md) it hashes `openai-api-key:`
+followed by the key, so each key is its own account. Without a known account id
+or key, duolane issues no Codex signature. Both formats are frozen from the
+first release. A new version adds a new prefix, and duolane keeps recognizing
+every released one.
 
 An Anthropic signature is any non-empty signature without a released duolane
 prefix.

@@ -23,15 +23,27 @@ storage, and moving a request from one source to the next. The
 - An invalid value stops `duolane serve` with an error that names the setting.
   Other settings fall through on invalid values, but a wrong order could spend
   money or block every Codex request, so it must not pass silently.
-- Without an order, a lone credential is used alone. When both exist, duolane
-  uses `chatgpt` only and says at startup and in `codex auth status` that the
-  key is unused until an order is chosen. duolane never adds API billing on its
-  own.
+- Without an order, the order is `chatgpt`. The key is used only when an order
+  the user saved or exported names `api-key`, whatever credentials exist, so
+  logging out of ChatGPT never turns API billing on. When a key exists but the
+  order leaves it out, startup and `codex auth status` say so.
 - A source in the order without a credential is skipped, with a startup warning.
   When no source is usable, a Codex request fails as it does today, and the
-  message names the login and key commands.
-- duolane reads the order and the key at startup. The commands below say that a
-  running proxy must restart to apply a change.
+  message names the login, key, and order commands.
+- duolane reads the order and the key at startup, and fetches `GET /v1/models`
+  only when the order names `api-key`. The commands below say that a running
+  proxy must restart to apply a change.
+
+## Routes that switch sources
+
+Only `POST /v1/messages` and `POST /v1/chat/completions` use the order. duolane
+translates those per request and can translate again for another source.
+
+`POST /v1/responses`, images, and transcription stay with the `chatgpt` source
+in this version. A native Responses request carries the caller's
+`previous_response_id`, `store`, and encrypted items, which belong to one
+account. When the order has no usable `chatgpt` source, these routes answer HTTP
+400 with a message that says they need the ChatGPT login.
 
 ## Commands
 
@@ -39,36 +51,55 @@ storage, and moving a request from one source to the next. The
   from standard input when that is not a terminal. It never accepts the key as
   an argument, which would leave it in shell history and process lists.
 - `key set` trims surrounding whitespace and rejects an empty value, a value
-  over 512 bytes, or any character outside printable ASCII. It then checks the
-  key with `GET /v1/models`; a 401 is refused and nothing is saved.
-  `--no-verify` skips the check for offline setup.
-- When `key set` runs in a terminal, a ChatGPT login exists, and no order is
-  set, it asks which order to save: ChatGPT then API key, API key then ChatGPT,
-  API key only, or ChatGPT only.
-- `duolane codex auth key remove` deletes the stored key. It does not touch the
-  environment or the order; a listed `api-key` source is then skipped.
+  over 512 bytes, or any character outside printable ASCII. It then sends
+  `GET /v1/models` with the key and saves only after HTTP 200. It reads at most
+  1 MiB of that response. A 401, 403, 429, 5xx, timeout, or oversized answer
+  saves nothing, leaves any stored key unchanged, prints a local message for
+  that class of failure, and points to `--no-verify`, which skips the check for
+  offline setup.
+- When `key set` runs in a terminal and no order is set, it asks which order to
+  save: API key only, ChatGPT then API key, API key then ChatGPT, or ChatGPT
+  only. Outside a terminal it saves no order and prints the order command to
+  run.
+- `duolane codex auth key remove` deletes the stored key and leaves the order.
+  If `DUOLANE_OPENAI_API_KEY` is still set, it says that the environment key
+  stays in use after a restart whenever the order names `api-key`.
 - `duolane codex auth order` prints the effective order and where it came from.
   `duolane codex auth order <source>...` saves `codex.authOrder`, and `--reset`
   removes it. Saving keeps every other key in `config.json`, writes atomically,
   and warns when `DUOLANE_CODEX_AUTH_ORDER` overrides the file.
 - `duolane codex auth status` adds the key's origin (`stored`, `environment`, or
-  `none`) and the effective order. It never prints any part of the key.
+  `none`), the effective order, and whether the order uses the key. It never
+  prints any part of the key.
 
 ## Key storage
 
 - `key set` writes the key, alone on one line, to
-  `<config dir>/credentials/openai-api-key`. The `credentials` directory is mode
-  `0700` and the file `0600`, written with the atomic private-file writer the
-  Codex login already uses.
-- Before reading the file, duolane refuses a symlink, a file another user owns,
-  or a file readable by group or others, and says how to fix it. On Windows the
-  file lives under `%APPDATA%\duolane` with the profile's default access rules.
+  `<config dir>/credentials/openai-api-key` on macOS and Linux. It uses the
+  checked-directory pattern of the [Claude accounts store](claude-accounts.md):
+  every directory on the path is opened without following symlinks and verified,
+  and `credentials` must be owned by the user with mode `0700`. The file is
+  created next to its final name with mode `0600` and renamed into place
+  relative to that open directory.
+- duolane reads the file only through the verified directory, without following
+  a symlink, and only when it is a regular file owned by the user with no
+  permission bits for group or others. It reads at most 4 KiB. A file that fails
+  a check is refused with a message that says how to fix it.
+- Windows has no stored key in this version; `DUOLANE_OPENAI_API_KEY` is the
+  only source there, and `key set` says so.
 - `DUOLANE_OPENAI_API_KEY` overrides the stored key. duolane ignores
   `OPENAI_API_KEY` on purpose: a shell may export it for another tool or
   organization, and duolane must not bill a key the user did not give it.
 - The key goes only to the configured API base URL, in the `Authorization`
-  header. It never appears in logs, captures, the monitor, error messages, or
-  terminal output. Existing redaction already covers the header.
+  header, which existing redaction covers.
+
+## Errors from the API
+
+The API can echo request data, including a key, in its error text. duolane never
+forwards, logs, captures, or shows API error text. It classifies an API failure
+by HTTP status and an allowlist of structured `error.code` and `error.type`
+values, then builds its own message. The same rule applies to `key set`. Traffic
+capture records only the status and the allowlisted code for API errors.
 
 ## Requests with the API key
 
@@ -76,63 +107,83 @@ storage, and moving a request from one source to the next. The
   `https://api.openai.com/v1`, with the same checks as the Codex base URL.
 - Requests send `Authorization: Bearer <key>` and none of the ChatGPT-only
   headers (`ChatGPT-Account-Id`, `originator`, and the Codex session and window
-  headers). `store` stays `false`; the API then returns encrypted reasoning
+  headers). `store` is always `false`; the API then returns encrypted reasoning
   without asking
   ([reasoning](https://developers.openai.com/api/docs/guides/reasoning#preserve-reasoning-without-stored-responses)).
+- The client's `max_tokens` becomes `max_output_tokens`, because API output is
+  billed per token. The ChatGPT source keeps dropping it, as the Codex route
+  does today.
 - The API has one Responses endpoint, so the Lite lane rules do not apply:
   parallel tool calls stay as requested, deferred tools stay in the tool list,
   and a Luna search request keeps its Luna model.
 - Transport is HTTP. WebSocket mode and `previous_response_id` continuation stay
   with the `chatgpt` source until a live check confirms them on the API.
-- Codex family aliases resolve against `GET /v1/models` for the key, fetched
-  once at startup and at most once per hour after that. A failed fetch keeps the
-  last list, then the built-in versions. The API decides access for exact ids.
-- A `-fast` suffix sends `service_tier: "priority"`. `-ultrafast` narrows to
+- A Codex family alias resolves against the catalog of the source that sends the
+  request, and again after a switch; an exact id stays fixed. The `api-key`
+  catalog is `GET /v1/models`, fetched at startup and at most once per hour. A
+  failed fetch keeps the last list, then the built-in versions. Model discovery
+  lists the union of the catalogs the order uses.
+- A `-fast` suffix asks for priority processing. `-ultrafast` narrows to
   priority.
 - Hosted web search uses the API's `web_search` tool in the same Responses
-  request. Claude Code's standalone search request becomes a Responses request
-  with that tool, and its result is translated into the same Anthropic search
-  response the `chatgpt` source returns.
-- The images and transcription routes stay with the `chatgpt` source in this
-  version. With only `api-key` in the order they answer an error that says so.
-- Token counting is local and does not change.
+  request.
+- Claude Code's standalone search becomes a Responses request that forces
+  exactly one `web_search` call, carries the allowed and blocked domains, and
+  asks for `web_search_call.action.sources`
+  ([web search sources](https://developers.openai.com/api/docs/guides/tools-web-search#sources)).
+  The sources become the same Anthropic search result blocks the `chatgpt`
+  source returns. A response without a search call is an error.
 
 ## Moving to the next source
 
-A request tries the sources in order. Within a source, the
-[Codex retry rules](codex.md#transport-and-retries) apply unchanged. duolane
-moves to the next source only before any client output and before the source
-reports hosted-tool execution, and only for these failures:
+A request tries the sources in order. duolane moves to the next source only
+before any client output, and only for a failure it can prove happened before
+the upstream did work:
 
 - a spent plan window (`usage_limit_reached`) on `chatgpt`, or exhausted credit
   (`insufficient_quota`) on `api-key`;
-- a credential the source rejects: a ChatGPT login a refresh cannot repair, or
-  an API key answered with 401;
-- transient failures (HTTP 5xx, connection errors, API rate limiting) after the
-  source spent its retry budget.
+- a rejected credential: a refresh the token endpoint refused, or HTTP 401 for
+  the API key. A refresh that failed for a network, timeout, or lock reason is
+  transient, not a rejection;
+- a transient failure after the source spent its retry budget, but only for a
+  request without hosted tools.
 
-A request does not move on for an invalid request, a context window overflow, a
-header timeout, or any failure after output, because the next source would fail
-the same way or repeat work the client already saw.
+A request with a hosted tool, including every standalone search, moves on only
+for the first two kinds, or for a failure before the request was sent. A dropped
+connection, timeout, or HTTP 5xx after sending can hide a search that ran and
+was billed, so it stops there.
 
+A request never moves on for an invalid request, a context window overflow, a
+header timeout, empty completions after their retries, or any failure after
+output, because the next source would fail the same way or repeat work the
+client already saw.
+
+- The Codex route reports a typed failure with its replay eligibility to the
+  source selector, which never infers either from the final HTTP status.
+- Each source has its own [recovery budget](codex.md#transport-and-retries):
+  three retries within its own 60-second window. One request makes at most two
+  budgets of attempts.
 - The request is translated again for the next source, as for an account change.
-  Each source has its own retry budget, so one request makes at most two budgets
-  of attempts.
-- A spent window or exhausted credit marks the source as skipped until its reset
-  time, or for one hour when no reset time is known. A rejected credential is
-  skipped until restart. Transient failures leave no mark.
+- A spent window or exhausted credit skips that credential until its reset time,
+  or for one hour when no reset time is known. A rejected credential is skipped
+  until it changes: a new ChatGPT login or refresh token, or a different key.
+  Marks belong to the credential, so a change clears them. Transient failures
+  leave no mark.
 - When every source fails, the client receives the error of the last source
-  tried.
+  tried. When every source is already skipped, duolane answers as the first
+  skipped source would: HTTP 429 with the
+  [usage limit headers](codex.md#usage-limits) and the earliest reset time for a
+  spent window or credit, or HTTP 401 that names the login and key commands for
+  a rejected credential.
 
 ## Reasoning
 
 The `api-key` source is its own account for
-[reasoning portability](architecture.md#reasoning-across-backends). Its account
-tag is the first 16 hexadecimal characters of the SHA-256 of `openai-api-key:`
-followed by the key. The signature format does not change. Encrypted reasoning
-from one source reaches the other as reasoning text, and a new key is a new
-account. Connection reuse and compaction state stay bound to the account that
-created them.
+[reasoning portability](architecture.md#reasoning-across-backends), which
+defines its account tag. Encrypted reasoning never crosses sources: it reaches
+the other source as reasoning text, whatever either upstream would accept. A new
+key is a new account. Connection reuse and compaction state stay bound to the
+account that created them.
 
 ## Monitor
 
@@ -145,19 +196,20 @@ moved on also shows the source it left and why, for example
 - Several keys, OpenAI organization or project headers, and Azure OpenAI.
 - A different order per model or per session.
 - Spending limits. The OpenAI Platform's own budget settings apply.
-- Images and transcription with an API key, WebSocket with an API key, and
-  reading the key from the Codex CLI's API-key login.
+- The API key on native Responses, images, transcription, or WebSocket, a stored
+  key on Windows, and reading the key from the Codex CLI's API-key login.
 
 ## Testing
 
 - Hermetic tests use a mock API upstream, toy keys, and a temporary config
-  directory. They cover order parsing, the startup rules, the file permission
-  checks, each move-on failure and each failure that must not move on, the skip
-  marks, and that no test output contains the key.
+  directory. They cover order parsing and the default, the startup rules, the
+  file checks, each move-on failure and each failure that must not move on,
+  hosted-tool requests, the skip marks and their reset on a credential change,
+  error text that is never forwarded, and that no test output contains the key.
 - Live checks use the owner's key with the owner's approval for each run: one
-  Messages request per family alias, hosted search, a standalone search, and a
-  move from an invalid `DUOLANE_OPENAI_API_KEY` to `chatgpt` with the order
-  `api-key,chatgpt`.
+  Messages request per family alias, hosted search, a standalone search,
+  `max_tokens`, and a move from an invalid `DUOLANE_OPENAI_API_KEY` to `chatgpt`
+  with the order `api-key,chatgpt`.
 
 ## Unverified behavior
 
@@ -165,6 +217,5 @@ moved on also shows the source it left and why, for example
   limiting.
 - That the API accepts duolane's Responses body unchanged, including
   `prompt_cache_key`, `include`, reasoning summaries, and `text.verbosity`.
-- That the API rejects encrypted reasoning from the ChatGPT backend, which the
-  separate account tag assumes.
-- The API's `service_tier` value for priority processing.
+- The API's `service_tier` value for priority processing, and whether
+  `web_search` accepts blocked domains.
