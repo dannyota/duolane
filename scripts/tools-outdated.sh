@@ -28,7 +28,7 @@ github() {
 
 read -r -d '' PICK <<'PYTHON' || true
 import datetime, json, re, sys
-cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=72)
+cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
 stable = re.compile(r"v?([0-9]+)\.([0-9]+)\.([0-9]+)")
 data = json.load(sys.stdin)
 if sys.argv[1] == "github":

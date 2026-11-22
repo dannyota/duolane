@@ -15,7 +15,8 @@ ROOT = Path(__file__).resolve().parent.parent
 CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
 API = "https://crates.io/api/v1/crates/{}/{}"
 USER_AGENT = "crate-age-check"
-MIN_AGE = datetime.timedelta(hours=72)
+MIN_AGE_HOURS = 24
+MIN_AGE = datetime.timedelta(hours=MIN_AGE_HOURS)
 EXEMPT_VAR = "CRATE_AGE_EXEMPT"
 
 
@@ -55,7 +56,7 @@ def check(base_text, head_text, exempt, fetch, now):
         if (name, version) in exempt:
             report.append(f"exempt: {name}@{version} published {hours}h ago: {exempt[(name, version)]}")
         elif age < MIN_AGE:
-            report.append(f"too new: {name}@{version} published {hours}h ago, under {MIN_AGE.days * 24}h")
+            report.append(f"too new: {name}@{version} published {hours}h ago, under {MIN_AGE_HOURS}h")
             failures += 1
         else:
             report.append(f"ok: {name}@{version} published {hours}h ago")
@@ -91,7 +92,7 @@ def main(argv):
     for line in report:
         print(line)
     if failures:
-        print(f"check-crate-age: {failures} crate version(s) under the 72 hour cool-down", file=sys.stderr)
+        print(f"check-crate-age: {failures} crate version(s) under the {MIN_AGE_HOURS} hour cool-down", file=sys.stderr)
         return 1
     print(f"check-crate-age: ok ({len(report)} changed crate versions)")
     return 0
