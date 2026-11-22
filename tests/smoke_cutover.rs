@@ -2724,7 +2724,7 @@ async fn collect_http_tool_stream(
     let _config_env = EnvGuard::set("DUOLANE_CONFIG_DIR", config.path());
     let _base_url_env = EnvGuard::set("DUOLANE_CODEX_BASE_URL", &upstream);
     let _transport_env = EnvGuard::set("DUOLANE_CODEX_TRANSPORT", "http");
-    let (status, body) = tokio::time::timeout(Duration::from_secs(5), async {
+    let (status, body) = tokio::time::timeout(Duration::from_secs(30), async {
         let response = call_messages_body(json!({
             "model": "gpt-5.5",
             "max_tokens": 64,

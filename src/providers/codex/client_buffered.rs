@@ -44,12 +44,19 @@ impl CodexHttpClient {
             let sent_before_attempt = http_body
                 .websocket_sent
                 .load(std::sync::atomic::Ordering::Acquire);
+            let mut hosted_http = false;
             let result = match transport {
                 CodexTransport::Http => {
                     let http_body = http_body.get_or_try_init(prepare_http_body).await?;
-                    self.attempt_post_http(&auth, http_body, ctx, body.client_metadata.is_some())
-                        .await
-                        .map(|response| OwnerAwareCodexResponse::new(response, None))
+                    self.attempt_post_http(
+                        &auth,
+                        http_body,
+                        ctx,
+                        body.client_metadata.is_some(),
+                        &mut hosted_http,
+                    )
+                    .await
+                    .map(|response| OwnerAwareCodexResponse::new(response, None))
                 }
                 CodexTransport::WebSocket => {
                     let ws_headers =
@@ -97,9 +104,15 @@ impl CodexHttpClient {
                         .size_http_selected
                         .store(true, std::sync::atomic::Ordering::Release);
                     let http_body = http_body.get_or_try_init(prepare_http_body).await?;
-                    self.attempt_post_http(&auth, http_body, ctx, body.client_metadata.is_some())
-                        .await
-                        .map(|response| OwnerAwareCodexResponse::new(response, None))
+                    self.attempt_post_http(
+                        &auth,
+                        http_body,
+                        ctx,
+                        body.client_metadata.is_some(),
+                        &mut hosted_http,
+                    )
+                    .await
+                    .map(|response| OwnerAwareCodexResponse::new(response, None))
                 }
                 CodexTransport::Auto => {
                     let ws_headers =
@@ -153,6 +166,7 @@ impl CodexHttpClient {
                                 http_body,
                                 ctx,
                                 body.client_metadata.is_some(),
+                                &mut hosted_http,
                             )
                             .await
                             .map(|response| OwnerAwareCodexResponse::new(response, None))
@@ -162,6 +176,13 @@ impl CodexHttpClient {
                 }
             };
 
+            if hosted_http && result.is_err() {
+                return result;
+            }
+            let result = result.map(|mut response| {
+                response.hosted_tool_executed |= hosted_http;
+                response
+            });
             let replay_allowed = !result
                 .as_ref()
                 .is_ok_and(|response| response.hosted_tool_executed);
@@ -477,11 +498,13 @@ impl CodexHttpClient {
         http_body: &CodexHttpBody,
         ctx: &RequestContext,
         use_responses_lite: bool,
+        hosted_http: &mut bool,
     ) -> Result<CodexResponse, CodexError> {
         let (resp, started_at) = self
             .start_post_http(auth, http_body, ctx, use_responses_lite)
             .await?;
-        self.collect_http_response(resp, started_at, ctx).await
+        self.collect_http_response(resp, started_at, ctx, hosted_http)
+            .await
     }
 
     pub(super) async fn start_post_http(
@@ -550,6 +573,7 @@ impl CodexHttpClient {
         mut resp: reqwest::Response,
         started_at: Instant,
         ctx: &RequestContext,
+        hosted_http: &mut bool,
     ) -> Result<CodexResponse, CodexError> {
         let status = resp.status();
         let headers: Vec<(String, String)> = resp
@@ -558,8 +582,15 @@ impl CodexHttpClient {
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
 
+        let mut terminal = false;
         let body_bytes = self
-            .read_buffered_body(&mut resp, ctx, "Codex response body")
+            .read_buffered_body(
+                &mut resp,
+                ctx,
+                "Codex response body",
+                hosted_http,
+                &mut terminal,
+            )
             .await
             .map_err(|mut error| {
                 if !status.is_success() {
@@ -572,6 +603,11 @@ impl CodexHttpClient {
                 }
                 error
             })?;
+        if status.is_success() && *hosted_http && !terminal {
+            return Err(super::client_sse::http_sse_error(
+                "Codex SSE stream ended without a terminal event",
+            ));
+        }
         let status = status.as_u16();
 
         if let Some(traffic) = ctx.traffic.as_deref() {
@@ -597,6 +633,8 @@ impl CodexHttpClient {
         resp: &mut reqwest::Response,
         ctx: &RequestContext,
         label: &str,
+        hosted_http: &mut bool,
+        terminal: &mut bool,
     ) -> Result<Vec<u8>, CodexError> {
         let body_error = |message: String| CodexError {
             status: 0,
@@ -608,6 +646,7 @@ impl CodexHttpClient {
         };
         let mut body = Vec::new();
         let mut response_started = false;
+        let mut evidence = super::client_sse::BufferedHttpSseEvidence::default();
         loop {
             let chunk = tokio::time::timeout(
                 Duration::from_millis(self.body_idle_timeout_ms),
@@ -624,6 +663,9 @@ impl CodexHttpClient {
             let Some(chunk) = chunk else {
                 return Ok(body);
             };
+            evidence.push(&chunk);
+            *hosted_http |= evidence.hosted;
+            *terminal |= evidence.terminal;
             if body.len().saturating_add(chunk.len()) > MAX_BUFFERED_RESPONSE_BYTES {
                 return Err(body_error(format!("{label} exceeds the size limit")));
             }
@@ -1009,6 +1051,191 @@ mod tests {
             },
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn buffered_http_does_not_replay_truncated_hosted_search() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sends = std::cell::Cell::new(0);
+        let server = async {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_http_request(&mut stream).await;
+                sends.set(sends.get() + 1);
+                if sends.get() == 2 {
+                    return;
+                }
+                let body = b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"search_1\",\"status\":\"completed\"}}\n\n";
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len() + 1
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+            }
+        };
+        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let request = buffered_test_request();
+        let context = http_test_context();
+        let cache = CodexHttpBodyCache::new();
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                _ = server => None,
+                result = client.post_codex_with_transport(&request, &context, None, crate::config::CodexTransport::Http, &cache) => Some(result),
+            }
+        }).await.unwrap();
+        assert_eq!(sends.get(), 1);
+        assert!(result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn buffered_http_does_not_replay_hosted_search_without_terminal() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sends = std::cell::Cell::new(0);
+        let server = async {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_http_request(&mut stream).await;
+                sends.set(sends.get() + 1);
+                if sends.get() == 2 {
+                    return;
+                }
+                let body = b"data: {\"type\":\"response.web_search_call.completed\"}\n\n";
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+            }
+        };
+        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let request = buffered_test_request();
+        let context = http_test_context();
+        let cache = CodexHttpBodyCache::new();
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                _ = server => None,
+                result = client.post_codex_with_transport(&request, &context, None, crate::config::CodexTransport::Http, &cache) => Some(result),
+            }
+        }).await.unwrap();
+        assert_eq!(sends.get(), 1);
+        assert!(result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn buffered_http_does_not_replay_hosted_after_invalid_frame() {
+        assert_hosted_error_without_replay(
+            b"data: not-json\n\ndata: {\"type\":\"response.web_search_call.completed\"}\n\n",
+            true,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn buffered_http_rejects_hosted_with_unterminated_terminal_frame() {
+        assert_hosted_error_without_replay(
+            b"data: {\"type\":\"response.web_search_call.completed\"}\n\ndata: {\"type\":\"response.completed\"}\n",
+            false,
+        ).await;
+    }
+
+    async fn assert_hosted_error_without_replay(body: &'static [u8], truncate: bool) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sends = std::cell::Cell::new(0);
+        let server = async {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_http_request(&mut stream).await;
+                sends.set(sends.get() + 1);
+                if sends.get() == 2 {
+                    return;
+                }
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len() + usize::from(truncate)
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+            }
+        };
+        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let request = buffered_test_request();
+        let context = http_test_context();
+        let cache = CodexHttpBodyCache::new();
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                _ = server => None,
+                result = client.post_codex_with_transport(&request, &context, None, crate::config::CodexTransport::Http, &cache) => Some(result),
+            }
+        }).await.unwrap();
+        assert_eq!(sends.get(), 1);
+        assert!(result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn buffered_http_marks_completed_hosted_search() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request(&mut stream).await;
+            let body = b"data: {\"type\":\"response.web_search_call.completed\"}\n\ndata: {\"type\":\"response.completed\"}\n\n";
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+        });
+        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let response = client
+            .post_codex_with_transport(
+                &buffered_test_request(),
+                &http_test_context(),
+                None,
+                crate::config::CodexTransport::Http,
+                &CodexHttpBodyCache::new(),
+            )
+            .await
+            .unwrap();
+        assert!(response.hosted_tool_executed);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn buffered_http_retries_truncated_success_without_hosted_search() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_http_request(&mut stream).await;
+                let body = b"data: {\"type\":\"response.completed\"}\n\n";
+                let length = body.len() + usize::from(attempt == 0);
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {length}\r\nconnection: close\r\n\r\n"
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+            }
+        });
+        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let response = client
+            .post_codex_with_transport(
+                &buffered_test_request(),
+                &http_test_context(),
+                None,
+                crate::config::CodexTransport::Http,
+                &CodexHttpBodyCache::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -1732,7 +1959,13 @@ mod tests {
         let client = http_test_client(format!("http://{addr}/responses"), 80);
         let body = empty_http_body(&client).await;
         let response = client
-            .attempt_post_http(&http_test_auth(), &body, &http_test_context(), false)
+            .attempt_post_http(
+                &http_test_auth(),
+                &body,
+                &http_test_context(),
+                false,
+                &mut false,
+            )
             .await
             .expect("active body should not hit a whole-request timeout");
         server.await.unwrap();
@@ -1758,7 +1991,13 @@ mod tests {
         let client = http_test_client(format!("http://{addr}/responses"), 30);
         let body = empty_http_body(&client).await;
         let result = client
-            .attempt_post_http(&http_test_auth(), &body, &http_test_context(), false)
+            .attempt_post_http(
+                &http_test_auth(),
+                &body,
+                &http_test_context(),
+                false,
+                &mut false,
+            )
             .await;
         server.await.unwrap();
         let error = result.err().expect("stalled body should time out");
@@ -1784,7 +2023,13 @@ mod tests {
         let client = http_test_client(format!("http://{addr}/responses"), 100);
         let body = empty_http_body(&client).await;
         let result = client
-            .attempt_post_http(&http_test_auth(), &body, &http_test_context(), false)
+            .attempt_post_http(
+                &http_test_auth(),
+                &body,
+                &http_test_context(),
+                false,
+                &mut false,
+            )
             .await;
         server.await.unwrap();
         let error = result.err().expect("truncated body should fail");
