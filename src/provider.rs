@@ -70,4 +70,5 @@ pub struct Passthrough {
     pub raw_body: axum::body::Bytes,
     pub headers: axum::http::HeaderMap,
     pub path_and_query: String,
+    pub claude_profile: Option<Arc<str>>,
 }

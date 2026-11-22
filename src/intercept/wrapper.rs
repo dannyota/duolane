@@ -51,10 +51,15 @@ impl Install {
     }
 
     pub(super) fn proxy_url(&self) -> String {
-        format!(
-            "http://{PROXY_USER}:{}@127.0.0.1:{}",
-            self.password, self.port
-        )
+        self.profile_url(None)
+    }
+
+    fn profile_url(&self, profile: Option<&str>) -> String {
+        let user = match profile {
+            Some(name) => format!("{PROXY_USER}.{name}"),
+            None => PROXY_USER.to_string(),
+        };
+        format!("http://{user}:{}@127.0.0.1:{}", self.password, self.port)
     }
 
     pub(super) fn fixed(&self) -> Vec<(&'static str, String)> {
@@ -146,6 +151,13 @@ fn child_command(
         .envs(child_variables(install));
     if let Some(profile) = profile {
         command.env("CLAUDE_CONFIG_DIR", profile.path());
+        let name = profile
+            .name()
+            .filter(|name| crate::claude_accounts::valid_profile_tag(name));
+        let url = install.profile_url(name);
+        for name in HTTPS_PROXY {
+            command.env(name, &url);
+        }
     }
     command
 }
@@ -371,9 +383,13 @@ mod account_tests {
     #[test]
     #[ignore]
     fn intercept_child_profile_probe() {
+        use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
+        let named = root.path().join("backup");
+        std::fs::create_dir(&named).unwrap();
+        std::fs::set_permissions(&named, std::fs::Permissions::from_mode(0o700)).unwrap();
         unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", root.path()) }
-        let profile = crate::claude_accounts::Profile::test_profile(root.path());
+        let profile = crate::claude_accounts::Profile::test_profile(&named);
         let install = Install {
             password: "toy".into(),
             port: 1234,
@@ -387,15 +403,30 @@ mod account_tests {
             &actual[actual.len() - args.len()..],
             args.iter().map(|arg| arg.as_os_str()).collect::<Vec<_>>()
         );
-        assert!(command.get_envs().any(
-            |(key, value)| key == "CLAUDE_CONFIG_DIR" && value == Some(root.path().as_os_str())
-        ));
         assert!(
             command
                 .get_envs()
-                .any(|(key, value)| key == HTTPS_PROXY[0] && value.is_some())
+                .any(|(key, value)| key == "CLAUDE_CONFIG_DIR" && value == Some(named.as_os_str()))
+        );
+        let proxy = |command: &Command| -> Vec<String> {
+            HTTPS_PROXY
+                .iter()
+                .filter_map(|name| {
+                    command
+                        .get_envs()
+                        .filter(|(key, _)| key == name)
+                        .last()
+                        .and_then(|(_, value)| value)
+                        .map(|value| value.to_string_lossy().into_owned())
+                })
+                .collect()
+        };
+        assert_eq!(
+            proxy(&command),
+            ["http://duolane.backup:toy@127.0.0.1:1234"; 2]
         );
         let unmanaged = child_command(&args, None, &install, Some(&managed));
+        assert_eq!(proxy(&unmanaged), ["http://duolane:toy@127.0.0.1:1234"; 2]);
         assert!(
             !unmanaged
                 .get_envs()

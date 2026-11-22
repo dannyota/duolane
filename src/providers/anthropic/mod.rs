@@ -417,6 +417,7 @@ impl AnthropicProvider {
         };
 
         let url = format!("{}{}", self.base_url, passthrough.path_and_query);
+        let claude_profile = passthrough.claude_profile.clone();
         let mut headers = axum::http::HeaderMap::with_capacity(passthrough.headers.len());
         for (name, value) in passthrough.headers.iter() {
             if is_stripped_request_header(name.as_str()) {
@@ -450,6 +451,10 @@ impl AnthropicProvider {
         match upstream {
             Ok(Ok(upstream)) => {
                 let status = upstream.status();
+                crate::claude_accounts::limits::record(
+                    claude_profile.as_deref(),
+                    upstream.headers(),
+                );
                 let mut out_headers =
                     axum::http::HeaderMap::with_capacity(upstream.headers().len());
                 for (name, value) in upstream.headers() {
@@ -784,6 +789,7 @@ mod tests {
                 raw_body: Bytes::from_static(br#"{"messages":[]}"#),
                 headers: axum::http::HeaderMap::new(),
                 path_and_query: "/v1/messages".into(),
+                claude_profile: None,
             }),
         }
     }
