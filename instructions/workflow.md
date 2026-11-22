@@ -17,7 +17,7 @@ Two red CI runs from the same cause mean stop and repair the process. Run one `m
 
 ## Codex CLI fallback
 
-Use the Codex CLI only when direct subagent dispatch fails or its runtime model cannot be confirmed.
+Use the Codex CLI only when direct subagent dispatch fails or the duolane monitor shows its requests on a model from another family.
 
 
 `C=$(ls -d ~/.claude/plugins/cache/openai-codex/codex/*/ | sort -V | tail -1)scripts/codex-companion.mjs`
