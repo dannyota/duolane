@@ -322,6 +322,8 @@ fn claude_accounts_help() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("login") && help.contains("use") && !help.contains("run"));
+    assert!(help.contains("Show each profile's account, plan, and login"));
+    assert!(help.contains("Sign out of a named Claude profile and delete it"));
     for (command, description) in [
         ("login", "Sign in to a named Claude profile"),
         (

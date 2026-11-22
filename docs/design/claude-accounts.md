@@ -15,14 +15,29 @@ switches a running process or falls back on a quota error. Codex is unchanged.
   for one profile are refused. The lock is released when the login command
   returns, even if it left a background process; if duolane itself is killed,
   the lock lasts until the login command and its children exit. Close any Claude
-  Code process using that profile before logging in again.
+  Code process using that profile before logging in again. After a successful
+  login it prints the account that signed in and warns when another profile
+  holds the same account, because the browser signs in whichever claude.ai
+  account is already open.
 - `duolane accounts use [name]` accepts `default` or a registered profile name,
-  or offers them in a menu. An unknown or unsafe name is an error. It saves only
-  the selected name, atomically, to
+  or offers them in a menu. On a terminal the menu shows each profile's account
+  and moves with the arrow keys; Esc leaves the selection unchanged. Without a
+  terminal it reads a number. An unknown or unsafe name is an error. It saves
+  only the selected name, atomically, to
   `<duolane config>/claude-accounts/.selected`. Storing it beside the profiles
   scopes it to that config directory, whatever path alias or letter case reaches
   it. `default` restores the original behavior. This command never starts a
   login or changes an open session.
+- `duolane accounts list` prints `default` and every registered profile with its
+  account, plan, and the time left on the stored login, marks the selected
+  profile, and notes a profile that holds the same account as an earlier row.
+- `duolane accounts remove <name>` signs a named profile out with
+  `claude auth logout`, then deletes its directory. It asks for confirmation on
+  a terminal unless `--yes` is given, and refuses `default`. If logout fails,
+  the profile stays. A removed profile that was selected resets the selection to
+  `default`. Deleting removes the profile's links to shared project folders,
+  never the folders they point to. Close any Claude Code process using the
+  profile first.
 - `duolane claude` still uses the intercept wrapper. If a named account is
   selected, it sets `CLAUDE_CONFIG_DIR` for that child only and considers the
   selected profile's `settings.json` for the model picker. Plain `claude`
@@ -49,6 +64,29 @@ skips adding the Codex lineup. The
 [Claude Code authentication docs](https://code.claude.com/docs/en/authentication)
 describe separation by configuration directory, including macOS Keychain
 entries.
+
+## Account details
+
+`list`, the `use` menu, and the login report learn which account a profile holds
+by running `claude auth status --json` with that profile's `CLAUDE_CONFIG_DIR`.
+Claude Code reads its own login and prints no credential. The
+[CLI reference](https://code.claude.com/docs/en/cli-reference) documents the
+JSON output, the exit code, and the `loginExpiresAt` field. The `email`,
+`orgId`, and `subscriptionType` fields were observed on Claude Code 2.1.330 and
+are not documented, so every field is optional and a profile without them shows
+as signed in or unknown.
+
+- The status and logout children run without the authentication override
+  variables, so they describe the stored login, not the shell's override. They
+  also run without `DUOLANE_OPENAI_API_KEY`, as the login and launch children
+  do.
+- Each status run has a 10 second limit and a 64 KiB output limit. A run that
+  exceeds either, or prints anything else, shows the profile as unknown and
+  never fails the command.
+- Displayed fields drop control and bidirectional formatting characters and keep
+  at most 64 characters, so status text cannot rewrite the terminal.
+- Two profiles are the same account when their email, compared without case, and
+  organization both match.
 
 ## One transcript per session
 

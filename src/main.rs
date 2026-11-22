@@ -105,6 +105,15 @@ enum AccountsCommand {
         #[arg(value_name = "NAME")]
         name: Option<String>,
     },
+    #[command(about = "Show each profile's account, plan, and login")]
+    List,
+    #[command(about = "Sign out of a named Claude profile and delete it")]
+    Remove {
+        #[arg(value_name = "NAME")]
+        name: String,
+        #[arg(long, help = "Skip the confirmation prompt")]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -370,8 +379,13 @@ fn main() -> Result<()> {
         }
         Commands::Codex { command } => run_provider_cli("codex", command),
         Commands::Accounts { command } => match command {
-            AccountsCommand::Login { name } => duolane::claude_accounts::login(name),
+            AccountsCommand::Login { name } => {
+                let name = duolane::claude_accounts::login(name)?;
+                duolane::claude_accounts::announce(&name)
+            }
             AccountsCommand::Use { name } => duolane::claude_accounts::select(name),
+            AccountsCommand::List => duolane::claude_accounts::list(),
+            AccountsCommand::Remove { name, yes } => duolane::claude_accounts::remove(name, yes),
         },
         Commands::Claude { args } => duolane::intercept::run_claude(args),
         Commands::Agents { command } => match command {
