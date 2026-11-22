@@ -1,4 +1,7 @@
 mod catalog;
+pub mod chat_completions;
+#[cfg(test)]
+mod chat_completions_tests;
 mod error;
 pub mod messages;
 pub mod messages_live;
@@ -180,6 +183,7 @@ impl ApiClient {
             hosted: false,
             terminal: false,
             ended: false,
+            strict_terminal: false,
             raw_limit: None,
             raw_bytes: 0,
         })
@@ -226,6 +230,7 @@ pub struct ApiEvents {
     hosted: bool,
     terminal: bool,
     ended: bool,
+    strict_terminal: bool,
     raw_limit: Option<usize>,
     raw_bytes: usize,
 }
@@ -233,6 +238,11 @@ pub struct ApiEvents {
 impl ApiEvents {
     pub(super) fn with_raw_limit(mut self, limit: usize) -> Self {
         self.raw_limit = Some(limit);
+        self
+    }
+
+    pub(super) fn strict_terminal(mut self) -> Self {
+        self.strict_terminal = true;
         self
     }
 
@@ -244,10 +254,12 @@ impl ApiEvents {
             }
             if let Some(event) = self.pending.pop_front() {
                 let Some(payload) = event.payload else {
-                    if matches!(
-                        event.event.as_deref(),
-                        Some("error" | "response.error" | "response.failed")
-                    ) {
+                    if (event.done && self.strict_terminal && !self.terminal)
+                        || matches!(
+                            event.event.as_deref(),
+                            Some("error" | "response.error" | "response.failed")
+                        )
+                    {
                         self.ended = true;
                         return Some(Err(ApiFailure::local(
                             ApiFailureKind::Other,
@@ -296,12 +308,32 @@ impl ApiEvents {
                         true,
                     )));
                 }
+                if self.strict_terminal
+                    && events::event_is_success_terminal(&payload)
+                    && ["status", "status_code"].iter().any(|key| {
+                        payload
+                            .get(*key)
+                            .and_then(Value::as_u64)
+                            .is_some_and(|status| !(200..300).contains(&status))
+                    })
+                {
+                    self.ended = true;
+                    return Some(Err(ApiFailure::local(
+                        ApiFailureKind::Other,
+                        SendEvidence::OutcomeUnknown,
+                        self.hosted,
+                    )));
+                }
                 if events::response_is_incomplete_terminal(&payload)
                     && !events::is_standard_max_output_tokens_incomplete(&payload)
                 {
                     self.ended = true;
                     return Some(Err(ApiFailure::local(
-                        ApiFailureKind::Transient,
+                        if self.strict_terminal {
+                            ApiFailureKind::Other
+                        } else {
+                            ApiFailureKind::Transient
+                        },
                         SendEvidence::OutcomeUnknown,
                         self.hosted,
                     )));
@@ -360,6 +392,7 @@ impl ApiEvents {
                 }
                 Ok(Ok(None)) => {
                     self.ended = true;
+                    self.hosted |= self.decoder.pending_hosted();
                     if self.decoder.finish().is_err() || !self.terminal {
                         return Some(Err(ApiFailure::local(
                             ApiFailureKind::Transient,
@@ -371,6 +404,7 @@ impl ApiEvents {
                 }
                 _ => {
                     self.ended = true;
+                    self.hosted |= self.decoder.pending_hosted();
                     return Some(Err(ApiFailure::local(
                         ApiFailureKind::Transient,
                         SendEvidence::OutcomeUnknown,

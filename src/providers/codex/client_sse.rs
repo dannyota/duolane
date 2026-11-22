@@ -188,6 +188,7 @@ pub(super) fn trace_http_failure(
 pub(super) struct DecodedHttpSseEvent {
     pub(super) event: Option<String>,
     pub(super) payload: Option<serde_json::Value>,
+    pub(super) done: bool,
 }
 
 pub(super) struct HttpEventStreamState {
@@ -294,6 +295,7 @@ fn decode_http_sse_frame(frame: &[u8]) -> Result<Option<DecodedHttpSseEvent>, Co
         return Ok(Some(DecodedHttpSseEvent {
             event,
             payload: None,
+            done: true,
         }));
     }
     let payload = serde_json::from_str(&data)
@@ -301,6 +303,7 @@ fn decode_http_sse_frame(frame: &[u8]) -> Result<Option<DecodedHttpSseEvent>, Co
     Ok(Some(DecodedHttpSseEvent {
         event,
         payload: Some(payload),
+        done: false,
     }))
 }
 
@@ -502,6 +505,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(events.len(), 1);
+        assert!(!events[0].done);
         assert_eq!(
             events[0].event.as_deref(),
             Some("response.output_text.delta")
@@ -519,6 +523,7 @@ mod tests {
         decoder.push(b"data: [DONE]\n\n", &mut events).unwrap();
         assert_eq!(events.len(), 1);
         assert!(events[0].payload.is_none());
+        assert!(events[0].done);
         decoder.finish().unwrap();
     }
 
