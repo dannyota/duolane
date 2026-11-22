@@ -71,6 +71,8 @@ Rejections use the Anthropic error shape and never echo request values:
 ## Credentials
 
 - The Claude login passes through in transit and is never stored or logged.
+- An OpenAI API key follows
+  [OpenAI API key storage](openai-api-key.md#key-storage).
 - The Codex login is read from `$CODEX_HOME/auth.json`, by default
   `~/.codex/auth.json`, and is never deleted, even after a rejected refresh.
 - Writes to that file are atomic, flushed to disk, readable only by the user,
