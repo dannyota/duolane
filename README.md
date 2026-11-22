@@ -82,3 +82,18 @@ Licensed under [MIT](LICENSE).
 [accounts]: https://github.com/dannyota/duolane/wiki/Claude-Accounts
 [configuration]: https://github.com/dannyota/duolane/wiki/Configuration
 [troubleshooting]: https://github.com/dannyota/duolane/wiki/Troubleshooting
+
+### Codex API key
+
+`duolane codex auth key set` reads a key from a hidden prompt or standard input
+and verifies it before saving. Use `--no-verify` for offline setup. Stored keys
+are supported on macOS and Linux; Windows uses `DUOLANE_OPENAI_API_KEY` only.
+`duolane codex auth key remove` removes the stored key. The environment key wins
+over a stored key.
+
+A key alone does not enable API billing. Choose sources explicitly with
+`duolane codex auth order api-key` or
+`duolane codex auth order chatgpt api-key`. API use is billed at OpenAI API
+rates. `duolane codex auth order --reset` restores the default ChatGPT order;
+`DUOLANE_CODEX_AUTH_ORDER` overrides the saved order. Restart a running proxy
+when credentials or order change.

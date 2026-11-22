@@ -33,7 +33,7 @@ fn parse_codex_transport(raw: &str) -> Option<CodexTransport> {
 }
 
 pub fn codex_transport() -> CodexTransport {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_TRANSPORT")
         && let Some(transport) = parse_codex_transport(raw)
     {
@@ -118,7 +118,7 @@ pub const CODEX_DEFAULT_HEADER_TIMEOUT_MS: u64 = 300_000;
 pub const CODEX_MIN_HEADER_TIMEOUT_MS: u64 = 1_000;
 
 pub fn codex_header_timeout_ms() -> u64 {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(ms) = env
         .get("DUOLANE_CODEX_HEADER_TIMEOUT_MS")
         .and_then(|raw| raw.trim().parse::<u64>().ok())

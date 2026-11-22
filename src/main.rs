@@ -130,7 +130,23 @@ enum InterceptCommand {
 enum ProviderGroup {
     Auth {
         #[command(subcommand)]
-        command: duolane::provider::AuthCommand,
+        command: CodexAuthCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CodexAuthCommand {
+    Login,
+    Device,
+    Status,
+    Logout,
+    #[command(subcommand)]
+    Key(duolane::providers::codex::cli_api_key::KeyCommand),
+    Order {
+        #[arg(value_enum, conflicts_with = "reset")]
+        sources: Vec<duolane::providers::codex::cli_api_key::AuthSource>,
+        #[arg(long)]
+        reset: bool,
     },
 }
 
@@ -139,7 +155,29 @@ fn main() -> Result<()> {
     if raw.next().is_some_and(|command| command == "claude") {
         return duolane::intercept::run_claude(raw.collect());
     }
-    let cli = Cli::parse();
+    let args: Vec<_> = std::env::args_os().collect();
+    let sensitive = args
+        .windows(3)
+        .any(|args| args[0] == "codex" && args[1] == "auth" && args[2] == "key");
+    let cli = if sensitive {
+        match Cli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+            {
+                error.exit()
+            }
+            Err(_) => {
+                eprintln!("Invalid key command. Use `duolane codex auth key --help` for syntax.");
+                std::process::exit(2);
+            }
+        }
+    } else {
+        Cli::parse_from(args)
+    };
 
     if cli.version_flag {
         println!("duolane {}", VERSION);
@@ -416,28 +454,39 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
     let handlers = provider.cli();
     match command {
         ProviderGroup::Auth { command } => match command {
-            duolane::provider::AuthCommand::Login => {
+            CodexAuthCommand::Login => {
                 if let Err(err) = handlers.login() {
                     eprintln!("{err}");
                     std::process::exit(2);
                 }
                 Ok(())
             }
-            duolane::provider::AuthCommand::Device => {
+            CodexAuthCommand::Device => {
                 if let Err(err) = handlers.device() {
                     eprintln!("{err}");
                     std::process::exit(2);
                 }
                 Ok(())
             }
-            duolane::provider::AuthCommand::Status => {
+            CodexAuthCommand::Status => {
                 if let Err(err) = handlers.status() {
                     println!("{}", terminal_text(&err.to_string()));
                     std::process::exit(1);
                 }
                 Ok(())
             }
-            duolane::provider::AuthCommand::Logout => {
+            CodexAuthCommand::Key(command) => duolane::providers::codex::cli_api_key::run(
+                duolane::providers::codex::cli_api_key::CodexApiAuthCommand::Key(command),
+            ),
+            CodexAuthCommand::Order { sources, reset } => {
+                duolane::providers::codex::cli_api_key::run(
+                    duolane::providers::codex::cli_api_key::CodexApiAuthCommand::Order {
+                        sources,
+                        reset,
+                    },
+                )
+            }
+            CodexAuthCommand::Logout => {
                 handlers.logout()?;
                 Ok(())
             }

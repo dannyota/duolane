@@ -54,3 +54,12 @@ fails. See [Claude Accounts](Claude-Accounts.md) for several logins. duolane
 uses the Codex CLI's login selected by `DUOLANE_CODEX_AUTH_FILE`, then
 `$CODEX_HOME/auth.json`, then `~/.codex/auth.json`. Use `codex login` to create
 it. Do not open or share credential files for troubleshooting.
+
+## Codex API key
+
+`DUOLANE_OPENAI_API_KEY` overrides the stored key. Stored keys are available on
+macOS and Linux only. `DUOLANE_CODEX_AUTH_ORDER` overrides `codex.authOrder` in
+`config.json` and accepts a comma-separated list of `chatgpt` and `api-key`. The
+default is `chatgpt`. A key does not opt in to API use by itself; API use is
+billed at OpenAI API rates. Restart the proxy after changing credentials or
+order. Use `duolane codex auth order --reset` to remove the saved order.

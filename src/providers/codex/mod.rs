@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod chat_completions;
 mod cli;
+pub mod cli_api_key;
 pub mod client;
 mod client_body;
 mod client_buffered;
@@ -43,13 +44,6 @@ mod websocket_stream;
 #[cfg(test)]
 mod websocket_test_support;
 
-use async_trait::async_trait;
-use axum::Json;
-use axum::response::{IntoResponse, Response};
-use http::StatusCode;
-use std::sync::Arc;
-use std::time::Instant;
-
 use crate::anthropic::error::json_error;
 use crate::anthropic::schema::MessagesRequest;
 use crate::anthropic::sse::usage_from_anthropic_sse;
@@ -58,6 +52,12 @@ use crate::logging::create_logger;
 use crate::provider::{CliHandlers, Provider, RequestContext};
 use crate::request_identity::ConversationIdentity;
 use crate::retry::compute_backoff_delay;
+use async_trait::async_trait;
+use axum::Json;
+use axum::response::{IntoResponse, Response};
+use http::StatusCode;
+use std::sync::Arc;
+use std::time::Instant;
 
 use self::auth::token_store::file_store;
 use self::client::CodexHttpClient;

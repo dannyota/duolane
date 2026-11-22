@@ -50,7 +50,7 @@ tiktoken-rs = { version = "0.12", default-features = false }
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", default-features = false, features = ["fs", "process"] }
+rustix = { version = "1", default-features = false, features = ["fs", "process", "termios"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

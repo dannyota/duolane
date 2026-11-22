@@ -14,7 +14,9 @@ fn codex_cmd() -> (Command, TempDir, std::path::PathBuf) {
     let auth_path = temp.path().join(".codex").join("auth.json");
     let mut cmd = Command::cargo_bin("duolane").unwrap();
     cmd.args(["codex", "auth", "status"]);
-    cmd.env("DUOLANE_CONFIG_DIR", temp.path());
+    cmd.env("DUOLANE_CONFIG_DIR", temp.path().canonicalize().unwrap());
+    cmd.env_remove("DUOLANE_CODEX_AUTH_ORDER");
+    cmd.env_remove("DUOLANE_OPENAI_API_KEY");
     cmd.env("DUOLANE_CODEX_AUTH_FILE", &auth_path);
     (cmd, temp, auth_path)
 }
@@ -45,7 +47,7 @@ fn codex_auth_status_reads_stored_auth() -> Result<(), Box<dyn std::error::Error
     let output = cmd.assert().success().get_output().stdout.clone();
     let out = String::from_utf8(output)?;
     let lines: Vec<_> = out.lines().collect();
-    assert_eq!(lines.len(), 3, "{out}");
+    assert_eq!(lines.len(), 6, "{out}");
     assert_eq!(lines[0], "Account: acct_1");
     assert!(
         lines[1].starts_with("Expires: 2100-01-01T00:00:00.000Z (in "),
@@ -54,6 +56,9 @@ fn codex_auth_status_reads_stored_auth() -> Result<(), Box<dyn std::error::Error
     assert!(lines[1].ends_with("s)"), "{out}");
     assert!(lines[2].starts_with("Storage: "), "{out}");
     assert!(lines[2].contains("(Codex CLI)"), "{out}");
+    assert_eq!(lines[3], "API key: none");
+    assert_eq!(lines[4], "Order: chatgpt (default)");
+    assert_eq!(lines[5], "Order uses API key: no");
     Ok(())
 }
 
@@ -109,12 +114,33 @@ fn codex_auth_status_expired_auth_shows_negative_seconds() -> Result<(), Box<dyn
     let output = cmd.assert().success().get_output().stdout.clone();
     let out = String::from_utf8(output)?;
     let lines: Vec<_> = out.lines().collect();
-    assert_eq!(lines.len(), 3, "{out}");
+    assert_eq!(lines.len(), 6, "{out}");
     assert!(lines[0].starts_with("Account:"), "{out}");
     assert!(
         lines[1].starts_with("Expires: 2000-01-01T00:00:00.000Z (in -"),
         "{out}"
     );
     assert!(lines[2].starts_with("Storage: "), "{out}");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_auth_status_inactive_unsafe_key_is_informational() -> Result<(), Box<dyn std::error::Error>>
+{
+    use std::os::unix::fs::symlink;
+    let (mut cmd, temp, auth_path) = codex_cmd();
+    write_auth(&auth_path, ACCESS_EXP_2100, Some("acct_1"), None);
+    let target = temp.path().join("other");
+    std::fs::create_dir(&target)?;
+    symlink(&target, temp.path().join("credentials"))?;
+    let output = cmd.output()?;
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout)?;
+    assert!(text.starts_with("Account: acct_1\nExpires:"));
+    assert!(text.contains("API key: unavailable"));
+    let output = cmd.env("DUOLANE_CODEX_AUTH_ORDER", "api-key").output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stdout)?.starts_with("Account: acct_1\nExpires:"));
     Ok(())
 }

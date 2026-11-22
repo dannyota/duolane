@@ -1,6 +1,20 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+pub(crate) fn environment_snapshot() -> HashMap<String, String> {
+    std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.into_string().ok()?;
+            if key.eq_ignore_ascii_case("DUOLANE_OPENAI_API_KEY")
+                || key.eq_ignore_ascii_case("OPENAI_API_KEY")
+            {
+                return None;
+            }
+            Some((key, value.into_string().ok()?))
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct DirResolverEnv {
     pub platform: String,
@@ -12,7 +26,7 @@ impl Default for DirResolverEnv {
     fn default() -> Self {
         Self {
             platform: std::env::consts::OS.into(),
-            env: std::env::vars().collect(),
+            env: environment_snapshot(),
             home: std::env::var("HOME")
                 .or_else(|_| std::env::var("USERPROFILE"))
                 .unwrap_or_else(|_| "/".to_string()),

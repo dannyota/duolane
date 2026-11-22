@@ -657,3 +657,170 @@ fn claude_accounts_selection_follows_config_alias() {
         b"default\n"
     );
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn codex_api_auth_cli_keeps_key_and_order_safe() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let dir = temp.path().canonicalize()?;
+    let run = |args: &[&str],
+               input: Option<&[u8]>,
+               extra: &[(&str, &str)]|
+     -> Result<std::process::Output, Box<dyn std::error::Error>> {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_duolane"));
+        command
+            .args(args)
+            .env("DUOLANE_CONFIG_DIR", &dir)
+            .env_remove("DUOLANE_CODEX_AUTH_ORDER")
+            .env_remove("DUOLANE_OPENAI_API_KEY")
+            .env("DUOLANE_OPENAI_BASE_URL", "invalid")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (key, value) in extra {
+            command.env(key, value);
+        }
+        let mut child = command.spawn()?;
+        if let Some(input) = input {
+            child.stdin.take().unwrap().write_all(input)?;
+        } else {
+            drop(child.stdin.take());
+        }
+        Ok(child.wait_with_output()?)
+    };
+    let result = run(
+        &["codex", "auth", "key", "set", "--no-verify"],
+        Some(b"toy-credential\n"),
+        &[],
+    )?;
+    assert!(result.status.success());
+    for (status_code, size, should_succeed) in [
+        (200, 2, true),
+        (401, 2, false),
+        (200, 1024 * 1024 + 1, false),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}/v1", listener.local_addr()?);
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let count = socket.read(&mut request).unwrap();
+            let expected = if should_succeed {
+                b"Bearer other-toy".as_slice()
+            } else {
+                b"Bearer failed-toy".as_slice()
+            };
+            let correct_key = request[..count]
+                .windows(expected.len())
+                .any(|part| part == expected);
+            let header = format!(
+                "HTTP/1.1 {status_code} response\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n"
+            );
+            let _ = socket.write_all(header.as_bytes());
+            let _ = socket.write_all(&vec![b'x'; size]);
+            correct_key
+        });
+        let result = run(
+            &["codex", "auth", "key", "set"],
+            Some(if should_succeed {
+                b"other-toy\n"
+            } else {
+                b"failed-toy\n"
+            }),
+            &[
+                ("DUOLANE_OPENAI_BASE_URL", &url),
+                ("DUOLANE_OPENAI_API_KEY", "env-toy"),
+            ],
+        )?;
+        assert!(server.join().unwrap());
+        assert_eq!(result.status.success(), should_succeed);
+        let stored = std::fs::read(dir.join("credentials/openai-api-key"))?;
+        assert!(stored == b"other-toy\n");
+        let entered = if should_succeed {
+            b"other-toy".as_slice()
+        } else {
+            b"failed-toy".as_slice()
+        };
+        assert!(!result.stdout.windows(entered.len()).any(|v| v == entered));
+        assert!(!result.stderr.windows(entered.len()).any(|v| v == entered));
+    }
+    let order = run(&["codex", "auth", "order"], None, &[])?;
+    assert!(order.status.success());
+    assert!(String::from_utf8_lossy(&order.stdout).contains("chatgpt"));
+    let status = run(&["codex", "auth", "status"], None, &[])?;
+    assert!(!status.status.success());
+    assert!(!status.stdout.windows(9).any(|v| v == b"other-toy"));
+    assert!(!status.stderr.windows(9).any(|v| v == b"other-toy"));
+    let change = run(&["codex", "auth", "order", "api-key"], None, &[])?;
+    assert!(change.status.success());
+    assert!(String::from_utf8_lossy(&change.stdout).contains("Restart"));
+    let status = run(&["codex", "auth", "status"], None, &[])?;
+    assert!(status.status.success());
+    assert!(!status.stdout.windows(9).any(|v| v == b"other-toy"));
+    assert!(!status.stderr.windows(9).any(|v| v == b"other-toy"));
+    let removed = run(
+        &["codex", "auth", "key", "remove"],
+        None,
+        &[("DUOLANE_OPENAI_API_KEY", "toy-env")],
+    )?;
+    assert!(removed.status.success());
+    assert!(String::from_utf8_lossy(&removed.stdout).contains("environment key remains"));
+    assert!(!removed.stdout.windows(7).any(|v| v == b"toy-env"));
+    let reset = run(&["codex", "auth", "order", "--reset"], None, &[])?;
+    assert!(reset.status.success());
+    assert!(String::from_utf8_lossy(&reset.stdout).contains("chatgpt"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_api_auth_cli_rejects_non_unicode_key_without_panic()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::ffi::OsStringExt;
+    let temp = TempDir::new()?;
+    let secret = b"toy-nonunicode-\xff";
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_duolane"))
+        .args(["codex", "auth", "status"])
+        .env("DUOLANE_CONFIG_DIR", temp.path())
+        .env(
+            "DUOLANE_OPENAI_API_KEY",
+            std::ffi::OsString::from_vec(secret.to_vec()),
+        )
+        .output()?;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output
+            .stdout
+            .windows(b"No Codex credentials".len())
+            .any(|s| s == b"No Codex credentials")
+    );
+    assert!(
+        output
+            .stdout
+            .windows(b"invalid OpenAI API key".len())
+            .any(|s| s == b"invalid OpenAI API key")
+    );
+    let prefix = b"toy-nonunicode-";
+    assert!(!output.stdout.windows(prefix.len()).any(|s| s == prefix));
+    assert!(!output.stderr.windows(prefix.len()).any(|s| s == prefix));
+    assert!(
+        !output
+            .stderr
+            .windows(b"panicked".len())
+            .any(|s| s == b"panicked")
+    );
+    Ok(())
+}
+
+#[test]
+fn codex_api_auth_cli_rejects_positional_key_without_disclosure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let secret = b"positional-toy";
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_duolane"))
+        .args(["codex", "auth", "key", "set", "positional-toy"])
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!output.stdout.windows(secret.len()).any(|s| s == secret));
+    assert!(!output.stderr.windows(secret.len()).any(|s| s == secret));
+    Ok(())
+}
