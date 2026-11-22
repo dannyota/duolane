@@ -9,7 +9,44 @@ use super::constants::{CLIENT_ID, ISSUER, REFRESH_MARGIN_MS};
 use super::jwt::{TokenResponse, extract_account_id, validate_token_response};
 use super::token_store::{CodexTokenStore, StoredAuth};
 use crate::auth::AuthStorage;
+use crate::config::codex_auth::AuthSource;
+use crate::providers::codex::sources::CredentialId;
 use crate::providers::codex::translate::reasoning_signature::ReasoningAccount;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AuthFailure {
+    Rejected(CredentialId),
+    Transient,
+    Other,
+}
+
+struct AuthFailureContext {
+    kind: AuthFailure,
+    message: String,
+}
+
+impl std::fmt::Display for AuthFailureContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::fmt::Debug for AuthFailureContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthFailureContext").finish_non_exhaustive()
+    }
+}
+
+fn classified(error: anyhow::Error, kind: AuthFailure) -> anyhow::Error {
+    let message = error.to_string();
+    error.context(AuthFailureContext { kind, message })
+}
+
+pub fn classify_auth_failure(error: &anyhow::Error) -> AuthFailure {
+    error
+        .downcast_ref::<AuthFailureContext>()
+        .map_or(AuthFailure::Other, |context| context.kind)
+}
 
 const MAX_REFRESH_RESPONSE_BYTES: usize = 64 * 1024;
 const SAVE_ATTEMPTS: u32 = 3;
@@ -89,11 +126,11 @@ impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
         let refresh_guard = self.refresh_lock.clone().lock_owned().await;
         let file_lock = match with_store(&self.store, |store| store.lock_for_refresh()).await {
             Ok(file_lock) => file_lock,
-            Err(err) if force => return Err(err),
+            Err(err) if force => return Err(classified(err, AuthFailure::Transient)),
             Err(err) => {
                 return match self.load_auth().await {
                     Ok(Some(current)) if current.expires > now_ms() => Ok(current),
-                    _ => Err(err),
+                    _ => Err(classified(err, AuthFailure::Transient)),
                 };
             }
         };
@@ -169,26 +206,51 @@ async fn exchange_refresh_token<S: AuthStorage<StoredAuth> + 'static>(
         .form(&form)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("refresh network error: {e}"))?;
+        .map_err(|e| {
+            classified(
+                anyhow::anyhow!("refresh network error: {e}"),
+                AuthFailure::Transient,
+            )
+        })?;
 
     let status = resp.status().as_u16();
     if resp.status().is_client_error() {
         drop(resp);
-        if let Some(latest) = with_store(&store, |store| store.load_auth()).await?
+        if let Some(latest) = with_store(&store, |store| store.load_auth())
+            .await
+            .map_err(|error| {
+                if matches!(status, 408 | 429) {
+                    classified(error, AuthFailure::Transient)
+                } else {
+                    error
+                }
+            })?
             && latest.refresh != current.refresh
         {
             return Ok(latest);
         }
         if matches!(status, 408 | 429) {
-            anyhow::bail!("Token refresh failed: {status}");
+            return Err(classified(
+                anyhow::anyhow!("Token refresh failed: {status}"),
+                AuthFailure::Transient,
+            ));
         }
-        anyhow::bail!(
-            "Codex rejected the stored refresh token ({status}); run `codex login` to sign in again"
-        );
+        let id = CredentialId::new(AuthSource::ChatGpt, current.refresh.as_bytes());
+        return Err(classified(
+            anyhow::anyhow!(
+                "Codex rejected the stored refresh token ({status}); run `codex login` to sign in again"
+            ),
+            AuthFailure::Rejected(id),
+        ));
     }
 
     if !resp.status().is_success() {
-        anyhow::bail!("Token refresh failed: {status}");
+        let error = anyhow::anyhow!("Token refresh failed: {status}");
+        return Err(if resp.status().is_server_error() {
+            classified(error, AuthFailure::Transient)
+        } else {
+            error
+        });
     }
 
     let body = read_refresh_body(resp).await?;
@@ -243,11 +305,12 @@ async fn read_refresh_body(mut resp: reqwest::Response) -> Result<Vec<u8>, anyho
         anyhow::bail!("token refresh response exceeds {MAX_REFRESH_RESPONSE_BYTES} bytes");
     }
     let mut body = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| anyhow::anyhow!("refresh network error: {e}"))?
-    {
+    while let Some(chunk) = resp.chunk().await.map_err(|e| {
+        classified(
+            anyhow::anyhow!("refresh network error: {e}"),
+            AuthFailure::Transient,
+        )
+    })? {
         if body.len().saturating_add(chunk.len()) > MAX_REFRESH_RESPONSE_BYTES {
             anyhow::bail!("token refresh response exceeds {MAX_REFRESH_RESPONSE_BYTES} bytes");
         }
@@ -269,6 +332,124 @@ mod tests {
 
     fn test_store() -> CodexTokenStore<InMemoryAuthStore<StoredAuth>> {
         CodexTokenStore::new(InMemoryAuthStore::new())
+    }
+
+    struct FailingReadStore;
+
+    impl AuthStorage<StoredAuth> for FailingReadStore {
+        fn load(&self) -> anyhow::Result<Option<StoredAuth>> {
+            anyhow::bail!("toy read failure")
+        }
+        fn save(&self, _: StoredAuth) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn clear(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn path(&self) -> String {
+            "toy".into()
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_status_keeps_classification_when_reread_fails() {
+        for status in [408, 429, 400] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                assert!(stream.read(&mut request).unwrap() > 0);
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                )
+                .unwrap();
+            });
+            let result = exchange_refresh_token(
+                crate::tls::client_builder().build().unwrap(),
+                format!("http://{addr}/oauth/token"),
+                Arc::new(CodexTokenStore::new(FailingReadStore)),
+                StoredAuth {
+                    access: "toy-access".into(),
+                    refresh: "toy-refresh".into(),
+                    expires: 0,
+                    account_id: None,
+                },
+            )
+            .await;
+            server.join().unwrap();
+            let Err(error) = result else {
+                panic!("expected refresh failure")
+            };
+            assert_eq!(error.to_string(), "toy read failure");
+            let expected = if status == 400 {
+                AuthFailure::Other
+            } else {
+                AuthFailure::Transient
+            };
+            assert!(classify_auth_failure(&error) == expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_failures_are_classified_at_the_origin() {
+        for status in [Some(400), Some(401), Some(408), Some(429), Some(500), None] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                assert!(stream.read(&mut request).unwrap() > 0);
+                if let Some(status) = status {
+                    write!(
+                        stream,
+                        "HTTP/1.1 {status} Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    )
+                    .unwrap();
+                }
+            });
+            let store = test_store();
+            store
+                .save_auth(StoredAuth {
+                    access: "toy-access".into(),
+                    refresh: "toy-attempt".into(),
+                    expires: 0,
+                    account_id: None,
+                })
+                .unwrap();
+            let manager = CodexAuthManager::new_with_token_endpoint(
+                store,
+                format!("http://{addr}/oauth/token"),
+            );
+            let result = manager.get_auth().await;
+            server.join().unwrap();
+            let Err(error) = result else {
+                panic!("expected refresh failure");
+            };
+            let kind = classify_auth_failure(&error);
+            if matches!(status, Some(400 | 401)) {
+                assert!(
+                    kind == AuthFailure::Rejected(CredentialId::new(
+                        AuthSource::ChatGpt,
+                        b"toy-attempt"
+                    ))
+                );
+                assert!(
+                    kind != AuthFailure::Rejected(CredentialId::new(
+                        AuthSource::ChatGpt,
+                        b"toy-replacement"
+                    ))
+                );
+            } else {
+                assert!(kind == AuthFailure::Transient);
+            }
+        }
+        let result = CodexAuthManager::new(test_store()).get_auth().await;
+        let Err(error) = result else {
+            panic!("expected missing auth failure");
+        };
+        assert!(classify_auth_failure(&error) == AuthFailure::Other);
     }
 
     #[tokio::test]
@@ -500,12 +681,9 @@ mod tests {
             ),
             unreachable.clone(),
         );
-        let error = impatient
-            .force_refresh("stale-access")
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("timed out"), "{error}");
+        let error = impatient.force_refresh("stale-access").await.unwrap_err();
+        assert!(classify_auth_failure(&error) == AuthFailure::Transient);
+        assert!(error.to_string().contains("timed out"));
 
         let manager = Arc::new(CodexAuthManager::new_with_token_endpoint(
             CodexTokenStore::new(CodexCliAuthStore::new(path.clone())),
