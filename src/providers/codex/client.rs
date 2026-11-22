@@ -616,7 +616,7 @@ pub(super) fn explicit_permanent_buffered_error(
     })
 }
 
-fn trace_auth_failure(budget: &super::recovery::RecoveryBudget, error: &anyhow::Error) {
+pub(super) fn trace_auth_failure(budget: &super::recovery::RecoveryBudget, error: &anyhow::Error) {
     if let super::auth::manager::AuthFailure::Rejected(id) =
         super::auth::manager::classify_auth_failure(error)
     {

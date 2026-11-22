@@ -45,21 +45,6 @@ mod websocket_stream;
 #[cfg(test)]
 mod websocket_test_support;
 
-use crate::anthropic::error::json_error;
-use crate::anthropic::schema::MessagesRequest;
-use crate::anthropic::sse::usage_from_anthropic_sse;
-use crate::config;
-use crate::logging::create_logger;
-use crate::provider::{CliHandlers, Provider, RequestContext};
-use crate::request_identity::ConversationIdentity;
-use crate::retry::compute_backoff_delay;
-use async_trait::async_trait;
-use axum::Json;
-use axum::response::{IntoResponse, Response};
-use http::StatusCode;
-use std::sync::Arc;
-use std::time::Instant;
-
 use self::auth::token_store::file_store;
 use self::client::CodexHttpClient;
 use self::compaction::{
@@ -76,7 +61,20 @@ use self::translate::accumulate::accumulate_response_with_traffic;
 use self::translate::model_allowlist::{ResolvedModel, resolve_model_request_with_config_override};
 use self::translate::request::{TranslateOptions, is_compact_messages_request, translate_request};
 use self::translate::stream::translate_stream_bytes_with_traffic;
-
+use crate::anthropic::error::json_error;
+use crate::anthropic::schema::MessagesRequest;
+use crate::anthropic::sse::usage_from_anthropic_sse;
+use crate::config;
+use crate::logging::create_logger;
+use crate::provider::{CliHandlers, Provider, RequestContext};
+use crate::request_identity::ConversationIdentity;
+use crate::retry::compute_backoff_delay;
+use async_trait::async_trait;
+use axum::Json;
+use axum::response::{IntoResponse, Response};
+use http::StatusCode;
+use std::sync::Arc;
+use std::time::Instant;
 pub(crate) fn clear_session_compaction(session_id: &str) {
     compaction::clear_compaction(session_id);
 }
@@ -169,13 +167,7 @@ impl CodexProvider {
                 conversation_identity.as_ref(),
             ) {
                 Ok(request) => request,
-                Err(error) => {
-                    return json_error(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_request_error",
-                        error.to_string(),
-                    );
-                }
+                Err(error) => return search::invalid_search_response(&ctx, error.to_string()),
             };
             let log = create_logger("codex");
             let started_at = Instant::now();
@@ -205,7 +197,7 @@ impl CodexProvider {
                             ),
                         ])),
                     );
-                    return map_codex_error_to_response(&error);
+                    return search::tracked_error_response(&ctx, error);
                 }
             };
             log.info(
@@ -228,7 +220,7 @@ impl CodexProvider {
             if let Some(monitor) = ctx.monitor.as_ref() {
                 monitor.usage_updated(&ctx.req_id, Some(input_tokens), Some(output_tokens));
             }
-            return search::anthropic_search_response(
+            let response = search::anthropic_search_response(
                 &search_response,
                 &query,
                 &message_id,
@@ -237,6 +229,8 @@ impl CodexProvider {
                 input_tokens,
                 ctx.traffic.as_deref(),
             );
+            ctx.recovery_budget.mark_committed();
+            return response;
         }
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &resolved.model);
@@ -702,6 +696,221 @@ mod tests {
 
     use super::provider_test_support::*;
     use super::*;
+
+    #[tokio::test]
+    async fn tracked_standalone_search_commits_success_and_exposes_quota_failure() {
+        use super::sources::{FailureKind, ReplayGate, SourceAttempt, SourceFailure};
+        use crate::config::codex_auth::AuthSource;
+        use tokio::io::AsyncWriteExt;
+        for success in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = super::client_test_support::read_http_request(&mut stream).await;
+                let (status, body) = if success {
+                    ("200 OK", br#"{"output":"ok","results":[]}"#.as_slice())
+                } else {
+                    (
+                        "429 Too Many Requests",
+                        br#"{"error":{"type":"usage_limit_reached","resets_at":2000000000}}"#
+                            .as_slice(),
+                    )
+                };
+                let headers = format!(
+                    "HTTP/1.1 {status}\r\ncontent-length: {}\r\nretry-after: 0\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+            });
+            let client = Arc::new(super::client_test_support::authenticated_http_test_client(
+                format!("http://{addr}/responses"),
+            ));
+            let provider = CodexProvider { client };
+            let body = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol", "max_tokens":64, "messages":[{"role":"user","content":"Perform a web search for the query: hello"}], "tools":[{"type":"web_search_20250305","name":"web_search"}], "tool_choice":{"type":"tool","name":"web_search"}})).unwrap();
+            let gate = ReplayGate::new(true);
+            let attempt = SourceAttempt::new(
+                AuthSource::ChatGpt,
+                &live_test_context("search"),
+                gate.clone(),
+            );
+            let response = provider
+                .handle_messages_inner(body, attempt.context, None)
+                .await;
+            if success {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert!(gate.hosted());
+                assert!(gate.committed());
+                assert!(!gate.may_switch(
+                    FailureKind::UsageLimit,
+                    super::api::SendEvidence::DeniedBeforeExecution
+                ));
+            } else {
+                let failure = response.extensions().get::<Arc<SourceFailure>>().unwrap();
+                assert!(failure.kind == FailureKind::UsageLimit);
+                assert_eq!(
+                    failure.error.usage_limit.as_ref().unwrap().resets_at,
+                    Some(2_000_000_000)
+                );
+                assert!(gate.may_switch(failure.kind, failure.send));
+                assert!(!gate.committed());
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_standalone_search_has_final_unsent_typed_failure() {
+        use super::sources::{FailureKind, ReplayGate, SourceAttempt, SourceFailure};
+        use crate::config::codex_auth::AuthSource;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Arc::new(super::client_test_support::authenticated_http_test_client(
+            format!("http://{}/responses", listener.local_addr().unwrap()),
+        ));
+        let provider = CodexProvider { client };
+        let body: MessagesRequest = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol", "max_tokens":64, "messages":[], "tools":[{"type":"web_search_20250305","name":"web_search"}], "tool_choice":{"type":"tool","name":"web_search"}})).unwrap();
+        let context = live_test_context("invalid-search");
+        let old = provider
+            .handle_messages_inner(body.clone(), context.clone(), None)
+            .await;
+        let gate = ReplayGate::new(true);
+        let attempt = SourceAttempt::new(AuthSource::ChatGpt, &context, gate);
+        let response = provider
+            .handle_messages_inner(body, attempt.context, None)
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let failure = response.extensions().get::<Arc<SourceFailure>>().unwrap();
+        assert!(failure.kind == FailureKind::Final);
+        assert!(failure.send == super::api::SendEvidence::NotSent);
+        assert!(failure.credential.is_none());
+        assert_eq!(old.status(), response.status());
+        assert!(
+            old.into_body().collect().await.unwrap().to_bytes()
+                == response.into_body().collect().await.unwrap().to_bytes()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn tracked_search_permanent_errors_precede_refresh_and_retry() {
+        use super::sources::{FailureKind, ReplayGate, SourceAttempt, SourceFailure};
+        use crate::config::codex_auth::AuthSource;
+        use tokio::io::AsyncWriteExt;
+        for (status, body) in [
+            (
+                401,
+                br#"{"error":{"type":"invalid_request_error","message":"invalid"}}"#.as_slice(),
+            ),
+            (
+                503,
+                br#"{"error":{"message":"context window exceeded"}}"#.as_slice(),
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = super::client_test_support::read_http_request(&mut stream).await;
+                let header = format!(
+                    "HTTP/1.1 {status} Error\r\ncontent-length: {}\r\nretry-after: 0\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+                tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept())
+                    .await
+                    .is_err()
+            });
+            let client = Arc::new(super::client_test_support::authenticated_http_test_client(
+                format!("http://{addr}/responses"),
+            ));
+            let provider = CodexProvider { client };
+            let body = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol", "max_tokens":64, "messages":[{"role":"user","content":"Perform a web search for the query: hello"}], "tools":[{"type":"web_search_20250305","name":"web_search"}], "tool_choice":{"type":"tool","name":"web_search"}})).unwrap();
+            let attempt = SourceAttempt::new(
+                AuthSource::ChatGpt,
+                &live_test_context("permanent-search"),
+                ReplayGate::new(true),
+            );
+            let response = provider
+                .handle_messages_inner(body, attempt.context, None)
+                .await;
+            let failure = response.extensions().get::<Arc<SourceFailure>>().unwrap();
+            assert!(failure.kind == FailureKind::Final);
+            assert_eq!(failure.error.status, status);
+            assert!(server.await.unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_search_hosted_unauthorized_and_quota_context_are_final() {
+        use super::sources::{FailureKind, ReplayGate, SourceAttempt, SourceFailure};
+        use crate::config::codex_auth::AuthSource;
+        use tokio::io::AsyncWriteExt;
+        for case in 0..3 {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let client = Arc::new(super::client_test_support::authenticated_http_test_client(
+                format!("http://{addr}/responses"),
+            ));
+            let server_client = client.clone();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = super::client_test_support::read_http_request(&mut stream).await;
+                let mut auth = super::client_test_support::http_test_auth();
+                auth.access = "rotated-test".into();
+                server_client.auth_manager().set_test_auth(auth);
+                let (status, body) = match case {
+                    0 => (401, br#"{"output":"done","results":[],"error":{"message":"unauthorized"}}"#.as_slice()),
+                    1 => (429, br#"{"error":{"type":"usage_limit_reached","message":"context window exceeded","resets_at":2000000000}}"#.as_slice()),
+                    _ => (429, br#"{"type":"response.failed","response":{"error":{"type":"usage_limit_reached","code":"context_length_exceeded","message":"input too long","resets_at":2000000000}}}"#.as_slice()),
+                };
+                let header = format!(
+                    "HTTP/1.1 {status} Error\r\ncontent-length: {}\r\nretry-after: 0\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+                tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept())
+                    .await
+                    .is_err()
+            });
+            let provider = CodexProvider { client };
+            let body = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol", "max_tokens":64, "messages":[{"role":"user","content":"Perform a web search for the query: hello"}], "tools":[{"type":"web_search_20250305","name":"web_search"}], "tool_choice":{"type":"tool","name":"web_search"}})).unwrap();
+            let gate = ReplayGate::new(true);
+            let attempt = SourceAttempt::new(
+                AuthSource::ChatGpt,
+                &live_test_context("search-error"),
+                gate.clone(),
+            );
+            let response = provider
+                .handle_messages_inner(body, attempt.context, None)
+                .await;
+            let failure = response.extensions().get::<Arc<SourceFailure>>().unwrap();
+            assert!(failure.kind == FailureKind::Final);
+            assert!(failure.error.usage_limit.is_none());
+            if case == 0 {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                assert!(gate.hosted());
+            } else {
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(payload["error"]["type"], "invalid_request_error");
+                assert!(
+                    payload["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("prompt is too long")
+                );
+            }
+            assert!(server.await.unwrap());
+        }
+    }
 
     #[allow(clippy::result_large_err)]
     #[tokio::test]
