@@ -1,3 +1,4 @@
+pub mod api;
 pub mod auth;
 pub mod chat_completions;
 mod cli;
@@ -88,7 +89,6 @@ impl Default for CodexProvider {
         Self::new()
     }
 }
-
 impl CodexProvider {
     pub fn new() -> Self {
         Self {

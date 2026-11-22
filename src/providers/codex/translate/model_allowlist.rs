@@ -51,7 +51,7 @@ pub fn is_family_alias(model: &str) -> bool {
     FAMILY_ALIASES.contains(&model.strip_prefix("anthropic-").unwrap_or(model))
 }
 
-fn version(id: &str, family: &str) -> Option<[String; 3]> {
+pub(in crate::providers::codex) fn version(id: &str, family: &str) -> Option<[String; 3]> {
     let suffix = format!("-{family}");
     let numbers = id.strip_prefix("gpt-")?.strip_suffix(&suffix)?;
     let parts: Vec<_> = numbers.split('.').collect();
