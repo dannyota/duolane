@@ -53,6 +53,7 @@ pub struct LiveStreamTranslator {
     model: String,
     message_started: bool,
     http_tool_commits: bool,
+    output_limit: Option<usize>,
     pub(super) blocks_by_output_index: HashMap<usize, LiveBlock>,
     pub(super) item_id_to_output_index: HashMap<String, usize>,
     pub(super) anthropic_index: usize,
@@ -84,6 +85,7 @@ impl LiveStreamTranslator {
             model: model.into(),
             message_started: false,
             http_tool_commits: false,
+            output_limit: None,
             blocks_by_output_index: HashMap::new(),
             item_id_to_output_index: HashMap::new(),
             anthropic_index: 0,
@@ -115,6 +117,51 @@ impl LiveStreamTranslator {
     pub(in crate::providers::codex) fn with_http_tool_commits(mut self, enabled: bool) -> Self {
         self.http_tool_commits = enabled;
         self
+    }
+
+    pub(in crate::providers::codex) fn with_output_limit(mut self, limit: usize) -> Self {
+        self.output_limit = Some(limit);
+        self
+    }
+
+    pub(super) fn check_web_output_limit(&self, existing: usize) -> Result<(), String> {
+        let Some(limit) = self.output_limit else {
+            return Ok(());
+        };
+        let results = self.web_search_results.iter().fold(0usize, |sum, result| {
+            sum.saturating_add(
+                result
+                    .title
+                    .len()
+                    .saturating_add(result.url.len())
+                    .saturating_mul(6),
+            )
+            .saturating_add(128)
+        });
+        let searches = self.web_searches.iter().fold(0usize, |sum, search| {
+            sum.saturating_add(2048)
+                .saturating_add(search.id.len().saturating_mul(12))
+                .saturating_add(search.query.len().saturating_mul(36))
+                .saturating_add(results)
+        });
+        let text = self.deferred_text.iter().fold(0usize, |sum, (_, text)| {
+            sum.saturating_add(512)
+                .saturating_add(text.len().saturating_mul(6))
+        });
+        let estimate = existing
+            .saturating_add(2048)
+            .saturating_add(
+                self.message_id
+                    .len()
+                    .saturating_add(self.model.len())
+                    .saturating_mul(6),
+            )
+            .saturating_add(searches)
+            .saturating_add(text);
+        if estimate > limit {
+            return Err("Codex translated output exceeded safe limits".to_owned());
+        }
+        Ok(())
     }
 
     pub(super) fn next_content_index(&mut self) -> usize {

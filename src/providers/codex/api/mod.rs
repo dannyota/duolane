@@ -1,6 +1,9 @@
 mod catalog;
 mod error;
 pub mod messages;
+pub mod messages_live;
+#[cfg(test)]
+mod messages_live_tests;
 #[cfg(test)]
 mod messages_tests;
 mod sanitize;

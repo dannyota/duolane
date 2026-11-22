@@ -208,7 +208,7 @@ async fn buffered_hosted_eof_vetoes_replay() {
     server.abort();
 }
 
-fn test_context() -> crate::provider::RequestContext {
+pub(super) fn test_context() -> crate::provider::RequestContext {
     crate::provider::RequestContext {
         recovery_budget: Default::default(),
         req_id: String::new(),
@@ -584,4 +584,86 @@ fn explicit_client_error_with_server_code_is_final_and_redacted() {
         assert!(!failure.error.message.contains("private sentinel"));
         assert!(!ReplayGate::new(false).may_switch(FailureKind::Final, failure.send));
     }
+}
+
+#[tokio::test]
+async fn live_denial_is_typed_before_commit() {
+    use crate::config::codex_auth::AuthSource;
+    use crate::providers::codex::{
+        api::{ApiClient, ApiFailureKind, messages_live::stream_once},
+        auth::api_key::OpenAiKey,
+        sources::{ReplayGate, SourceAttempt},
+        translate::model_allowlist::resolve_tier_model_alias,
+    };
+    use axum::{Router, http::StatusCode, routing::post};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = url::Url::parse(&format!("http://{}/v1", listener.local_addr().unwrap())).unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/v1/responses", post(|| async { StatusCode::UNAUTHORIZED })),
+        )
+        .await
+        .unwrap()
+    });
+    let api = ApiClient::new(url, OpenAiKey::parse(b"toy-key").unwrap()).unwrap();
+    let gate = ReplayGate::new(false);
+    let attempt = SourceAttempt::new(AuthSource::ApiKey, &test_context(), gate.clone());
+    let body = serde_json::from_value(
+        json!({"model":"client", "stream":true, "messages":[{"role":"user","content":"hello"}]}),
+    )
+    .unwrap();
+    let error = match stream_once(&body, &resolve_tier_model_alias("gpt-5.5"), &api, &attempt).await
+    {
+        Ok(_) => panic!("expected denial"),
+        Err(e) => e,
+    };
+    assert_eq!(error.kind, ApiFailureKind::Rejected);
+    assert!(!gate.committed());
+    server.abort();
+}
+
+#[tokio::test]
+async fn live_committed_failure_stays_in_sanitized_stream() {
+    use crate::config::codex_auth::AuthSource;
+    use crate::providers::codex::{
+        api::{ApiClient, messages_live::stream_once},
+        auth::api_key::OpenAiKey,
+        sources::{ReplayGate, SourceAttempt},
+        translate::model_allowlist::resolve_tier_model_alias,
+    };
+    use axum::{Router, routing::post};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = url::Url::parse(&format!("http://{}/v1", listener.local_addr().unwrap())).unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/v1/responses", post(move || { let counter = counter.clone(); async move { counter.fetch_add(1, Ordering::SeqCst); concat!("data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n", "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hello\"}\n\n", "data: {\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"message\":\"private sentinel\"}}\n\n") } }))).await.unwrap()
+    });
+    let api = ApiClient::new(url, OpenAiKey::parse(b"toy-key").unwrap()).unwrap();
+    let gate = ReplayGate::new(false);
+    let attempt = SourceAttempt::new(AuthSource::ApiKey, &test_context(), gate.clone());
+    let body = serde_json::from_value(
+        json!({"model":"client", "stream":true, "messages":[{"role":"user","content":"hello"}]}),
+    )
+    .unwrap();
+    let response =
+        match stream_once(&body, &resolve_tier_model_alias("gpt-5.5"), &api, &attempt).await {
+            Ok(r) => r,
+            Err(_) => panic!("expected stream"),
+        };
+    assert!(gate.committed());
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let output = std::str::from_utf8(&bytes).unwrap();
+    assert!(output.contains("hello"));
+    assert!(output.contains("event: error"));
+    assert!(!output.contains("private sentinel"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    server.abort();
 }
