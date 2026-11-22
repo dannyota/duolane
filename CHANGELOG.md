@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+### Fixed
+
+- A non-streaming Codex request is not sent again after the response confirmed
+  that a hosted web search ran. A cut-off response after a hosted search now
+  returns an error instead of running the search twice.
+
 ## 0.5.0
 
 ### Added
