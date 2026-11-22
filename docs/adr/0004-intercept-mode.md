@@ -27,10 +27,11 @@ command, and trust limited to the Claude Code API host.
   operating system trust store and needs no `sudo`.
 - The certificate authority is limited to `api.anthropic.com` by a critical name
   constraint, and its private key is discarded once it has signed one leaf.
-- `duolane claude` starts Claude Code in this mode and changes nothing
-  persistent. `duolane intercept setup` writes the same settings for background
+- `duolane claude` starts Claude Code in this mode without persisting proxy
+  settings. `duolane intercept setup` writes the same settings for background
   agents, and `duolane intercept cleanup` finds and removes everything setup
-  created.
+  created. Opt-in [Claude account selection](../design/claude-accounts.md) has
+  separate local state and does not change proxy settings.
 - The [intercept design](../design/intercept.md) owns the rules.
 
 ## Consequences

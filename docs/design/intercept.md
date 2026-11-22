@@ -10,7 +10,9 @@ A [spike](#spike-results) confirmed the behavior this design depends on. The
 
 1. `duolane claude [args]` checks that the proxy listener presents duolane's own
    leaf certificate, then starts `claude` with the [environment](#environment)
-   below. Nothing persistent changes, so there is nothing to clean up afterward.
+   below. The wrapper does not write proxy settings. When a named account is
+   selected, the [account launcher](claude-accounts.md) can link one transcript
+   folder after confirmation.
 2. Claude Code sends `CONNECT host:port` to duolane's proxy listener for each
    host, with the proxy password.
 3. For `api.anthropic.com:443`, duolane answers the TLS handshake with its own

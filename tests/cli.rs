@@ -291,3 +291,369 @@ fn agents_setup_and_remove_preserve_custom_files_and_symlinks()
     assert!(!dir.join("luna.md").exists());
     Ok(())
 }
+
+#[test]
+fn claude_accounts_help() {
+    let output = Command::cargo_bin("duolane")
+        .unwrap()
+        .env_clear()
+        .args(["accounts", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("login") && help.contains("use") && !help.contains("run"));
+    for (command, description) in [
+        ("login", "Sign in to a named Claude profile"),
+        (
+            "use",
+            "Choose the profile for the next duolane claude launch",
+        ),
+    ] {
+        assert!(help.contains(description));
+        let output = Command::cargo_bin("duolane")
+            .unwrap()
+            .env_clear()
+            .args(["accounts", command, "--help"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8(output.stdout).unwrap().contains("[NAME]"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_accounts_named_login_without_stdin() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = TempDir::new().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(bin.join("claude"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = root.path().join("config");
+    let run = |name: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_duolane"))
+            .env_clear()
+            .env("HOME", root.path())
+            .env("PATH", &bin)
+            .env("DUOLANE_CONFIG_DIR", &config)
+            .env("DUOLANE_STATE_DIR", root.path().join("state"))
+            .args(["accounts", "login", name])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    assert!(run("backup").status.success());
+    assert!(
+        config
+            .join("claude-accounts/backup/.duolane-ready")
+            .exists()
+    );
+    assert!(!run("default").status.success());
+    assert!(!run("Bad!").status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_accounts_named_selection_without_stdin() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = TempDir::new().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(bin.join("claude"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = root.path().join("config");
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_duolane"))
+            .env_clear()
+            .env("HOME", root.path())
+            .env("PATH", &bin)
+            .env("DUOLANE_CONFIG_DIR", &config)
+            .env("DUOLANE_STATE_DIR", root.path().join("state"))
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    assert!(
+        Command::cargo_bin("duolane")
+            .unwrap()
+            .env_clear()
+            .env("HOME", root.path())
+            .env("PATH", &bin)
+            .env("DUOLANE_CONFIG_DIR", &config)
+            .env("DUOLANE_STATE_DIR", root.path().join("state"))
+            .args(["accounts", "login"])
+            .write_stdin("backup\n")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let selector = config.join("claude-accounts/.selected");
+    assert!(run(&["accounts", "use", "backup"]).status.success());
+    assert_eq!(std::fs::read(&selector).unwrap(), b"backup\n");
+    assert!(run(&["accounts", "use", "default"]).status.success());
+    assert_eq!(std::fs::read(&selector).unwrap(), b"default\n");
+    for (name, message) in [
+        ("nope", "unknown profile"),
+        ("Bad!", "invalid profile name"),
+    ] {
+        let output = run(&["accounts", "use", name]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(message));
+        assert_eq!(std::fs::read(&selector).unwrap(), b"default\n");
+    }
+    std::fs::create_dir(config.join("claude-accounts/unready")).unwrap();
+    std::fs::set_permissions(
+        config.join("claude-accounts/unready"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        config.join("claude-accounts/backup"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    for name in ["unready", "backup"] {
+        let output = run(&["accounts", "use", name]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unknown profile"));
+        assert_eq!(std::fs::read(&selector).unwrap(), b"default\n");
+    }
+    std::fs::write(&selector, b"malformed").unwrap();
+    assert!(!run(&["accounts", "use", "default"]).status.success());
+    assert_eq!(std::fs::read(&selector).unwrap(), b"malformed");
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_accounts_login_registers_only_success() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = TempDir::new().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let fake = bin.join("claude");
+    std::fs::write(&fake, "#!/bin/sh\n[ \"$*\" = 'auth login --claudeai' ] && [ \"$CLAUDE_CONFIG_DIR\" = \"$EXPECTED\" ] && [ \"$FAIL\" != 1 ]\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = root.path().join("config");
+    let run = |name: &str, fail: &str| {
+        Command::cargo_bin("duolane")
+            .unwrap()
+            .env_clear()
+            .env("PATH", &bin)
+            .env("HOME", root.path())
+            .env("DUOLANE_CONFIG_DIR", &config)
+            .env("DUOLANE_STATE_DIR", root.path().join("state"))
+            .env(
+                "EXPECTED",
+                root.path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("config/claude-accounts")
+                    .join(name),
+            )
+            .env("FAIL", fail)
+            .args(["accounts", "login"])
+            .write_stdin(format!("{name}\n"))
+            .output()
+            .unwrap()
+    };
+    assert!(!run("failed", "1").status.success());
+    assert!(
+        !config
+            .join("claude-accounts/failed/.duolane-ready")
+            .exists()
+    );
+    assert!(run("backup", "0").status.success());
+    assert!(
+        config
+            .join("claude-accounts/backup/.duolane-ready")
+            .exists()
+    );
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(config.join("claude-accounts/backup/.duolane-lock"))
+        .unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    assert!(!run("backup", "0").status.success());
+    drop(lock);
+    assert!(run("backup", "0").status.success());
+    let override_result = Command::cargo_bin("duolane")
+        .unwrap()
+        .env_clear()
+        .env("HOME", root.path())
+        .env("PATH", &bin)
+        .env("DUOLANE_CONFIG_DIR", &config)
+        .env("ANTHROPIC_API_KEY", "toy")
+        .args(["accounts", "login"])
+        .write_stdin("blocked\n")
+        .output()
+        .unwrap();
+    assert!(!override_result.status.success());
+    assert!(!config.join("claude-accounts/blocked").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_accounts_login_rejects_profile_replacement() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = TempDir::new().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let fake = bin.join("claude");
+    std::fs::write(&fake, "#!/bin/sh\n/bin/mv \"$CLAUDE_CONFIG_DIR\" \"$CLAUDE_CONFIG_DIR.old\" && /bin/mkdir -m 700 \"$CLAUDE_CONFIG_DIR\"\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = root.path().join("config");
+    let output = Command::cargo_bin("duolane")
+        .unwrap()
+        .env_clear()
+        .env("HOME", root.path())
+        .env("PATH", bin)
+        .env("DUOLANE_CONFIG_DIR", &config)
+        .env("DUOLANE_STATE_DIR", root.path().join("state"))
+        .args(["accounts", "login"])
+        .write_stdin("backup\n")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        !config
+            .join("claude-accounts/backup/.duolane-ready")
+            .exists()
+    );
+    assert!(
+        !config
+            .join("claude-accounts/backup.old/.duolane-ready")
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_accounts_login_rejects_permissions_widened_by_claude() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = TempDir::new().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let fake = bin.join("claude");
+    std::fs::write(&fake, "#!/bin/sh\n/bin/chmod 755 \"$CLAUDE_CONFIG_DIR\"\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = root.path().join("config");
+    let output = Command::cargo_bin("duolane")
+        .unwrap()
+        .env_clear()
+        .env("HOME", root.path())
+        .env("PATH", &bin)
+        .env("DUOLANE_CONFIG_DIR", &config)
+        .env("DUOLANE_STATE_DIR", root.path().join("state"))
+        .args(["accounts", "login"])
+        .write_stdin("backup\n")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        !config
+            .join("claude-accounts/backup/.duolane-ready")
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_accounts_selects_default_and_named() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let root = TempDir::new().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(bin.join("claude"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = root.path().join("config");
+    let state = root.path().join("state");
+    let run = |args: &[&str], input: &str| {
+        Command::cargo_bin("duolane")
+            .unwrap()
+            .env_clear()
+            .env("HOME", root.path())
+            .env("PATH", &bin)
+            .env("DUOLANE_CONFIG_DIR", &config)
+            .env("DUOLANE_STATE_DIR", &state)
+            .args(args)
+            .write_stdin(input)
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["accounts", "login"], "backup\n").status.success());
+    assert!(run(&["accounts", "use"], "2\n").status.success());
+    symlink("absent", config.join("claude-accounts/unsafeprofile")).unwrap();
+    let recovery = run(&["accounts", "use"], "1\n");
+    assert!(recovery.status.success());
+    assert!(
+        String::from_utf8_lossy(&recovery.stderr).contains("skipping unsafe profile unsafeprofile")
+    );
+    assert!(run(&["accounts", "use"], "2\n").status.success());
+    let selector = config.join("claude-accounts/.selected");
+    assert_eq!(std::fs::read(&selector).unwrap(), b"backup\n");
+    assert!(!run(&["accounts", "use"], "unknown\n").status.success());
+    assert_eq!(std::fs::read(&selector).unwrap(), b"backup\n");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(config.join("claude-accounts/backup/.duolane-lock"))
+        .unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    assert!(run(&["accounts", "use"], "1\n").status.success());
+    drop(lock);
+    assert_eq!(std::fs::read(&selector).unwrap(), b"default\n");
+    std::fs::write(&selector, b"stale\n").unwrap();
+    assert!(run(&["accounts", "use"], "1\n").status.success());
+    assert_eq!(std::fs::read(&selector).unwrap(), b"default\n");
+    std::fs::write(&selector, b"malformed").unwrap();
+    assert!(!run(&["accounts", "use"], "1\n").status.success());
+    std::fs::remove_file(&selector).unwrap();
+    symlink("elsewhere", &selector).unwrap();
+    assert!(!run(&["accounts", "use"], "1\n").status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_accounts_selection_follows_config_alias() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let root = TempDir::new().unwrap();
+    let config = root.path().join("config");
+    let alias = root.path().join("alias");
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&config).unwrap();
+    std::fs::create_dir(&bin).unwrap();
+    symlink(&config, &alias).unwrap();
+    std::fs::write(bin.join("claude"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let run = |dir: &std::path::Path, args: &[&str], input: &str| {
+        Command::cargo_bin("duolane")
+            .unwrap()
+            .env_clear()
+            .env("HOME", root.path())
+            .env("PATH", &bin)
+            .env("DUOLANE_CONFIG_DIR", dir)
+            .env("DUOLANE_STATE_DIR", root.path().join("state"))
+            .args(args)
+            .write_stdin(input)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    assert!(run(&config, &["accounts", "login"], "backup\n"));
+    assert!(run(&alias, &["accounts", "use"], "2\n"));
+    assert_eq!(
+        std::fs::read(config.join("claude-accounts/.selected")).unwrap(),
+        b"backup\n"
+    );
+    assert!(run(&config, &["accounts", "use"], "1\n"));
+    assert_eq!(
+        std::fs::read(alias.join("claude-accounts/.selected")).unwrap(),
+        b"default\n"
+    );
+}
