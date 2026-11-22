@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Serialize;
 use serde::de::IgnoredAny;
@@ -97,8 +97,12 @@ fn row(id: &str, display_name: Option<&str>) -> Row {
     }
 }
 
-pub(super) fn arguments(owner: &[OsString]) -> Vec<OsString> {
-    match offered(owner) {
+pub(super) fn arguments(
+    owner: &[OsString],
+    profile: Option<&crate::claude_accounts::Profile>,
+    managed: Option<&Path>,
+) -> Vec<OsString> {
+    match offered(owner, profile, managed) {
         Ok(settings) => vec![OsString::from(SETTINGS_FLAG), OsString::from(settings)],
         Err(reason) => {
             eprintln!("note: not adding the Codex model lineup: {reason}");
@@ -107,7 +111,11 @@ pub(super) fn arguments(owner: &[OsString]) -> Vec<OsString> {
     }
 }
 
-fn offered(owner: &[OsString]) -> Result<String, String> {
+fn offered(
+    owner: &[OsString],
+    profile: Option<&crate::claude_accounts::Profile>,
+    managed: Option<&Path>,
+) -> Result<String, String> {
     if !cfg!(unix) {
         return Err("this platform is not Unix".to_string());
     }
@@ -129,11 +137,27 @@ fn offered(owner: &[OsString]) -> Result<String, String> {
     if passed {
         return Err(format!("the arguments pass {SETTINGS_FLAG}"));
     }
-    let user = settings::settings_path().map_err(|error| error.to_string())?;
-    for path in std::iter::once(user).chain(settings::MANAGED_SETTINGS.map(PathBuf::from)) {
-        if sets_picker(&path)? {
-            return Err(format!("{} sets {KEY}", path.display()));
+    if let Some(profile) = profile {
+        let bytes = profile
+            .settings()
+            .map_err(|_| "cannot safely read named profile settings".to_string())?;
+        if let Some(bytes) = bytes {
+            let top = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes)
+                .map_err(|_| "named profile settings are not a JSON object".to_string())?;
+            if top.contains_key(KEY) {
+                return Err(format!("named profile settings set {KEY}"));
+            }
         }
+    } else {
+        let user = settings::settings_path().map_err(|error| error.to_string())?;
+        if sets_picker(&user)? {
+            return Err(format!("{} sets {KEY}", user.display()));
+        }
+    }
+    if let Some(path) = managed
+        && sets_picker(path)?
+    {
+        return Err(format!("{} sets {KEY}", path.display()));
     }
     lineup()
         .ok_or_else(|| "there is no Codex model lineup".to_string())?
@@ -155,6 +179,89 @@ fn sets_picker(path: &Path) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn intercept_settings_precedence_probe() {
+        unsafe {
+            std::env::set_var(
+                "CLAUDE_CONFIG_DIR",
+                std::env::var_os("TEST_AMBIENT").unwrap(),
+            );
+        }
+        let root = std::env::var_os("TEST_PROFILE").unwrap();
+        let profile = crate::claude_accounts::Profile::test_profile(Path::new(&root));
+        let managed = Path::new(&root).join("managed.json");
+        assert!(offered(&[], None, Some(&managed)).is_err());
+        assert!(offered(&[], Some(&profile), Some(&managed)).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn intercept_named_settings_replace_ambient_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let ambient = root.path().join("ambient");
+        let profile = root.path().join("profile");
+        std::fs::create_dir(&ambient).unwrap();
+        std::fs::create_dir(&profile).unwrap();
+        std::fs::write(ambient.join("settings.json"), br#"{"modelPicker":{}}"#).unwrap();
+        assert!(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .env_clear()
+                .stdin(std::process::Stdio::null())
+                .env("TEST_AMBIENT", ambient)
+                .env("TEST_PROFILE", profile)
+                .args([
+                    "--exact",
+                    "--ignored",
+                    "intercept::picker::tests::intercept_settings_precedence_probe"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn intercept_named_settings_are_bounded_and_do_not_follow_symlinks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = tempfile::tempdir().unwrap();
+        let profile = crate::claude_accounts::Profile::test_profile(root.path());
+        let settings = root.path().join("settings.json");
+        let managed = root.path().join("managed.json");
+        std::fs::write(&settings, br#"{"modelPicker":{}}"#).unwrap();
+        std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            offered(&[], Some(&profile), Some(&managed)).unwrap_err(),
+            "named profile settings set modelPicker"
+        );
+        std::fs::write(&settings, b"{}").unwrap();
+        assert!(offered(&[], Some(&profile), Some(&managed)).is_ok());
+        std::fs::write(&managed, br#"{"modelPicker":{}}"#).unwrap();
+        assert_eq!(
+            offered(&[], Some(&profile), Some(&managed)).unwrap_err(),
+            format!("{} sets modelPicker", managed.display())
+        );
+        std::fs::remove_file(&managed).unwrap();
+        std::fs::write(&settings, b"{\"other\":\"\xff\"}").unwrap();
+        assert_eq!(
+            offered(&[], Some(&profile), Some(&managed)).unwrap_err(),
+            "named profile settings are not a JSON object"
+        );
+        std::fs::write(&settings, vec![b' '; 1_048_577]).unwrap();
+        assert_eq!(
+            offered(&[], Some(&profile), Some(&managed)).unwrap_err(),
+            "cannot safely read named profile settings"
+        );
+        std::fs::remove_file(&settings).unwrap();
+        symlink("elsewhere", &settings).unwrap();
+        assert_eq!(
+            offered(&[], Some(&profile), Some(&managed)).unwrap_err(),
+            "cannot safely read named profile settings"
+        );
+    }
 
     fn model(slug: &str, priority: i64, listed: bool, name: Option<&str>) -> CatalogModel {
         CatalogModel {

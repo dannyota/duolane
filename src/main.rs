@@ -76,6 +76,11 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<std::ffi::OsString>,
     },
+    #[command(about = "Manage Claude Code accounts")]
+    Accounts {
+        #[command(subcommand)]
+        command: AccountsCommand,
+    },
     #[command(about = "Manage Claude Code agents for Codex families")]
     Agents {
         #[command(subcommand)]
@@ -86,6 +91,12 @@ enum Commands {
         #[command(subcommand)]
         command: InterceptCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum AccountsCommand {
+    Login,
+    Use,
 }
 
 #[derive(Debug, Subcommand)]
@@ -279,6 +290,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Codex { command } => run_provider_cli("codex", command),
+        Commands::Accounts { command } => match command {
+            AccountsCommand::Login => duolane::claude_accounts::login(),
+            AccountsCommand::Use => duolane::claude_accounts::select(),
+        },
         Commands::Claude { args } => duolane::intercept::run_claude(args),
         Commands::Agents { command } => match command {
             AgentsCommand::Setup { force } => duolane::agents::setup(force),

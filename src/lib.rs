@@ -5,6 +5,7 @@ mod hermetic;
 pub mod agents;
 pub mod anthropic;
 pub mod auth;
+pub mod claude_accounts;
 pub mod config;
 pub mod inbound_auth;
 pub mod intercept;

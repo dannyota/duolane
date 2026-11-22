@@ -114,10 +114,11 @@ Start Claude Code through it, with any `claude` arguments:
 duolane claude --remote-control
 ```
 
-`duolane claude` changes no file. It adds the Codex family aliases and catalog
-models to the `/model` picker for that launch. To route every Claude Code
-session, including background agents, write the same settings to the Claude Code
-user settings once. Every session then needs the proxy running:
+`duolane claude` adds the Codex family aliases and catalog models to the
+`/model` picker for that launch without changing Claude Code settings. To route
+every Claude Code session, including background agents, write the same settings
+to the Claude Code user settings once. Every session then needs the proxy
+running:
 
 ```bash
 duolane intercept setup
@@ -132,6 +133,28 @@ The intercept certificate lasts 90 days. When fewer than 14 days remain,
 
 `/model <codex model>` also saves that model as the default for new sessions.
 Pick a Claude model before you run Claude Code without duolane.
+
+## Claude accounts
+
+On macOS and Linux, use Claude Code's own sign-in to add a profile and select it
+for the next `duolane claude` launch:
+
+```bash
+duolane accounts login
+duolane accounts use
+duolane claude --resume <session-id>
+```
+
+Choose `default` in `accounts use` to return to your original profile. Plain
+`claude` and an explicit `CLAUDE_CONFIG_DIR` ignore the selection. This does not
+switch an open session or copy credentials.
+
+A named profile asks before sharing a project's default transcript folder for
+the first time. Resuming then writes to the original transcript without a fork.
+This shares the whole displayed folder, including project auto memory, and can
+send that history under another account. Close the previous session before
+resuming it. See [account selection](docs/design/claude-accounts.md) for path
+restrictions and how Claude Code settings affect authentication.
 
 ## Claude Code agents
 
@@ -154,6 +177,8 @@ agent file.
 | `duolane models`            | List the models you can use                   |
 | `duolane codex auth status` | Check the Codex login                         |
 | `duolane claude [args]`     | Start Claude Code through the intercept proxy |
+| `duolane accounts login`    | Sign in to a named Claude Code profile        |
+| `duolane accounts use`      | Select the profile for the next Claude launch |
 | `duolane intercept setup`   | Route every Claude Code session through it    |
 | `duolane intercept cleanup` | Remove the intercept settings and files       |
 | `duolane intercept renew`   | Replace the intercept certificate             |

@@ -118,13 +118,35 @@ pub fn run(arguments: Vec<OsString>) -> anyhow::Result<()> {
     let install = Install::new(password)?;
     check_environment(&install)?;
     check_listener(&install, &authorities, &leaf)?;
+    let profile = crate::claude_accounts::prepare_launch(&arguments)?;
+    let command = child_command(
+        &arguments,
+        profile.as_ref(),
+        &install,
+        super::settings::MANAGED_SETTINGS.map(Path::new),
+    );
+    if let Some(profile) = &profile {
+        profile.recheck()?;
+    }
+    start(command)
+}
+
+fn child_command(
+    arguments: &[OsString],
+    profile: Option<&crate::claude_accounts::Profile>,
+    install: &Install,
+    managed: Option<&Path>,
+) -> Command {
     let mut command = Command::new("claude");
     command
-        .args(picker::arguments(&arguments))
+        .args(picker::arguments(arguments, profile, managed))
         .args(arguments)
         .env_remove(BASE_URL_VARIABLE)
-        .envs(child_variables(&install));
-    start(command)
+        .envs(child_variables(install));
+    if let Some(profile) = profile {
+        command.env("CLAUDE_CONFIG_DIR", profile.path());
+    }
+    command
 }
 
 fn child_variables(install: &Install) -> Vec<(&'static str, String)> {
@@ -307,6 +329,63 @@ fn start(mut command: Command) -> anyhow::Result<()> {
 fn start(mut command: Command) -> anyhow::Result<()> {
     let status = command.status().map_err(launch_error)?;
     std::process::exit(status.code().unwrap_or(1))
+}
+
+#[cfg(all(test, unix))]
+mod account_tests {
+    use super::*;
+
+    #[test]
+    fn intercept_child_keeps_arguments_and_sets_only_child_profile() {
+        assert!(
+            Command::new(std::env::current_exe().unwrap())
+                .env_clear()
+                .stdin(std::process::Stdio::null())
+                .args([
+                    "--exact",
+                    "--ignored",
+                    "intercept::wrapper::account_tests::intercept_child_profile_probe",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn intercept_child_profile_probe() {
+        let root = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", root.path()) }
+        let profile = crate::claude_accounts::Profile::test_profile(root.path());
+        let install = Install {
+            password: "toy".into(),
+            port: 1234,
+            ca: root.path().join("ca"),
+        };
+        let args = vec![OsString::from("--resume"), OsString::from("fixture")];
+        let managed = root.path().join("managed.json");
+        let command = child_command(&args, Some(&profile), &install, Some(&managed));
+        let actual: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            &actual[actual.len() - args.len()..],
+            args.iter().map(|arg| arg.as_os_str()).collect::<Vec<_>>()
+        );
+        assert!(command.get_envs().any(
+            |(key, value)| key == "CLAUDE_CONFIG_DIR" && value == Some(root.path().as_os_str())
+        ));
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == HTTPS_PROXY[0] && value.is_some())
+        );
+        let unmanaged = child_command(&args, None, &install, Some(&managed));
+        assert!(
+            !unmanaged
+                .get_envs()
+                .any(|(key, _)| key == "CLAUDE_CONFIG_DIR")
+        );
+    }
 }
 
 fn launch_error(error: std::io::Error) -> anyhow::Error {
