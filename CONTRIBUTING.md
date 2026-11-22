@@ -35,9 +35,3 @@ make hooks-install
 Code has no comments, as the
 [engineering standard](docs/standards/engineering.md#code-comments) explains.
 Contributions are licensed under the MIT License.
-
-## Optional Claude Code agents
-
-The role definitions in [`.claude/agents/`](.claude/agents/) are optional. They
-require a Claude Code setup that can route the specified GPT model IDs. You do
-not need Claude Code or these agents to contribute.

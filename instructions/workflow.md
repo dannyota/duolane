@@ -15,7 +15,10 @@ The primary designs and decides. Implementers change code. Reviewers judge work 
 
 Two red CI runs from the same cause mean stop and repair the process. Run one `make check` at a time on this laptop; agents that build in parallel use `CARGO_BUILD_JOBS=4`.
 
-## Codex jobs
+## Codex CLI fallback
+
+Use the Codex CLI only when direct subagent dispatch fails or its runtime model cannot be confirmed.
+
 
 `C=$(ls -d ~/.claude/plugins/cache/openai-codex/codex/*/ | sort -V | tail -1)scripts/codex-companion.mjs`
 
