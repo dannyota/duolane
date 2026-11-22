@@ -50,14 +50,14 @@ class CrateAge(unittest.TestCase):
         self.assertEqual(calls, [("tokio", "1.1.0")])
         self.assertEqual((report, failures), (["ok: tokio@1.1.0 published 100h ago"], 0))
 
-    def test_boundary_at_72_hours(self):
+    def test_boundary_at_24_hours(self):
         head = lock(("old", "1.0.0", REGISTRY), ("new", "1.0.0", REGISTRY))
-        fetch, _ = fetcher({("old", "1.0.0"): 72, ("new", "1.0.0"): 71.9})
+        fetch, _ = fetcher({("old", "1.0.0"): 24, ("new", "1.0.0"): 23.9})
         report, failures = check_crate_age.check("", head, {}, fetch, NOW)
         self.assertEqual(failures, 1)
         self.assertEqual(report, [
-            "too new: new@1.0.0 published 71h ago, under 72h",
-            "ok: old@1.0.0 published 72h ago",
+            "too new: new@1.0.0 published 23h ago, under 24h",
+            "ok: old@1.0.0 published 24h ago",
         ])
 
     def test_exempt_version_passes_with_reason(self):
