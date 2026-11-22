@@ -166,7 +166,10 @@ native server compaction retain their configured transport.
 - An unexpected EOF from the HTTP or WebSocket transport, including a TLS close
   without `close_notify`, is retryable before output. Streaming requests and
   buffered WebSockets also stop retrying once Codex reports that a hosted web
-  search is in progress or has completed, even before client output.
+  search is in progress or has completed, even before client output. With an
+  OpenAI API key, a hosted-tool request with an unknown outcome is not retried
+  at all, as [replay eligibility](openai-api-key.md#moving-to-the-next-source)
+  defines.
 - After a full-context WebSocket retry, a repeated missing origin fails fast;
   transient failures still use the normal retry budget subject to the same
   no-replay rules.

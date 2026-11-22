@@ -121,12 +121,13 @@ capture records only the status and the allowlisted code for API errors.
   and a Luna search request keeps its Luna model.
 - Transport is HTTP. WebSocket mode and `previous_response_id` continuation stay
   with the `chatgpt` source until a live check confirms them on the API.
-- The `api-key` catalog is the built-in Codex list plus the ids from
-  `GET /v1/models` that match the
+- The `api-key` catalog is the ids from `GET /v1/models` that match the
   [family candidate rule](codex.md#model-catalog), `gpt-<version>-<family>`.
   Other API models are ignored, because the list does not say which ones serve
-  Responses. duolane fetches it at startup and at most once per hour; a failed
-  fetch keeps the last list.
+  Responses. duolane fetches it at startup and at most once per hour, and a
+  failed fetch keeps the last list. Only before any list has arrived do the
+  built-in Codex versions stand in, as tentative defaults; once a list exists, a
+  built-in id it does not contain is unavailable.
 - A Codex family alias resolves against the catalog of the source that sends the
   request, and again after a switch; an exact id stays fixed. A source whose
   known catalog lacks an exact id is skipped before sending; a source with no
@@ -157,16 +158,23 @@ only for these failures:
   transient, as the Codex login manager classifies it today;
 - a transient failure after the source spent its retry budget, for a request
   without hosted tools. The same-source retry rules already replay such a
-  request after a post-send drop, so the next source adds no new risk.
+  request after a post-send drop. The first source may still have finished work
+  the client never saw, so a fallback the user enabled can repeat model work
+  and, on the `api-key` source, incur charges.
 
-Replay eligibility belongs to the whole request. Once any attempt reports
-hosted-tool execution, or a request with a hosted tool, including every
-standalone search, was sent and its outcome is unknown (a dropped connection, a
-timeout, or HTTP 5xx), neither a same-source retry nor a switch happens, even if
-a later error reports a spent window or a rejected credential. A request with a
-hosted tool can still move on for a spent window, credit, or rejected credential
-that the upstream reported before any execution, or for a failure before it was
-sent.
+Replay eligibility belongs to the whole request:
+
+- Once any attempt reports hosted-tool execution, neither a same-source retry
+  nor a switch happens, even if a later error reports a spent window or a
+  rejected credential.
+- A request with a hosted tool, including every standalone search, that was sent
+  and whose outcome is unknown (a dropped connection, a timeout, or HTTP 5xx)
+  never switches sources. On the `api-key` source, where a lost search is
+  billed, it is not retried either. On the `chatgpt` source the
+  [Codex retry rules](codex.md#transport-and-retries) apply.
+- A request with a hosted tool can still move on for a spent window, credit, or
+  rejected credential that the upstream reported before any execution, or for a
+  failure before it was sent.
 
 A request never moves on for an invalid request, a context window overflow, a
 header timeout, empty completions after their retries, or any failure after
