@@ -436,7 +436,13 @@ impl CodexHttpClient {
             })
             .collect();
         let body = self
-            .read_buffered_body(&mut response, ctx, "Codex search response body")
+            .read_buffered_body(
+                &mut response,
+                ctx,
+                "Codex search response body",
+                &mut false,
+                &mut false,
+            )
             .await?;
 
         if let Some(traffic) = ctx.traffic.as_deref() {

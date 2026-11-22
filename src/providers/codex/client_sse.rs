@@ -14,6 +14,61 @@ pub(super) struct HttpSseDecoder {
     skip_lf: bool,
 }
 
+#[derive(Default)]
+pub(super) struct BufferedHttpSseEvidence {
+    frame: Vec<u8>,
+    line_nonempty: bool,
+    discard: bool,
+    skip_lf: bool,
+    pub(super) hosted: bool,
+    pub(super) terminal: bool,
+}
+
+impl BufferedHttpSseEvidence {
+    pub(super) fn push(&mut self, chunk: &[u8]) {
+        for &byte in chunk {
+            if self.skip_lf {
+                self.skip_lf = false;
+                if byte == b'\n' {
+                    continue;
+                }
+            }
+            if byte == b'\r' || byte == b'\n' {
+                self.skip_lf = byte == b'\r';
+                if !self.line_nonempty {
+                    if !self.discard
+                        && let Ok(Some(event)) = decode_http_sse_frame(&self.frame)
+                        && let Some(payload) = event.payload
+                    {
+                        self.hosted |=
+                            super::events::event_confirms_hosted_tool_execution(&payload);
+                        self.terminal |= super::events::event_is_terminal(&payload);
+                    }
+                    self.frame.clear();
+                    self.discard = false;
+                } else {
+                    self.append(b'\n');
+                }
+                self.line_nonempty = false;
+            } else {
+                self.line_nonempty = true;
+                self.append(byte);
+            }
+        }
+    }
+
+    fn append(&mut self, byte: u8) {
+        if !self.discard {
+            if self.frame.len() >= MAX_UPSTREAM_FRAME_BYTES {
+                self.frame.clear();
+                self.discard = true;
+            } else {
+                self.frame.push(byte);
+            }
+        }
+    }
+}
+
 pub(super) struct DecodedHttpSseEvent {
     pub(super) event: Option<String>,
     pub(super) payload: Option<serde_json::Value>,
@@ -267,6 +322,21 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(events[0].payload.is_none());
         decoder.finish().unwrap();
+    }
+
+    #[test]
+    fn buffered_evidence_resynchronizes_after_invalid_and_oversized_frames() {
+        let mut evidence = BufferedHttpSseEvidence::default();
+        evidence.push(b"data: \xff\r\n\r\n");
+        evidence.push(&vec![b'x'; MAX_UPSTREAM_FRAME_BYTES + 1]);
+        evidence.push(b"\r\n\r");
+        evidence.push(b"\ndata: {\"type\":\"response.web_search_call.completed\"}\r\n\r");
+        assert!(evidence.hosted);
+        assert!(!evidence.terminal);
+        evidence.push(b"\ndata: {\"type\":\"response.completed\"}\r\n");
+        assert!(!evidence.terminal);
+        evidence.push(b"\r\n");
+        assert!(evidence.terminal);
     }
 
     #[test]

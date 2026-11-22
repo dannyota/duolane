@@ -120,7 +120,9 @@ impl CodexHttpClient {
             }
 
             if !resp.status().is_success() {
-                let response = self.collect_http_response(resp, started_at, ctx).await?;
+                let response = self
+                    .collect_http_response(resp, started_at, ctx, &mut false)
+                    .await?;
                 let mut error = codex_status_error(response);
                 error.origin = CodexErrorOrigin::Http;
                 return Err(error);
