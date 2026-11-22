@@ -1,3 +1,5 @@
+pub mod codex_auth;
+pub use codex_auth::openai_base_url;
 mod codex_transport;
 
 pub use codex_transport::{

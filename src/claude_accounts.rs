@@ -1,5 +1,5 @@
 #[cfg(unix)]
-mod store;
+pub(crate) mod store;
 #[cfg(unix)]
 mod transcripts;
 
