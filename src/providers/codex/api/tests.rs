@@ -11,6 +11,19 @@ use url::Url;
 use super::{ApiClient, ApiFailureKind, SendEvidence};
 use crate::providers::codex::auth::api_key::OpenAiKey;
 
+#[test]
+fn codex_api_retains_key_scoped_identity() {
+    use crate::config::codex_auth::AuthSource;
+    use crate::providers::codex::sources::CredentialId;
+    use crate::providers::codex::translate::reasoning_signature::ReasoningAccount;
+
+    let base = Url::parse("http://127.0.0.1/v1").unwrap();
+    let api = ApiClient::new(base, OpenAiKey::parse(b"toy-key").unwrap()).unwrap();
+    assert!(api.credential_id() == CredentialId::new(AuthSource::ApiKey, b"toy-key"));
+    assert!(api.reasoning_account() == &ReasoningAccount::for_api_key(b"toy-key"));
+    assert!(api.credential_id() != CredentialId::new(AuthSource::ApiKey, b"other-key"));
+}
+
 #[tokio::test]
 async fn codex_api_redacts_rejected_key_failure() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

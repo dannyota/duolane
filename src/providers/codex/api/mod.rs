@@ -1,5 +1,8 @@
 mod catalog;
 mod error;
+pub mod messages;
+#[cfg(test)]
+mod messages_tests;
 mod sanitize;
 #[cfg(test)]
 mod tests;
@@ -20,7 +23,10 @@ use super::{
     client_proxy::{ProxyEnvironment, codex_http_client},
     client_sse::{DecodedHttpSseEvent, HttpSseDecoder},
     events,
+    sources::CredentialId,
+    translate::reasoning_signature::ReasoningAccount,
 };
+use crate::config::codex_auth::AuthSource;
 use catalog::{Catalog, REFRESH_INTERVAL};
 
 const MAX_BODY: usize = 1024 * 1024;
@@ -30,12 +36,16 @@ pub struct ApiClient {
     client: reqwest::Client,
     base: Url,
     authorization: HeaderValue,
+    credential: CredentialId,
+    reasoning_account: ReasoningAccount,
     catalog: Catalog,
     header_timeout: Duration,
 }
 
 impl ApiClient {
     pub fn new(base: Url, key: OpenAiKey) -> Result<Self> {
+        let credential = CredentialId::new(AuthSource::ApiKey, key.for_hashing());
+        let reasoning_account = ReasoningAccount::for_api_key(key.for_hashing());
         let mut authorization = HeaderValue::from_str(&format!("Bearer {}", key.for_sending()))
             .map_err(|_| anyhow::anyhow!("Invalid API credential"))?;
         authorization.set_sensitive(true);
@@ -44,9 +54,19 @@ impl ApiClient {
             client,
             base,
             authorization,
+            credential,
+            reasoning_account,
             catalog: Catalog::default(),
             header_timeout: Duration::from_millis(crate::config::codex_header_timeout_ms()),
         })
+    }
+
+    pub fn credential_id(&self) -> CredentialId {
+        self.credential
+    }
+
+    pub fn reasoning_account(&self) -> &ReasoningAccount {
+        &self.reasoning_account
     }
 
     fn endpoint(&self, endpoint: &str) -> Result<Url, ApiFailure> {
