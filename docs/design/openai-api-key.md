@@ -85,8 +85,9 @@ account. When the order has no usable `chatgpt` source, these routes answer HTTP
   a symlink, and only when it is a regular file owned by the user with no
   permission bits for group or others. It reads at most 4 KiB. A file that fails
   a check is refused with a message that says how to fix it.
-- Windows has no stored key in this version; `DUOLANE_OPENAI_API_KEY` is the
-  only source there, and `key set` says so.
+- Windows has no stored key in this version, because the checked-directory store
+  exists only for macOS and Linux. `DUOLANE_OPENAI_API_KEY` is the only source
+  there, and `key set` says so.
 - `DUOLANE_OPENAI_API_KEY` overrides the stored key. duolane ignores
   `OPENAI_API_KEY` on purpose: a shell may export it for another tool or
   organization, and duolane must not bill a key the user did not give it.
@@ -110,19 +111,27 @@ capture records only the status and the allowlisted code for API errors.
   headers). `store` is always `false`; the API then returns encrypted reasoning
   without asking
   ([reasoning](https://developers.openai.com/api/docs/guides/reasoning#preserve-reasoning-without-stored-responses)).
-- The client's `max_tokens` becomes `max_output_tokens`, because API output is
-  billed per token. The ChatGPT source keeps dropping it, as the Codex route
-  does today.
+- On the Messages route, the client's `max_tokens` becomes `max_output_tokens`,
+  because API output is billed per token. The ChatGPT source keeps dropping it,
+  as the Codex route does today. The Chat Completions route keeps rejecting
+  `max_tokens` and `max_completion_tokens` before dispatch for both sources, so
+  a request is valid or invalid the same way on each.
 - The API has one Responses endpoint, so the Lite lane rules do not apply:
   parallel tool calls stay as requested, deferred tools stay in the tool list,
   and a Luna search request keeps its Luna model.
 - Transport is HTTP. WebSocket mode and `previous_response_id` continuation stay
   with the `chatgpt` source until a live check confirms them on the API.
+- The `api-key` catalog is the built-in Codex list plus the ids from
+  `GET /v1/models` that match the
+  [family candidate rule](codex.md#model-catalog), `gpt-<version>-<family>`.
+  Other API models are ignored, because the list does not say which ones serve
+  Responses. duolane fetches it at startup and at most once per hour; a failed
+  fetch keeps the last list.
 - A Codex family alias resolves against the catalog of the source that sends the
-  request, and again after a switch; an exact id stays fixed. The `api-key`
-  catalog is `GET /v1/models`, fetched at startup and at most once per hour. A
-  failed fetch keeps the last list, then the built-in versions. Model discovery
-  lists the union of the catalogs the order uses.
+  request, and again after a switch; an exact id stays fixed. A source whose
+  known catalog lacks an exact id is skipped before sending; a source with no
+  catalog yet is tried. Model discovery lists only ids a source in the order can
+  serve.
 - A `-fast` suffix asks for priority processing. `-ultrafast` narrows to
   priority.
 - Hosted web search uses the API's `web_search` tool in the same Responses
@@ -137,21 +146,27 @@ capture records only the status and the allowlisted code for API errors.
 ## Moving to the next source
 
 A request tries the sources in order. duolane moves to the next source only
-before any client output, and only for a failure it can prove happened before
-the upstream did work:
+before any client output, only while the request is still safe to replay, and
+only for these failures:
 
 - a spent plan window (`usage_limit_reached`) on `chatgpt`, or exhausted credit
   (`insufficient_quota`) on `api-key`;
-- a rejected credential: a refresh the token endpoint refused, or HTTP 401 for
-  the API key. A refresh that failed for a network, timeout, or lock reason is
-  transient, not a rejection;
-- a transient failure after the source spent its retry budget, but only for a
-  request without hosted tools.
+- a rejected credential: a refresh token the token endpoint rejected, or HTTP
+  401 for the API key. A refresh that failed on the network, timed out, could
+  not take the lock, or got HTTP 408, 429, or 5xx from the token endpoint is
+  transient, as the Codex login manager classifies it today;
+- a transient failure after the source spent its retry budget, for a request
+  without hosted tools. The same-source retry rules already replay such a
+  request after a post-send drop, so the next source adds no new risk.
 
-A request with a hosted tool, including every standalone search, moves on only
-for the first two kinds, or for a failure before the request was sent. A dropped
-connection, timeout, or HTTP 5xx after sending can hide a search that ran and
-was billed, so it stops there.
+Replay eligibility belongs to the whole request. Once any attempt reports
+hosted-tool execution, or a request with a hosted tool, including every
+standalone search, was sent and its outcome is unknown (a dropped connection, a
+timeout, or HTTP 5xx), neither a same-source retry nor a switch happens, even if
+a later error reports a spent window or a rejected credential. A request with a
+hosted tool can still move on for a spent window, credit, or rejected credential
+that the upstream reported before any execution, or for a failure before it was
+sent.
 
 A request never moves on for an invalid request, a context window overflow, a
 header timeout, empty completions after their retries, or any failure after
@@ -217,5 +232,7 @@ moved on also shows the source it left and why, for example
   limiting.
 - That the API accepts duolane's Responses body unchanged, including
   `prompt_cache_key`, `include`, reasoning summaries, and `text.verbosity`.
-- The API's `service_tier` value for priority processing, and whether
-  `web_search` accepts blocked domains.
+- End to end: `service_tier: "priority"`
+  ([priority processing](https://developers.openai.com/api/docs/guides/priority-processing))
+  and `filters.blocked_domains` for `web_search` are documented but not yet
+  tried live.
