@@ -35,7 +35,9 @@ impl ApiFailure {
             ApiFailureKind::Rejected => (401, "OpenAI API credential rejected"),
             ApiFailureKind::Transient => (503, "OpenAI API temporarily unavailable"),
             ApiFailureKind::HeaderTimeout => (504, "OpenAI API response headers timed out"),
-            ApiFailureKind::ContextOverflow => (400, "OpenAI API context length exceeded"),
+            ApiFailureKind::ContextOverflow => {
+                (400, "prompt is too long (context_length_exceeded)")
+            }
             ApiFailureKind::Invalid => (400, "OpenAI API rejected the request"),
             ApiFailureKind::Other => (502, "OpenAI API response could not be processed"),
         };
@@ -55,7 +57,21 @@ impl ApiFailure {
         });
         let code = error.and_then(|e| e.get("code")).and_then(Value::as_str);
         let typ = error.and_then(|e| e.get("type")).and_then(Value::as_str);
-        let kind = if status >= 500 {
+        let known = |v: Option<&str>, values: &[&str]| v.is_some_and(|v| values.contains(&v));
+        let context =
+            known(code, &["context_length_exceeded"]) || known(typ, &["context_length_exceeded"]);
+        let permanent = [
+            "invalid_request_error",
+            "invalid_prompt",
+            "cyber_policy",
+            "bio_policy",
+            "usage_not_included",
+        ];
+        let kind = if context {
+            ApiFailureKind::ContextOverflow
+        } else if known(code, &permanent) || known(typ, &permanent) {
+            ApiFailureKind::Invalid
+        } else if status >= 500 {
             ApiFailureKind::Transient
         } else if status == 401 {
             ApiFailureKind::Rejected
@@ -65,9 +81,32 @@ impl ApiFailure {
                 || (status == 429 && code == Some("credit_balance_exhausted")))
         {
             ApiFailureKind::Quota
-        } else if code == Some("context_length_exceeded") {
-            ApiFailureKind::ContextOverflow
-        } else if status == 429 || status == 408 {
+        } else if status == 429
+            || status == 408
+            || (stream
+                && status == 0
+                && (known(
+                    code,
+                    &[
+                        "server_error",
+                        "internal_server_error",
+                        "internal_error",
+                        "server_is_overloaded",
+                        "overloaded_error",
+                        "slow_down",
+                    ],
+                ) || known(
+                    typ,
+                    &[
+                        "server_error",
+                        "internal_server_error",
+                        "internal_error",
+                        "server_is_overloaded",
+                        "overloaded_error",
+                        "slow_down",
+                    ],
+                )))
+        {
             ApiFailureKind::Transient
         } else if (400..500).contains(&status) {
             ApiFailureKind::Invalid
@@ -76,14 +115,21 @@ impl ApiFailure {
         };
         let send = if !stream
             && !hosted
-            && (status == 401 || (status == 429 && kind == ApiFailureKind::Quota))
+            && ((status == 401 && kind == ApiFailureKind::Rejected)
+                || (status == 429 && kind == ApiFailureKind::Quota))
         {
             SendEvidence::DeniedBeforeExecution
         } else {
             SendEvidence::OutcomeUnknown
         };
         let mut failure = Self::local(kind, send, hosted);
-        if (400..=599).contains(&status) && kind != ApiFailureKind::Quota {
+        if (400..=599).contains(&status)
+            && !matches!(
+                kind,
+                ApiFailureKind::Quota | ApiFailureKind::ContextOverflow
+            )
+            && !(kind == ApiFailureKind::Invalid && status >= 500)
+        {
             failure.error.status = status;
         }
         failure

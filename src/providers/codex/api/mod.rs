@@ -154,7 +154,10 @@ impl ApiClient {
                 .await
                 .ok()
                 .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
-            let mut failure = ApiFailure::upstream(status, value.as_ref(), false, false);
+            let hosted = value
+                .as_ref()
+                .is_some_and(super::client_sse::payload_confirms_hosted);
+            let mut failure = ApiFailure::upstream(status, value.as_ref(), hosted, false);
             if matches!(
                 failure.kind,
                 ApiFailureKind::Quota | ApiFailureKind::Transient
