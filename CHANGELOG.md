@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0
+
+### Added
+
+- `duolane accounts login [name]` signs in to a named Claude Code profile with
+  Claude Code's own login. `duolane accounts use [name]` picks the profile for
+  the next `duolane claude` launch; `default` returns to the original login. A
+  named launch can resume a session from another profile in the same transcript
+  file after you confirm sharing that project's history folder. macOS and Linux
+  only. duolane never reads or copies Claude credentials.
+
 ## 0.4.1
 
 ### Added
