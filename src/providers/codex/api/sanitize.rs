@@ -94,7 +94,11 @@ fn action(value: &Value) -> Option<Value> {
                     return None;
                 }
                 let url = source.get("url")?.as_str()?;
-                Some(serde_json::json!({"type":"url", "url":url}))
+                let mut result = serde_json::json!({"type":"url", "url":url});
+                if let Some(title) = source.get("title").and_then(Value::as_str) {
+                    result["title"] = title.into();
+                }
+                Some(result)
             })
             .collect();
         out.insert("sources".into(), sources.into());

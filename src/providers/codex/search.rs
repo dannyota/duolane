@@ -454,6 +454,10 @@ fn search_filters(req: &MessagesRequest) -> Option<SearchFilters> {
         .as_array()?
         .iter()
         .find(|tool| tool.get("type").and_then(Value::as_str) == Some("web_search_20250305"))?;
+    search_tool_filters(tool)
+}
+
+pub(super) fn search_tool_filters(tool: &Value) -> Option<SearchFilters> {
     let allowed_domains = string_array(tool.get("allowed_domains"));
     let blocked_domains = string_array(tool.get("blocked_domains"));
     (allowed_domains.is_some() || blocked_domains.is_some()).then_some(SearchFilters {

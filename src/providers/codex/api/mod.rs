@@ -7,6 +7,9 @@ mod messages_live_tests;
 #[cfg(test)]
 mod messages_tests;
 mod sanitize;
+pub mod search;
+#[cfg(test)]
+mod search_tests;
 #[cfg(test)]
 mod tests;
 
@@ -177,6 +180,8 @@ impl ApiClient {
             hosted: false,
             terminal: false,
             ended: false,
+            raw_limit: None,
+            raw_bytes: 0,
         })
     }
 }
@@ -221,9 +226,16 @@ pub struct ApiEvents {
     hosted: bool,
     terminal: bool,
     ended: bool,
+    raw_limit: Option<usize>,
+    raw_bytes: usize,
 }
 
 impl ApiEvents {
+    pub(super) fn with_raw_limit(mut self, limit: usize) -> Self {
+        self.raw_limit = Some(limit);
+        self
+    }
+
     pub async fn next(&mut self) -> Option<Result<Value, ApiFailure>> {
         use bytes::Buf;
         loop {
@@ -332,7 +344,20 @@ impl ApiEvents {
                 self.chunk = None;
             }
             match timeout(BODY_TIMEOUT, self.response.chunk()).await {
-                Ok(Ok(Some(chunk))) => self.chunk = Some(chunk),
+                Ok(Ok(Some(chunk))) => {
+                    if let Some(limit) = self.raw_limit {
+                        if chunk.len() > limit.saturating_sub(self.raw_bytes) {
+                            self.ended = true;
+                            return Some(Err(ApiFailure::local(
+                                ApiFailureKind::Other,
+                                SendEvidence::OutcomeUnknown,
+                                self.hosted,
+                            )));
+                        }
+                        self.raw_bytes += chunk.len();
+                    }
+                    self.chunk = Some(chunk);
+                }
                 Ok(Ok(None)) => {
                     self.ended = true;
                     if self.decoder.finish().is_err() || !self.terminal {

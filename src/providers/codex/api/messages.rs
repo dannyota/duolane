@@ -157,7 +157,7 @@ pub async fn handle_buffered(
     }
 }
 
-fn source_failure(
+pub(super) fn source_failure(
     api: &super::ApiClient,
     failure: super::ApiFailure,
     kind: crate::providers::codex::sources::FailureKind,
