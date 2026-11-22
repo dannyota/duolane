@@ -121,13 +121,13 @@ capture records only the status and the allowlisted code for API errors.
   and a Luna search request keeps its Luna model.
 - Transport is HTTP. WebSocket mode and `previous_response_id` continuation stay
   with the `chatgpt` source until a live check confirms them on the API.
-- The `api-key` catalog is the ids from `GET /v1/models` that match the
-  [family candidate rule](codex.md#model-catalog), `gpt-<version>-<family>`.
-  Other API models are ignored, because the list does not say which ones serve
-  Responses. duolane fetches it at startup and at most once per hour, and a
-  failed fetch keeps the last list. Only before any list has arrived do the
-  built-in Codex versions stand in, as tentative defaults; once a list exists, a
-  built-in id it does not contain is unavailable.
+- The `api-key` catalog is the ids from `GET /v1/models` that are built-in Codex
+  ids or match the [family candidate rule](codex.md#model-catalog),
+  `gpt-<version>-<family>`. Other API models are ignored, because the list does
+  not say which ones serve Responses. duolane fetches it at startup and at most
+  once per hour, and a failed fetch keeps the last list. Only before any list
+  has arrived do the built-in Codex versions stand in, as tentative defaults; a
+  built-in id absent from a successful list is unavailable.
 - A Codex family alias resolves against the catalog of the source that sends the
   request, and again after a switch; an exact id stays fixed. A source whose
   known catalog lacks an exact id is skipped before sending; a source with no
