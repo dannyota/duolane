@@ -25,7 +25,9 @@ use super::certs::Pair;
 use super::relay::Relay;
 use super::renewal;
 use super::tunnel::{self, Refusal};
-use super::{INTERCEPTED_HOST, INTERCEPTED_PORT, PROXY_USER, dispatch, set_keepalive};
+use super::{
+    INTERCEPTED_HOST, INTERCEPTED_PORT, OPEN_FILE_TARGET, PROXY_USER, dispatch, set_keepalive,
+};
 use crate::anthropic::json_error;
 use crate::auth::constant_time_eq;
 
@@ -36,6 +38,16 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_UNAUTHENTICATED: usize = 64;
 const MAX_INTERCEPTED: usize = 512;
 const MAX_TUNNELS: usize = 2048;
+
+fn pool_sizes(soft_limit: Option<u64>) -> (usize, usize) {
+    match soft_limit {
+        None | Some(OPEN_FILE_TARGET..) => (MAX_INTERCEPTED, MAX_TUNNELS),
+        Some(limit) => (
+            (limit / 16).clamp(16, MAX_INTERCEPTED as u64) as usize,
+            (limit / 4).clamp(64, MAX_TUNNELS as u64) as usize,
+        ),
+    }
+}
 
 pub struct InterceptListener {
     listener: TcpListener,
@@ -117,13 +129,18 @@ impl InterceptListener {
             notices: _,
         } = self;
         let watching = tokio::spawn(renewal::watch(ca, leaf));
+        #[cfg(unix)]
+        let soft_limit = rustix::process::getrlimit(rustix::process::Resource::Nofile).current;
+        #[cfg(not(unix))]
+        let soft_limit = None;
+        let (intercepted, tunnels) = pool_sizes(soft_limit);
         let shared = Arc::new(Shared {
             credentials,
             tls,
             relay,
             app,
-            intercepted: Arc::new(Semaphore::new(MAX_INTERCEPTED)),
-            tunnels: Arc::new(Semaphore::new(MAX_TUNNELS)),
+            intercepted: Arc::new(Semaphore::new(intercepted)),
+            tunnels: Arc::new(Semaphore::new(tunnels)),
         });
         let unauthenticated = Arc::new(Semaphore::new(MAX_UNAUTHENTICATED));
         let (stop, stopped) = watch::channel(false);
@@ -397,5 +414,18 @@ async fn intercepted(upgrade: OnUpgrade, shared: Arc<Shared>, mut stopped: watch
             connection.as_mut().graceful_shutdown();
             let _ = connection.as_mut().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pool_sizes;
+
+    #[test]
+    fn pools_follow_soft_open_file_limit() {
+        assert_eq!(pool_sizes(Some(8192)), (512, 2048));
+        assert_eq!(pool_sizes(None), (512, 2048));
+        assert_eq!(pool_sizes(Some(4096)), (256, 1024));
+        assert_eq!(pool_sizes(Some(256)), (16, 64));
     }
 }
