@@ -29,7 +29,7 @@ async fn codex_api_redacts_rejected_key_failure() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = Url::parse(&format!("http://{}/v1", listener.local_addr().unwrap())).unwrap();
     let app = Router::new().route("/v1/models", get(|| async {
-        (StatusCode::UNAUTHORIZED, Json(json!({"error":{"message":"private upstream text","code":"unrecognized_private_code"}})))
+        (StatusCode::UNAUTHORIZED, Json(json!({"error":{"message":"private upstream text","type":"invalid_request_error","param":null,"code":"invalid_api_key"}})))
     }));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let client = ApiClient::new(base, OpenAiKey::parse(b"toy-key").unwrap()).unwrap();
@@ -40,7 +40,7 @@ async fn codex_api_redacts_rejected_key_failure() {
     assert_eq!(failure.kind, ApiFailureKind::Rejected);
     assert_eq!(failure.send, SendEvidence::DeniedBeforeExecution);
     assert!(!failure.error.message.contains("private upstream text"));
-    assert!(!failure.error.message.contains("unrecognized_private_code"));
+    assert!(!failure.error.message.contains("invalid_api_key"));
     server.abort();
 }
 
