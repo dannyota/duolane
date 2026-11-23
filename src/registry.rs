@@ -184,6 +184,14 @@ impl Registry {
         let Some(startup) = &self.source_startup else {
             return self.all_supported_models();
         };
+        if !startup
+            .sources()
+            .order()
+            .sources()
+            .contains(&AuthSource::ApiKey)
+        {
+            return self.all_supported_models();
+        }
         if let Some(api) = startup.api_client() {
             api.refresh_models().await;
         }

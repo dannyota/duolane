@@ -4,6 +4,7 @@ pub mod chat_completions;
 mod cli;
 pub mod cli_api_key;
 pub mod client;
+mod client_auth;
 mod client_body;
 mod client_buffered;
 mod client_capture;

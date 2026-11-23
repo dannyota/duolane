@@ -285,3 +285,61 @@ async fn missing_api_source_is_recorded() {
         Some("api key")
     );
 }
+
+#[tokio::test]
+async fn messages_refreshes_api_catalog_only_after_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let upstream = Router::new()
+        .route(
+            "/v1/models",
+            get(move || {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({"data":[{"id":"gpt-99-sol"}]}))
+                }
+            }),
+        )
+        .route(
+            "/v1/responses",
+            post(|| async { (StatusCode::BAD_REQUEST, "{}") }),
+        );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let registry = Registry::for_serve_with_input(
+        AliasProvider::Anthropic,
+        StartupInput {
+            config_dir: dir.path().to_owned(),
+            order: Some("api-key".into()),
+            key: Some("toy-key".into()),
+            base_url: Some(base.into()),
+        },
+    )
+    .await
+    .unwrap();
+    let router = app(Arc::new(registry));
+    tokio::time::pause();
+    for after in [false, true] {
+        if after {
+            tokio::time::advance(std::time::Duration::from_secs(3601)).await;
+        }
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/messages")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"model":"gpt-99-sol","messages":[{"role":"user","content":"hello"}]})
+                    .to_string(),
+            ))
+            .unwrap();
+        let _ = router.clone().oneshot(request).await.unwrap();
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), if after { 2 } else { 1 });
+    }
+    server.abort();
+}

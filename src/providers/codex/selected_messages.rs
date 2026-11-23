@@ -32,6 +32,9 @@ pub(crate) async fn handle(
         );
     };
     let api = startup.api_client();
+    if let Some(client) = api {
+        client.refresh_models_if_due_in_background();
+    }
     let Some(chatgpt) = registry.codex_provider() else {
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,

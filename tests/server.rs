@@ -1688,6 +1688,31 @@ async fn models_endpoint_tolerates_unknown_query_params() {
 }
 
 #[tokio::test]
+async fn models_endpoint_chatgpt_order_lists_codex_when_signed_out() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Registry::for_serve_with_input(
+        AliasProvider::Anthropic,
+        StartupInput {
+            config_dir: dir.path().to_owned(),
+            order: Some("chatgpt".into()),
+            key: None,
+            base_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let (_, value) = get_models(app(Arc::new(registry)), "/v1/models").await;
+    assert!(
+        value["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "gpt-6.1-sol")
+    );
+}
+
+#[tokio::test]
 async fn models_endpoint_uses_selected_api_catalog() {
     use duolane::providers::codex::source_startup::StartupInput;
     let dir = tempfile::tempdir().unwrap();
@@ -1761,7 +1786,7 @@ async fn models_endpoint_distinguishes_empty_unknown_and_excluded_catalogs() {
     for (order, key, expected, requests) in [
         ("api-key", Some("toy-key"), false, 1),
         ("api-key", Some("toy-key"), true, 2),
-        ("chatgpt", Some("toy-key"), false, 2),
+        ("chatgpt", Some("toy-key"), true, 2),
         ("api-key", None, false, 2),
     ] {
         let registry = Registry::for_serve_with_input(

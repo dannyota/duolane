@@ -12,7 +12,7 @@ use super::super::translate::{
 
 #[derive(Default)]
 pub(super) struct Catalog {
-    pub(super) attempt: tokio::sync::Mutex<Option<Instant>>,
+    pub(super) attempt: Arc<tokio::sync::Mutex<Option<Instant>>>,
     pub(super) snapshot: RwLock<Option<Arc<[String]>>>,
 }
 

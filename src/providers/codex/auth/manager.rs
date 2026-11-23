@@ -41,6 +41,11 @@ fn classified(error: anyhow::Error, kind: AuthFailure) -> anyhow::Error {
     error.context(AuthFailureContext { kind, message })
 }
 
+#[cfg(test)]
+pub(crate) fn test_transient_error() -> anyhow::Error {
+    classified(anyhow::anyhow!("transient"), AuthFailure::Transient)
+}
+
 pub fn classify_auth_failure(error: &anyhow::Error) -> AuthFailure {
     error
         .downcast_ref::<AuthFailureContext>()

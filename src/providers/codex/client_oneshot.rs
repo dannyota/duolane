@@ -7,6 +7,7 @@ use crate::retry::{compute_backoff_delay, sleep};
 
 use super::auth::token_store::StoredAuth;
 use super::client::*;
+use super::client_auth::retry_auth;
 use super::client_body::CodexHttpBody;
 use super::client_capture::*;
 use super::search::{SearchRequest, SearchResponse};
@@ -302,17 +303,16 @@ impl CodexHttpClient {
         ctx: &RequestContext,
     ) -> Result<SearchResponse, CodexError> {
         ctx.recovery_budget.begin_http_attempt();
-        let mut auth = self.auth_manager.get_auth().await.map_err(|e| {
-            trace_auth_failure(&ctx.recovery_budget, &e);
-            CodexError {
+        let mut auth = retry_auth(&ctx.recovery_budget, || self.auth_manager.get_auth())
+            .await
+            .map_err(|e| CodexError {
                 status: 401,
                 message: "Auth error".to_string(),
                 detail: Some(e.to_string()),
                 retry_after: None,
                 usage_limit: None,
                 origin: CodexErrorOrigin::Auth,
-            }
-        })?;
+            })?;
         ctx.recovery_budget
             .set_credential(super::sources::CredentialId::for_chatgpt_auth(&auth));
         let http_body = self
@@ -381,14 +381,11 @@ impl CodexHttpClient {
             if response.status == 401 && !auth_refresh_attempted {
                 auth_refresh_attempted = true;
                 ctx.recovery_budget.start();
-                auth = self
-                    .auth_manager
-                    .force_refresh(&auth.access)
-                    .await
-                    .map_err(|error| {
-                        trace_auth_failure(&ctx.recovery_budget, &error);
-                        auth_refresh_error(error)
-                    })?;
+                auth = retry_auth(&ctx.recovery_budget, || {
+                    self.auth_manager.force_refresh(&auth.access)
+                })
+                .await
+                .map_err(auth_refresh_error)?;
                 ctx.recovery_budget
                     .set_credential(super::sources::CredentialId::for_chatgpt_auth(&auth));
                 if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {

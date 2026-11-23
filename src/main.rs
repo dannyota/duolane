@@ -529,10 +529,28 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
 
 fn print_models(registry: &Registry) {
     let provider = "codex";
-    if let Some(hint) = registry.signed_out().get(provider) {
-        println!("{provider}: not signed in, {hint}");
-    } else if let Some(models) = registry.grouped_models().get(provider) {
-        println!("{provider}: {}", terminal_text(&models.join(", ")));
+    use duolane::config::codex_auth::AuthSource;
+    let order = duolane::config::codex_auth::load_order(
+        &paths::config_dir(),
+        std::env::var_os("DUOLANE_CODEX_AUTH_ORDER").as_deref(),
+    );
+    let chatgpt = order
+        .as_ref()
+        .map_or(true, |order| order.sources().contains(&AuthSource::ChatGpt));
+    let api_key = order
+        .as_ref()
+        .is_ok_and(|order| order.sources().contains(&AuthSource::ApiKey));
+    if chatgpt {
+        if let Some(hint) = registry.signed_out().get(provider) {
+            println!("{provider}: not signed in, {hint}");
+        } else if let Some(models) = registry.grouped_models().get(provider) {
+            println!("{provider}: {}", terminal_text(&models.join(", ")));
+        }
+    }
+    if api_key {
+        println!(
+            "codex (api key): models come from your OpenAI account; a running proxy lists them at /v1/models"
+        );
     }
 }
 

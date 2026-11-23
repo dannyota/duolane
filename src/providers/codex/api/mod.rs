@@ -3,6 +3,8 @@ pub mod chat_completions;
 #[cfg(test)]
 mod chat_completions_tests;
 mod error;
+#[cfg(test)]
+mod error_tests;
 pub mod messages;
 pub mod messages_live;
 #[cfg(test)]
@@ -148,6 +150,25 @@ impl ApiClient {
         }
     }
 
+    pub(crate) fn refresh_models_if_due_in_background(self: &Arc<Self>) -> bool {
+        let Ok(mut attempt) = self.catalog.attempt.clone().try_lock_owned() else {
+            return false;
+        };
+        let now = Instant::now();
+        if attempt.is_some_and(|last| now.duration_since(last) < REFRESH_INTERVAL) {
+            return false;
+        }
+        *attempt = Some(now);
+        let client = self.clone();
+        tokio::spawn(async move {
+            if let Ok(bytes) = client.models().await {
+                client.catalog.replace(&bytes);
+            }
+            drop(attempt);
+        });
+        true
+    }
+
     pub fn catalog(&self) -> Option<Arc<[String]>> {
         self.catalog.snapshot()
     }
@@ -159,14 +180,18 @@ impl ApiClient {
         let status = response.status().as_u16();
         if status != 200 {
             let retry_after = retry_hint(&response);
-            let value = read_bounded(response)
-                .await
+            let bytes = read_bounded(response).await;
+            let unread = bytes.is_err();
+            let value = bytes
                 .ok()
                 .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
             let hosted = value
                 .as_ref()
                 .is_some_and(super::client_sse::payload_confirms_hosted);
             let mut failure = ApiFailure::upstream(status, value.as_ref(), hosted, false);
+            if unread {
+                failure.send = SendEvidence::OutcomeUnknown;
+            }
             if matches!(
                 failure.kind,
                 ApiFailureKind::Quota | ApiFailureKind::Transient

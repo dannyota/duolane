@@ -39,6 +39,25 @@ fn models_prints_codex_provider() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn models_lists_codex_when_api_key_order_is_selected() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    for (order, chatgpt) in [("api-key", false), ("chatgpt,api-key", true)] {
+        let output = Command::cargo_bin("duolane")?
+            .arg("models")
+            .env("DUOLANE_CONFIG_DIR", dir.path())
+            .env("CODEX_HOME", dir.path())
+            .env("DUOLANE_CODEX_AUTH_ORDER", order)
+            .output()?;
+        assert!(output.status.success());
+        let output = String::from_utf8(output.stdout)?;
+        assert!(output.contains("codex (api key): models come from your OpenAI account; a running proxy lists them at /v1/models"));
+        assert_eq!(output.contains("codex: "), chatgpt);
+        assert!(!output.contains("gpt-6.1-sol"));
+    }
+    Ok(())
+}
+
+#[test]
 fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin("duolane")?;
     cmd.arg("--help");

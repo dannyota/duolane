@@ -22,6 +22,9 @@ pub(crate) async fn handle(
         return authentication_error();
     };
     let api = startup.api_client();
+    if let Some(client) = api {
+        client.refresh_models_if_due_in_background();
+    }
     let configured_model = crate::config::codex_model();
     let result = source_selector::select(
         startup.sources(),

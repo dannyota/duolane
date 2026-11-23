@@ -1,6 +1,7 @@
 use super::auth::constants::CODEX_API_ENDPOINT;
 use super::auth::manager::CodexAuthManager;
 use super::auth::token_store::{DefaultCodexAuthStore, StoredAuth, file_store};
+use super::client_auth::retry_auth;
 use super::client_body::{CodexHttpBody, CodexHttpBodyCache};
 use super::client_capture::{
     write_upstream_response_capture, write_upstream_response_headers_capture,
@@ -315,17 +316,16 @@ impl CodexHttpClient {
         account: &ReasoningAccount,
         budget: &super::recovery::RecoveryBudget,
     ) -> Result<StoredAuth, CodexError> {
-        let auth = self.auth_manager.get_auth().await.map_err(|error| {
-            trace_auth_failure(budget, &error);
-            CodexError {
+        let auth = retry_auth(budget, || self.auth_manager.get_auth())
+            .await
+            .map_err(|error| CodexError {
                 status: 401,
                 message: "Auth error".to_string(),
                 detail: Some(error.to_string()),
                 retry_after: None,
                 usage_limit: None,
                 origin: CodexErrorOrigin::Auth,
-            }
-        })?;
+            })?;
         let auth = bind_account(account, auth)?;
         budget.set_credential(super::sources::CredentialId::for_chatgpt_auth(&auth));
         Ok(auth)
@@ -337,14 +337,9 @@ impl CodexHttpClient {
         budget: &super::recovery::RecoveryBudget,
     ) -> Result<StoredAuth, CodexError> {
         let account = ReasoningAccount::new(current.account_id.as_deref());
-        let auth = self
-            .auth_manager
-            .force_refresh(&current.access)
+        let auth = retry_auth(budget, || self.auth_manager.force_refresh(&current.access))
             .await
-            .map_err(|error| {
-                trace_auth_failure(budget, &error);
-                auth_refresh_error(error)
-            })?;
+            .map_err(auth_refresh_error)?;
         let auth = bind_account(&account, auth)?;
         budget.set_credential(super::sources::CredentialId::for_chatgpt_auth(&auth));
         Ok(auth)
@@ -618,18 +613,6 @@ pub(super) fn explicit_permanent_buffered_error(
         failure.status = 400;
         Some(failure)
     })
-}
-
-pub(super) fn trace_auth_failure(budget: &super::recovery::RecoveryBudget, error: &anyhow::Error) {
-    if let super::auth::manager::AuthFailure::Rejected(id) =
-        super::auth::manager::classify_auth_failure(error)
-    {
-        budget.stamp(
-            super::sources::FailureKind::RejectedCredential,
-            super::api::SendEvidence::NotSent,
-            Some(id),
-        );
-    }
 }
 
 fn bind_account(account: &ReasoningAccount, auth: StoredAuth) -> Result<StoredAuth, CodexError> {
