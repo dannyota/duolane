@@ -1,3 +1,10 @@
+#[path = "chat_completions_live.rs"]
+mod live;
+
+#[cfg(test)]
+#[path = "chat_completions_live_tests.rs"]
+mod live_tests;
+
 use axum::{
     Json,
     response::{IntoResponse, Response},
@@ -16,6 +23,62 @@ use crate::providers::codex::{
 
 fn invalid(send: SendEvidence) -> ApiFailure {
     ApiFailure::local(ApiFailureKind::Other, send, false)
+}
+
+#[allow(clippy::result_large_err)]
+pub async fn handle(
+    request: &TranslatedRequest,
+    api: &ApiClient,
+    attempt: &SourceAttempt,
+) -> Result<Response, SourceFailure> {
+    if !request.stream {
+        return handle_buffered(request, api, attempt).await;
+    }
+    if attempt.gate.hosted() || attempt.gate.ambiguous_hosted() || attempt.gate.committed() {
+        return Err(source_failure(
+            api,
+            invalid(SendEvidence::NotSent),
+            FailureKind::Final,
+        ));
+    }
+    let mut retries = 0;
+    loop {
+        let failure = match live::once(request, api, attempt).await {
+            Ok(response) => return Ok(response),
+            Err(failure) => failure,
+        };
+        if failure.hosted_executed {
+            attempt.gate.mark_hosted();
+        }
+        let kind = match failure.kind {
+            ApiFailureKind::Quota => FailureKind::UsageLimit,
+            ApiFailureKind::Rejected => FailureKind::RejectedCredential,
+            _ => FailureKind::Final,
+        };
+        if failure.kind != ApiFailureKind::Transient
+            || attempt.gate.hosted()
+            || attempt.gate.ambiguous_hosted()
+            || attempt.gate.committed()
+        {
+            return Err(source_failure(api, failure, kind));
+        }
+        let backoff =
+            crate::retry::compute_backoff_delay(retries, failure.error.retry_after.as_deref());
+        if backoff.exceeds_budget
+            || !attempt
+                .context
+                .recovery_budget
+                .wait_retry(backoff.wait_ms, false)
+                .await
+        {
+            return Err(source_failure(
+                api,
+                failure,
+                FailureKind::TransientExhausted,
+            ));
+        }
+        retries += 1;
+    }
 }
 
 #[allow(clippy::result_large_err)]
