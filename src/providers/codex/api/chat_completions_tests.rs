@@ -45,9 +45,9 @@ async fn buffered_chat_preserves_denial_evidence_and_does_not_retry() {
         Err(failure) => failure,
         Ok(_) => panic!("expected denial"),
     };
-    assert_eq!(failure.kind, FailureKind::RejectedCredential);
-    assert_eq!(failure.send, SendEvidence::DeniedBeforeExecution);
-    assert!(failure.credential == Some(api.credential_id()));
+    assert_eq!(failure.failure.kind, FailureKind::RejectedCredential);
+    assert_eq!(failure.failure.send, SendEvidence::DeniedBeforeExecution);
+    assert!(failure.failure.credential == Some(api.credential_id()));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(!gate.committed());
     server.abort();
@@ -133,7 +133,7 @@ async fn buffered_chat_rejects_empty_and_contradictory_terminal() {
             Err(failure) => failure,
             Ok(_) => panic!("expected final failure"),
         };
-        assert_eq!(failure.kind, FailureKind::Final);
+        assert_eq!(failure.failure.kind, FailureKind::Final);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(!gate.committed());
         server.abort();
@@ -216,7 +216,7 @@ async fn buffered_chat_does_not_retry_done_or_pending_hosted() {
             Err(failure) => failure,
             Ok(_) => panic!("expected failure"),
         };
-        assert_eq!(failure.kind, FailureKind::Final);
+        assert_eq!(failure.failure.kind, FailureKind::Final);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(gate.hosted(), hosted);
         assert!(!gate.committed());

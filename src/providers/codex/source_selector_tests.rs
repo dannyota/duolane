@@ -428,3 +428,41 @@ async fn stale_generation_of_same_identity_still_marks_failure() {
         Some(SkipMark::RejectedCredential)
     );
 }
+
+#[tokio::test]
+async fn unavailable_model_takes_precedence_over_quota_mark() {
+    let source = AuthSource::ApiKey;
+    let sources = CodexSources::new(
+        load_order(std::path::Path::new("unused"), Some(OsStr::new("api-key"))).unwrap(),
+    );
+    let credential = observed(source);
+    assert!(sources.register(source, credential.id, credential.observation));
+    sources.mark(
+        source,
+        &SourceFailure {
+            kind: FailureKind::UsageLimit,
+            send: SendEvidence::DeniedBeforeExecution,
+            error: CodexError::new(429, "spent".into()),
+            credential: Some(credential.id),
+        },
+        tokio::time::Instant::now(),
+    );
+    let result = select(
+        &sources,
+        &context(),
+        false,
+        "x",
+        |source| async move { Ok::<_, ()>(Some(observed(source))) },
+        |_, _| None::<()>,
+        |_, _, _| async { Ok::<(), AttemptFailure<()>>(()) },
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Selection::Skipped {
+            reason: super::source_selector::SkipReason::ModelUnavailable,
+            earliest_reset: None,
+            ..
+        }
+    ));
+}

@@ -32,6 +32,7 @@ pub mod recovery;
 mod request_state;
 pub mod request_summary;
 pub mod search;
+pub(crate) mod selected_chat;
 mod selected_chatgpt;
 pub(crate) mod selected_messages;
 pub mod source_startup;

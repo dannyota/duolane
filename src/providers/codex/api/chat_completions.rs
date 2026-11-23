@@ -18,7 +18,8 @@ use crate::providers::codex::{
         response::{CompletionState, completion_value},
     },
     events,
-    sources::{FailureKind, SourceAttempt, SourceFailure},
+    source_selector::AttemptFailure,
+    sources::{FailureKind, SourceAttempt},
 };
 
 fn invalid(send: SendEvidence) -> ApiFailure {
@@ -30,12 +31,12 @@ pub async fn handle(
     request: &TranslatedRequest,
     api: &ApiClient,
     attempt: &SourceAttempt,
-) -> Result<Response, SourceFailure> {
+) -> Result<Response, AttemptFailure<Response>> {
     if !request.stream {
         return handle_buffered(request, api, attempt).await;
     }
     if attempt.gate.hosted() || attempt.gate.ambiguous_hosted() || attempt.gate.committed() {
-        return Err(source_failure(
+        return Err(chat_failure(
             api,
             invalid(SendEvidence::NotSent),
             FailureKind::Final,
@@ -60,7 +61,7 @@ pub async fn handle(
             || attempt.gate.ambiguous_hosted()
             || attempt.gate.committed()
         {
-            return Err(source_failure(api, failure, kind));
+            return Err(chat_failure(api, failure, kind));
         }
         let backoff =
             crate::retry::compute_backoff_delay(retries, failure.error.retry_after.as_deref());
@@ -71,11 +72,7 @@ pub async fn handle(
                 .wait_retry(backoff.wait_ms, false)
                 .await
         {
-            return Err(source_failure(
-                api,
-                failure,
-                FailureKind::TransientExhausted,
-            ));
+            return Err(chat_failure(api, failure, FailureKind::TransientExhausted));
         }
         retries += 1;
     }
@@ -86,13 +83,13 @@ pub async fn handle_buffered(
     request: &TranslatedRequest,
     api: &ApiClient,
     attempt: &SourceAttempt,
-) -> Result<Response, SourceFailure> {
+) -> Result<Response, AttemptFailure<Response>> {
     if request.stream
         || attempt.gate.hosted()
         || attempt.gate.ambiguous_hosted()
         || attempt.gate.committed()
     {
-        return Err(source_failure(
+        return Err(chat_failure(
             api,
             invalid(SendEvidence::NotSent),
             FailureKind::Final,
@@ -121,7 +118,7 @@ pub async fn handle_buffered(
             || attempt.gate.ambiguous_hosted()
             || attempt.gate.committed()
         {
-            return Err(source_failure(api, failure, kind));
+            return Err(chat_failure(api, failure, kind));
         }
         let backoff =
             crate::retry::compute_backoff_delay(retries, failure.error.retry_after.as_deref());
@@ -132,13 +129,63 @@ pub async fn handle_buffered(
                 .wait_retry(backoff.wait_ms, false)
                 .await
         {
-            return Err(source_failure(
-                api,
-                failure,
-                FailureKind::TransientExhausted,
-            ));
+            return Err(chat_failure(api, failure, FailureKind::TransientExhausted));
         }
         retries += 1;
+    }
+}
+
+fn chat_failure(
+    api: &ApiClient,
+    failure: ApiFailure,
+    kind: FailureKind,
+) -> AttemptFailure<Response> {
+    use crate::providers::codex::chat_completions::ChatError;
+    use http::{HeaderValue, StatusCode};
+    let (status, error_type) = if kind == FailureKind::TransientExhausted {
+        (StatusCode::SERVICE_UNAVAILABLE, "api_error")
+    } else {
+        match failure.kind {
+            ApiFailureKind::Quota => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error"),
+            ApiFailureKind::Rejected => (StatusCode::UNAUTHORIZED, "authentication_error"),
+            ApiFailureKind::Invalid if failure.error.status == 403 => {
+                (StatusCode::FORBIDDEN, "permission_error")
+            }
+            ApiFailureKind::ContextOverflow | ApiFailureKind::Invalid => {
+                (StatusCode::BAD_REQUEST, "invalid_request_error")
+            }
+            ApiFailureKind::HeaderTimeout => (StatusCode::GATEWAY_TIMEOUT, "api_error"),
+            ApiFailureKind::Transient | ApiFailureKind::Other => {
+                (StatusCode::BAD_GATEWAY, "api_error")
+            }
+        }
+    };
+    let mut response = ChatError::new(
+        status,
+        error_type,
+        failure.error.message.clone(),
+        None,
+        None,
+    )
+    .response();
+    if let Some(value) = failure
+        .error
+        .retry_after
+        .as_deref()
+        .and_then(|v| HeaderValue::from_str(v).ok())
+    {
+        response
+            .headers_mut()
+            .insert(http::header::RETRY_AFTER, value);
+    }
+    if kind == FailureKind::TransientExhausted {
+        response
+            .headers_mut()
+            .insert("x-should-retry", HeaderValue::from_static("false"));
+    }
+    AttemptFailure {
+        failure: source_failure(api, failure, kind),
+        response: Some(response),
     }
 }
 

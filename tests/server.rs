@@ -1988,3 +1988,250 @@ async fn missing_selected_credentials_give_order_appropriate_commands() {
         assert_eq!(message.contains("codex login"), login);
     }
 }
+
+#[tokio::test]
+async fn api_only_chat_routes_exact_model_and_rejects_missing_key_and_invalid_fields() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let valid = Arc::new(AtomicBool::new(true));
+    let upstream = axum::Router::new()
+        .route("/v1/models", axum::routing::get(|| async { axum::Json(json!({"data":[{"id":"gpt-99-sol"}]})) }))
+        .route("/v1/responses", axum::routing::post({
+            let calls = calls.clone();
+            let valid = valid.clone();
+            move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
+                let calls = calls.clone();
+                let valid = valid.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    valid.fetch_and(headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer toy-key") && body["model"] == "gpt-99-sol", Ordering::SeqCst);
+                    concat!("data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n", "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hello\"}\n\n", "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n", "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n")
+                }
+            }
+        }));
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    for key in [Some("toy-key"), None] {
+        let registry = Registry::for_serve_with_input(
+            AliasProvider::Anthropic,
+            StartupInput {
+                config_dir: dir.path().to_owned(),
+                order: Some("api-key".into()),
+                key: key.map(Into::into),
+                base_url: Some(base.clone().into()),
+            },
+        )
+        .await
+        .unwrap();
+        let router = app_with_options(Arc::new(registry), None, true);
+        for (invalid, streaming) in [(false, false), (true, false), (false, true)] {
+            if key.is_none() && (invalid || streaming) {
+                continue;
+            }
+            let mut body =
+                json!({"model":"gpt-99-sol","messages":[{"role":"user","content":"hello"}]});
+            if invalid {
+                body["max_tokens"] = json!(5);
+            }
+            if streaming {
+                body["stream"] = json!(true);
+            }
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if key.is_none() {
+                    StatusCode::UNAUTHORIZED
+                } else if invalid {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::OK
+                }
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            if streaming {
+                let text = std::str::from_utf8(&bytes).unwrap();
+                assert!(text.contains("chat.completion.chunk"));
+                assert!(text.contains("data: [DONE]"));
+            } else {
+                let value: Value = serde_json::from_slice(&bytes).unwrap();
+                if key.is_none() {
+                    assert_eq!(value["error"]["type"], "authentication_error");
+                    let message = value["error"]["message"].as_str().unwrap();
+                    assert!(message.contains("duolane codex auth key set"));
+                    assert!(message.contains("duolane codex auth order"));
+                } else if !invalid {
+                    assert_eq!(value["object"], "chat.completion");
+                }
+            }
+        }
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(valid.load(Ordering::SeqCst));
+    server.abort();
+}
+
+#[tokio::test]
+async fn api_only_chat_quota_cache_and_exhausted_retry_are_safe() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for quota in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let upstream = axum::Router::new()
+            .route(
+                "/v1/models",
+                axum::routing::get(|| async { axum::Json(json!({"data":[{"id":"gpt-99-sol"}]})) }),
+            )
+            .route(
+                "/v1/responses",
+                axum::routing::post(move || {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        if quota {
+                            (
+                                StatusCode::TOO_MANY_REQUESTS,
+                                [("retry-after", "120")],
+                                axum::Json(json!({"error":{"code":"insufficient_quota"}})),
+                            )
+                        } else {
+                            (
+                                StatusCode::BAD_GATEWAY,
+                                [("retry-after", "120")],
+                                axum::Json(json!({"error":{"type":"server_error"}})),
+                            )
+                        }
+                    }
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let registry = Registry::for_serve_with_input(
+            AliasProvider::Anthropic,
+            StartupInput {
+                config_dir: dir.path().to_owned(),
+                order: Some("api-key".into()),
+                key: Some("toy-key".into()),
+                base_url: Some(base.into()),
+            },
+        )
+        .await
+        .unwrap();
+        let router = app_with_options(Arc::new(registry), None, true);
+        for request_number in 0..if quota { 2 } else { 1 } {
+            let response = router.clone().oneshot(Request::builder().method(Method::POST).uri("/v1/chat/completions").header("content-type", "application/json").body(Body::from(json!({"model":"gpt-99-sol","messages":[{"role":"user","content":"hello"}]}).to_string())).unwrap()).await.unwrap();
+            assert_eq!(
+                response.status(),
+                if quota {
+                    StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            );
+            if !quota || request_number == 1 {
+                assert_eq!(response.headers()["x-should-retry"], "false");
+            }
+            if quota && request_number == 1 {
+                assert_eq!(
+                    response.headers()["anthropic-ratelimit-unified-status"],
+                    "rejected"
+                );
+                assert!(
+                    response
+                        .headers()
+                        .contains_key("anthropic-ratelimit-unified-reset")
+                );
+                assert!(!response.headers().contains_key("retry-after"));
+                assert!(
+                    !response
+                        .headers()
+                        .contains_key("anthropic-ratelimit-unified-representative-claim")
+                );
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn api_only_chat_empty_catalog_and_typed_upstream_errors_are_safe() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for case in 0..3 {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let upstream = axum::Router::new()
+            .route("/v1/models", axum::routing::get(move || async move { axum::Json(json!({"data": if case == 0 { json!([]) } else { json!([{"id":"gpt-99-sol"}]) }})) }))
+            .route("/v1/responses", axum::routing::post(move || {
+                let count = count.clone();
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    if case == 1 { (StatusCode::BAD_REQUEST, axum::Json(json!({"error":{"code":"context_length_exceeded", "message":"private upstream sentinel"}}))) }
+                    else { (StatusCode::FORBIDDEN, axum::Json(json!({"error":{"type":"invalid_request_error", "message":"private upstream sentinel"}}))) }
+                }
+            }));
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let registry = Registry::for_serve_with_input(
+            AliasProvider::Anthropic,
+            StartupInput {
+                config_dir: dir.path().to_owned(),
+                order: Some("api-key".into()),
+                key: Some("toy-key".into()),
+                base_url: Some(base.into()),
+            },
+        )
+        .await
+        .unwrap();
+        let response = app_with_options(Arc::new(registry), None, true).oneshot(Request::builder().method(Method::POST).uri("/v1/chat/completions").header("content-type", "application/json").body(Body::from(json!({"model":"gpt-99-sol","messages":[{"role":"user","content":"hello"}]}).to_string())).unwrap()).await.unwrap();
+        assert_eq!(
+            response.status(),
+            if case == 2 {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["error"]["type"],
+            if case == 2 {
+                "permission_error"
+            } else {
+                "invalid_request_error"
+            }
+        );
+        assert!(
+            !value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("private upstream sentinel")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), usize::from(case != 0));
+        server.abort();
+    }
+}

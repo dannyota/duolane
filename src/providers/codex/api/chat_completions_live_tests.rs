@@ -89,9 +89,9 @@ async fn live_chat_metadata_then_failure_is_not_committed() {
         Err(f) => f,
         Ok(_) => panic!("expected failure"),
     };
-    assert_eq!(failure.kind, FailureKind::RejectedCredential);
+    assert_eq!(failure.failure.kind, FailureKind::RejectedCredential);
     assert!(!gate.committed());
-    assert!(failure.credential == Some(api.credential_id()));
+    assert!(failure.failure.credential == Some(api.credential_id()));
     server.abort();
 }
 

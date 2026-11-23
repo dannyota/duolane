@@ -96,6 +96,10 @@ where
             let model = resolve(source, original_model);
             match sources.decision(source, current.id, Instant::now()) {
                 SourceDecision::Stale => skip = Some(SkipReason::StaleObservation),
+                SourceDecision::Ready | SourceDecision::Marked(_) if model.is_none() => {
+                    skip = Some(SkipReason::ModelUnavailable);
+                    break;
+                }
                 SourceDecision::Marked(mark) => {
                     if let SkipMark::UsageLimit { until } = mark {
                         earliest_reset = Some(earliest_reset.map_or(until, |old| old.min(until)));
