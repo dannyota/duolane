@@ -32,6 +32,7 @@ pub mod recovery;
 mod request_state;
 pub mod request_summary;
 pub mod search;
+pub mod source_startup;
 pub mod sources;
 pub mod transcription;
 pub mod translate;

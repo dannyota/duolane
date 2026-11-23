@@ -41,7 +41,7 @@ fn parse<'a>(values: impl IntoIterator<Item = &'a str>, name: &str) -> Result<Ve
     ensure!(!sources.is_empty(), "invalid {name}");
     Ok(sources)
 }
-fn read_config(dir: &Path) -> Result<Value> {
+pub(crate) fn read_config_snapshot(dir: &Path) -> Result<Value> {
     match std::fs::read(dir.join("config.json")) {
         Ok(bytes) => {
             Ok(serde_json::from_slice(&bytes)
@@ -52,6 +52,18 @@ fn read_config(dir: &Path) -> Result<Value> {
     }
 }
 pub fn load_order(config_dir: &Path, env: Option<&OsStr>) -> Result<AuthOrder> {
+    let snapshot = if env.is_none() {
+        Some(read_config_snapshot(config_dir)?)
+    } else {
+        None
+    };
+    order_from_snapshot(snapshot.as_ref(), env)
+}
+
+pub(crate) fn order_from_snapshot(
+    config: Option<&Value>,
+    env: Option<&OsStr>,
+) -> Result<AuthOrder> {
     if let Some(value) = env {
         let value = value
             .to_str()
@@ -61,8 +73,10 @@ pub fn load_order(config_dir: &Path, env: Option<&OsStr>) -> Result<AuthOrder> {
             origin: OrderOrigin::Environment,
         });
     }
-    let config = read_config(config_dir)?;
-    let Some(codex) = config.get("codex").filter(|value| !value.is_null()) else {
+    let Some(codex) = config
+        .and_then(|value| value.get("codex"))
+        .filter(|value| !value.is_null())
+    else {
         return Ok(AuthOrder {
             sources: vec![AuthSource::ChatGpt],
             origin: OrderOrigin::Default,
@@ -172,11 +186,24 @@ fn resolve_openai_base_url(env: Option<&OsStr>, file: Option<&Value>) -> Result<
 }
 
 fn openai_base_url_for(config_dir: &Path, env: Option<&OsStr>) -> Result<url::Url> {
-    if let Some(env) = env {
-        return resolve_openai_base_url(Some(env), None);
-    }
-    let config = read_config(config_dir)?;
-    resolve_openai_base_url(None, config.get("codex").and_then(|v| v.get("apiBaseUrl")))
+    let snapshot = if env.is_none() {
+        Some(read_config_snapshot(config_dir)?)
+    } else {
+        None
+    };
+    openai_base_url_from_snapshot(snapshot.as_ref(), env)
+}
+
+pub(crate) fn openai_base_url_from_snapshot(
+    config: Option<&Value>,
+    env: Option<&OsStr>,
+) -> Result<url::Url> {
+    resolve_openai_base_url(
+        env,
+        config
+            .and_then(|v| v.get("codex"))
+            .and_then(|v| v.get("apiBaseUrl")),
+    )
 }
 
 fn openai_base_url_with(

@@ -23,12 +23,39 @@ pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
 
 pub struct Registry {
     alias_provider: AliasProvider,
+    source_startup: Option<Arc<crate::providers::codex::source_startup::SourceStartup>>,
     dynamic_codex: bool,
     models: BTreeMap<String, Vec<String>>,
     handlers: BTreeMap<String, Arc<dyn Provider>>,
 }
 
 impl Registry {
+    pub async fn for_serve(alias_provider: AliasProvider) -> anyhow::Result<Self> {
+        Self::for_serve_with_input(
+            alias_provider,
+            crate::providers::codex::source_startup::StartupInput::from_environment(),
+        )
+        .await
+    }
+
+    pub async fn for_serve_with_input(
+        alias_provider: AliasProvider,
+        input: crate::providers::codex::source_startup::StartupInput,
+    ) -> anyhow::Result<Self> {
+        let startup = crate::providers::codex::source_startup::SourceStartup::build(input).await?;
+        let mut registry = tokio::task::spawn_blocking(move || Self::new(alias_provider))
+            .await
+            .map_err(|_| anyhow::anyhow!("registry startup failed"))?;
+        registry.source_startup = Some(Arc::new(startup));
+        Ok(registry)
+    }
+
+    pub fn source_startup(
+        &self,
+    ) -> Option<&Arc<crate::providers::codex::source_startup::SourceStartup>> {
+        self.source_startup.as_ref()
+    }
+
     pub fn new(alias_provider: AliasProvider) -> Self {
         let mut models: BTreeMap<String, Vec<String>> = BTreeMap::new();
         models.insert(
@@ -54,6 +81,7 @@ impl Registry {
 
         Self {
             alias_provider,
+            source_startup: None,
             dynamic_codex: true,
             models,
             handlers,
@@ -77,6 +105,7 @@ impl Registry {
         }
         Self {
             alias_provider,
+            source_startup: None,
             dynamic_codex: false,
             models,
             handlers,
