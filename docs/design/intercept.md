@@ -32,8 +32,9 @@ A [spike](#spike-results) confirmed the behavior this design depends on. The
   the proxy password gets 407.
 - At shutdown it stops accepting, gives open connections 5 seconds, then closes
   them, because tunnels and long polls would otherwise never end.
-- `duolane serve` raises its soft open-file limit to the hard limit, up to 4096,
-  because the default of 256 on macOS is below what the listener may hold.
+- `duolane serve` raises its soft open-file limit to the hard limit, up to 8192,
+  because the default of 256 on macOS is below what the listener may hold. A
+  tunnel holds two sockets, so 2048 tunnels need 4096 descriptors.
 
 ## Environment
 
@@ -230,10 +231,11 @@ files, so two of them never interleave.
 8. Tunneled and relayed bytes are never logged or captured. Tunnels have no idle
    timeout.
 9. The listener holds at most 64 connections that have not yet sent the
-   password, 256 intercepted connections, and 256 tunnels. A connection counts
-   as intercepted or tunneled only after the password check, and gets 503 when
-   its pool is full. A connection that sends no complete `CONNECT` or TLS
-   handshake within 30 seconds is closed.
+   password, 512 intercepted connections, and 2048 tunnels, because programs
+   that Claude Code starts send all their HTTPS traffic through tunnels. A
+   connection counts as intercepted or tunneled only after the password check,
+   and gets 503 when its pool is full. A connection that sends no complete
+   `CONNECT` or TLS handshake within 30 seconds is closed.
 10. A client sends the proxy password in `CONNECT`, before it can check the
     leaf, because the leaf arrives inside the tunnel. Another local user who
     takes the proxy port while `duolane serve` is down receives the password.

@@ -34,8 +34,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_UNAUTHENTICATED: usize = 64;
-const MAX_INTERCEPTED: usize = 256;
-const MAX_TUNNELS: usize = 256;
+const MAX_INTERCEPTED: usize = 512;
+const MAX_TUNNELS: usize = 2048;
 
 pub struct InterceptListener {
     listener: TcpListener,
