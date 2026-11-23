@@ -1,3 +1,5 @@
+pub mod codex_auth;
+pub use codex_auth::openai_base_url;
 mod codex_transport;
 
 pub use codex_transport::{
@@ -244,7 +246,7 @@ pub fn log_stderr() -> bool {
 
 pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     let file = read_file_config(&cfg.config_dir);
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     let mut out = Vec::new();
     if env.contains_key("DUOLANE_BIND_ADDRESS") {
         out.push("bindAddress (env)".to_string());
@@ -430,7 +432,7 @@ pub fn upstream_url_settings() -> Vec<(&'static str, String)> {
 }
 
 pub fn anthropic_base_url() -> String {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_ANTHROPIC_BASE_URL") {
         return raw.clone();
     }
@@ -438,7 +440,7 @@ pub fn anthropic_base_url() -> String {
 }
 
 pub fn codex_base_url(default: &str) -> String {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_BASE_URL") {
         return raw.clone();
     }
@@ -453,7 +455,7 @@ pub fn codex_base_url(default: &str) -> String {
 }
 
 pub fn codex_originator(default: &str) -> String {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_ORIGINATOR") {
         return raw.clone();
     }
@@ -468,7 +470,7 @@ pub fn codex_originator(default: &str) -> String {
 }
 
 pub fn codex_user_agent(default: &str) -> String {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_USER_AGENT") {
         return raw.clone();
     }
@@ -486,7 +488,7 @@ pub fn codex_user_agent(default: &str) -> String {
 }
 
 pub fn codex_previous_response_id() -> bool {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID") {
         return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
     }
@@ -501,7 +503,7 @@ pub fn codex_previous_response_id() -> bool {
 }
 
 pub fn codex_server_compaction() -> bool {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_SERVER_COMPACTION") {
         match raw.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => return true,
@@ -520,7 +522,7 @@ pub fn codex_server_compaction() -> bool {
 }
 
 pub fn codex_responses_api() -> bool {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_RESPONSES_API") {
         return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
     }
@@ -535,7 +537,7 @@ pub fn codex_responses_api() -> bool {
 }
 
 pub fn codex_full_lane() -> bool {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_FULL_LANE") {
         return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
     }
@@ -550,7 +552,7 @@ pub fn codex_full_lane() -> bool {
 }
 
 pub fn codex_images_api() -> bool {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_IMAGES_API") {
         return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
     }
@@ -565,7 +567,7 @@ pub fn codex_images_api() -> bool {
 }
 
 pub fn codex_transcriptions_api() -> bool {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_TRANSCRIPTIONS_API") {
         return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
     }
@@ -580,7 +582,7 @@ pub fn codex_transcriptions_api() -> bool {
 }
 
 pub fn codex_images_base_url() -> String {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_IMAGES_BASE_URL") {
         return raw.clone();
     }
@@ -595,7 +597,7 @@ pub fn codex_images_base_url() -> String {
 }
 
 pub fn codex_service_tier() -> Option<String> {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_SERVICE_TIER") {
         return Some(raw.clone());
     }
@@ -609,7 +611,7 @@ pub fn codex_service_tier() -> Option<String> {
 }
 
 pub fn codex_effort() -> Option<String> {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_EFFORT") {
         return Some(raw.clone());
     }
@@ -623,7 +625,7 @@ pub fn codex_effort() -> Option<String> {
 }
 
 pub fn codex_reasoning_summary() -> Option<String> {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env
         .get("DUOLANE_CODEX_REASONING_SUMMARY")
         .filter(|raw| !raw.is_empty())
@@ -641,7 +643,7 @@ pub fn codex_reasoning_summary() -> Option<String> {
 }
 
 pub fn codex_model() -> Option<String> {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_MODEL") {
         return Some(raw.clone());
     }
@@ -655,7 +657,7 @@ pub fn codex_model() -> Option<String> {
 }
 
 pub fn auto_review_model() -> Option<String> {
-    let env: HashMap<_, _> = std::env::vars().collect();
+    let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env
         .get("DUOLANE_AUTO_REVIEW_MODEL")
         .filter(|raw| !raw.is_empty())

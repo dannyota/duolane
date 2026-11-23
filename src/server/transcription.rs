@@ -1,6 +1,6 @@
 use super::AppState;
 use super::images::multipart_text;
-use super::openai::{log_native_request_completed, native_session_id};
+use super::openai::{log_native_request_completed, native_session_id, native_source_error};
 use super::request_monitor::{RequestMonitorGuard, monitor_response_body};
 use crate::{
     logging::create_logger,
@@ -47,8 +47,20 @@ pub(super) async fn handler_transcription(
             EndpointKind::Transcriptions,
         );
         monitor.provider_selected(&req_id, "codex", "codex-transcribe", None);
+        monitor.codex_source(&req_id, "chatgpt");
     }
     let request_guard = RequestMonitorGuard::new(state.monitor.clone(), req_id.clone());
+    if let Some(response) = native_source_error(&state.registry).await {
+        log_native_request_completed(
+            &log,
+            &req_id,
+            "transcriptions",
+            Some("codex-transcribe"),
+            response.status(),
+            started_at,
+        );
+        return monitor_response_body(response, request_guard);
+    }
     if req.uri().query().is_some() {
         let response = transcription_error_response(TranscriptionRequestError::invalid(
             "Transcription endpoint does not accept query parameters",

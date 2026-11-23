@@ -27,13 +27,10 @@ the local Codex catalog, falling back to built-in models. Use a full model ID to
 pin a version. `anthropic-terra`, `anthropic-sol`, `anthropic-astra`, and
 `anthropic-luna` are equivalent aliases.
 
-Switch in Claude Code with `/model`. Claude Code may assume a larger context
-window than the one you want for a Codex model. Use `/autocompact` to set the
-model-specific threshold, for example `/autocompact 500k` for Sol or
-`/autocompact 272k` for Astra to match Codex's defaults
-([Codex models](https://learn.chatgpt.com/docs/models)). Claude Code saves the
-value for that model. `/model <codex model>` also becomes the default for new
-sessions; pick a Claude model before you run Claude Code without duolane.
+Switch in Claude Code with `/model`. The duolane picker adds `[1m]` to models
+with documented 1M context. It does not set Claude Code's compaction policy.
+`/model <codex model>` also becomes the default for new sessions; pick a Claude
+model before you run Claude Code without duolane.
 
 ## Claude Code agents
 
@@ -46,3 +43,16 @@ to the agent definition.
 
 See [Connections](Connections.md) for launcher setup and
 [Configuration](Configuration.md) for provider settings.
+
+## Codex API key
+
+`duolane codex auth key set` reads a key from a hidden prompt or standard input.
+It verifies the key before saving; `--no-verify` skips verification for offline
+setup. `duolane codex auth key remove` removes the stored key. Stored keys are
+supported on macOS and Linux; Windows uses `DUOLANE_OPENAI_API_KEY` only.
+
+A key alone does not enable API billing. Use `duolane codex auth order api-key`
+or `duolane codex auth order chatgpt api-key` to opt in at OpenAI API rates.
+`duolane codex auth order --reset` removes the saved order; an environment
+override still applies. Restart the proxy after changes.
+`duolane codex auth status` shows the key origin and effective order.

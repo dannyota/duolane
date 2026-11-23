@@ -141,17 +141,186 @@ pub(super) fn validate_websocket_upgrade(
     Ok(())
 }
 
-pub(super) async fn bounded_handshake_error_body(mut response: reqwest::Response) -> Vec<u8> {
+pub(super) async fn bounded_handshake_error_body(
+    mut response: reqwest::Response,
+) -> (Vec<u8>, bool) {
     let mut body = Vec::new();
-    while body.len() < MAX_HANDSHAKE_ERROR_DETAIL_BYTES {
-        let chunk = match response.chunk().await {
-            Ok(Some(chunk)) => chunk,
-            Ok(None) | Err(_) => break,
-        };
-        let remaining = MAX_HANDSHAKE_ERROR_DETAIL_BYTES - body.len();
-        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = MAX_HANDSHAKE_ERROR_DETAIL_BYTES - body.len();
+                body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                if chunk.len() >= remaining {
+                    return (body, false);
+                }
+            }
+            Ok(None) => return (body, true),
+            Err(_) => return (body, false),
+        }
     }
-    body
+}
+
+pub(super) fn handshake_quota(
+    status: u16,
+    body: &[u8],
+    complete: bool,
+    headers: &HeaderMap,
+) -> Option<Box<super::events::CodexUsageLimit>> {
+    if status != 429
+        || !complete
+        || body.len() > MAX_HANDSHAKE_ERROR_DETAIL_BYTES
+        || super::client::explicit_permanent_buffered_error(body).is_some()
+        || super::client::codex_status_error_message(body)
+            .is_some_and(|message| super::events::is_context_overflow(None, &message))
+    {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    if value
+        .pointer("/error/type")
+        .and_then(serde_json::Value::as_str)
+        != Some("usage_limit_reached")
+    {
+        return None;
+    }
+    let headers: Vec<(String, String)> = [
+        "x-codex-primary-reset-at",
+        "x-codex-primary-reset-after-seconds",
+        "x-codex-primary-window-minutes",
+        "x-codex-secondary-reset-at",
+        "x-codex-secondary-reset-after-seconds",
+        "x-codex-secondary-window-minutes",
+    ]
+    .iter()
+    .filter_map(|name| {
+        headers
+            .get(*name)
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| v.len() <= 64)
+            .map(|v| ((*name).to_string(), v.to_string()))
+    })
+    .collect();
+    let mut limit = super::events::usage_limit_from_response(body, &headers)?;
+    limit.message = GENERIC_HANDSHAKE_ERROR_DETAIL.to_string();
+    Some(Box::new(limit))
+}
+
+#[derive(Default)]
+pub(super) struct OriginQuotaHeaders(std::sync::Mutex<Option<Option<String>>>);
+
+impl OriginQuotaHeaders {
+    pub(super) fn record(&self, retry_after: Option<String>) {
+        *self.0.lock().unwrap_or_else(|error| error.into_inner()) = Some(retry_after);
+    }
+
+    pub(super) fn read(&self) -> Option<Option<String>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+}
+
+struct AbortHandshake(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortHandshake {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+pub(super) async fn tracked_tunnel_upgrade(
+    stream: BoxedWebSocketIo,
+    request: http::Request<()>,
+    key: &str,
+    protocols: &[String],
+    headers_latch: &OriginQuotaHeaders,
+) -> Result<CodexWebSocketStream, CodexError> {
+    use http_body_util::BodyExt;
+    use hyper_util::rt::TokioIo;
+
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|_| websocket_protocol_error("WebSocket upgrade connection failed"))?;
+    let _driver = AbortHandshake(tokio::spawn(async move {
+        let _ = connection.with_upgrades().await;
+    }));
+    let (mut parts, ()) = request.into_parts();
+    parts.uri = parts
+        .uri
+        .path_and_query()
+        .map(|path| path.as_str())
+        .unwrap_or("/")
+        .parse()
+        .map_err(|_| websocket_protocol_error("WebSocket request URL was invalid"))?;
+    let request = http::Request::from_parts(parts, http_body_util::Empty::<bytes::Bytes>::new());
+    let mut response = sender
+        .send_request(request)
+        .await
+        .map_err(|_| websocket_protocol_error("WebSocket upgrade request failed"))?;
+    let status = response.status().as_u16();
+    if status != 101 {
+        let retry_after = response
+            .headers()
+            .get(http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        if status == 429 {
+            headers_latch.record(retry_after.clone());
+        }
+        let response_headers = response.headers().clone();
+        let mut body = Vec::new();
+        let mut complete = false;
+        if status == 429 {
+            loop {
+                match response.body_mut().frame().await {
+                    None => {
+                        complete = true;
+                        break;
+                    }
+                    Some(Err(_)) => break,
+                    Some(Ok(frame)) => {
+                        if let Ok(data) = frame.into_data() {
+                            if body.len().saturating_add(data.len())
+                                > MAX_HANDSHAKE_ERROR_DETAIL_BYTES
+                            {
+                                break;
+                            }
+                            body.extend_from_slice(&data);
+                        }
+                    }
+                }
+            }
+        }
+        return Err(CodexError {
+            status,
+            message: format!("WebSocket upgrade rejected with status {status}"),
+            detail: Some(GENERIC_HANDSHAKE_ERROR_DETAIL.to_string()),
+            retry_after,
+            usage_limit: handshake_quota(status, &body, complete, &response_headers),
+            origin: if matches!(status, 500 | 502 | 503 | 504 | 529) {
+                CodexErrorOrigin::WebSocketTransient
+            } else {
+                CodexErrorOrigin::WebSocketHandshake
+            },
+        });
+    }
+    validate_websocket_upgrade(response.version(), response.headers(), key, protocols).map_err(
+        |mut error| {
+            error.origin = CodexErrorOrigin::WebSocketValidation;
+            error
+        },
+    )?;
+    let upgraded = hyper::upgrade::on(&mut response)
+        .await
+        .map_err(|_| websocket_protocol_error("WebSocket upgrade stream was not available"))?;
+    let stream: BoxedWebSocketIo = Box::new(TokioIo::new(upgraded));
+    Ok(tokio_tungstenite::WebSocketStream::from_raw_socket(
+        stream,
+        tokio_tungstenite::tungstenite::protocol::Role::Client,
+        Some(super::websocket::websocket_config()),
+    )
+    .await)
 }
 
 fn error_chain_contains(error: &(dyn std::error::Error + 'static), expected: &str) -> bool {
@@ -207,28 +376,188 @@ pub(super) fn tungstenite_handshake_error(
             .get(http::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
+        let usage_limit = response.body().as_ref().and_then(|body| {
+            let complete = response
+                .headers()
+                .get_all(http::header::CONTENT_LENGTH)
+                .iter()
+                .count()
+                == 1
+                && !response
+                    .headers()
+                    .contains_key(http::header::TRANSFER_ENCODING)
+                && response
+                    .headers()
+                    .get(http::header::CONTENT_LENGTH)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<usize>().ok())
+                    == Some(body.len());
+            handshake_quota(status, body, complete, response.headers())
+        });
         return CodexError {
             status,
             message: format!("WebSocket upgrade rejected with status {status}"),
             detail: Some(GENERIC_HANDSHAKE_ERROR_DETAIL.to_string()),
             retry_after,
-            usage_limit: None,
+            usage_limit,
             origin: CodexErrorOrigin::WebSocketHandshake,
         };
     }
+    let validation = matches!(
+        error,
+        tokio_tungstenite::tungstenite::Error::Protocol(
+            tokio_tungstenite::tungstenite::error::ProtocolError::MissingUpgradeWebSocketHeader
+                | tokio_tungstenite::tungstenite::error::ProtocolError::MissingConnectionUpgradeHeader
+                | tokio_tungstenite::tungstenite::error::ProtocolError::SecWebSocketAcceptKeyMismatch
+                | tokio_tungstenite::tungstenite::error::ProtocolError::SecWebSocketSubProtocolError(_)
+        )
+    );
     CodexError {
         status: 0,
         message: "WebSocket upgrade request failed".to_string(),
         detail: None,
         retry_after: None,
         usage_limit: None,
-        origin: CodexErrorOrigin::WebSocketHandshake,
+        origin: if validation {
+            CodexErrorOrigin::WebSocketValidation
+        } else {
+            CodexErrorOrigin::WebSocketHandshake
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn split_tunnel_quota_body_is_read_to_completion() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (client, mut server) = tokio::io::duplex(4096);
+        let peer = tokio::spawn(async move {
+            let mut request = [0; 2048];
+            let _ = server.read(&mut request).await.unwrap();
+            let body = br#"{"error":{"type":"usage_limit_reached","message":"limit","resets_at":1234567890}}"#;
+            let headers = format!(
+                "HTTP/1.1 429 Too Many Requests\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            );
+            server.write_all(headers.as_bytes()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = server.write_all(body).await;
+        });
+        let request = super::super::websocket::tunneled_websocket_request(
+            "wss://example.invalid/responses",
+            &HeaderMap::new(),
+            "dGhlIHNhbXBsZSBub25jZQ==",
+        )
+        .unwrap();
+        let error = match tracked_tunnel_upgrade(
+            Box::new(client),
+            request,
+            "dGhlIHNhbXBsZSBub25jZQ==",
+            &[],
+            &OriginQuotaHeaders::default(),
+        )
+        .await
+        {
+            Ok(_) => panic!("expected quota"),
+            Err(error) => error,
+        };
+        assert!(error.usage_limit.is_some());
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tracked_tunnel_rejects_truncated_and_fake_quota() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for truncated in [true, false] {
+            let (client, mut server) = tokio::io::duplex(4096);
+            let peer = tokio::spawn(async move {
+                let mut request = [0; 2048];
+                let _ = server.read(&mut request).await.unwrap();
+                let body: &[u8] = if truncated {
+                    br#"{"error":{"type":"usage_limit_reached","message":"limit"}}"#
+                } else {
+                    b"data: {\"error\":{\"type\":\"usage_limit_reached\"}}\n\n"
+                };
+                let headers = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\ncontent-length: {}\r\n\r\n",
+                    body.len() + usize::from(truncated)
+                );
+                server.write_all(headers.as_bytes()).await.unwrap();
+                server.write_all(body).await.unwrap();
+            });
+            let request = super::super::websocket::tunneled_websocket_request(
+                "wss://example.invalid/responses",
+                &HeaderMap::new(),
+                "dGhlIHNhbXBsZSBub25jZQ==",
+            )
+            .unwrap();
+            let error = match tracked_tunnel_upgrade(
+                Box::new(client),
+                request,
+                "dGhlIHNhbXBsZSBub25jZQ==",
+                &[],
+                &OriginQuotaHeaders::default(),
+            )
+            .await
+            {
+                Ok(_) => panic!("expected denial"),
+                Err(error) => error,
+            };
+            assert!(error.usage_limit.is_none());
+            peer.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_tunnel_upgrade_retains_buffered_websocket_frame() {
+        use futures_util::StreamExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (client, mut server) = tokio::io::duplex(4096);
+        let peer = tokio::spawn(async move {
+            let mut request = [0; 2048];
+            let _ = server.read(&mut request).await.unwrap();
+            let mut response = b"HTTP/1.1 101 Switching Protocols\r\nconnection: upgrade\r\nupgrade: websocket\r\nsec-websocket-accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n".to_vec();
+            response.extend_from_slice(&[0x81, 0x02, b'o', b'k']);
+            server.write_all(&response).await.unwrap();
+        });
+        let request = super::super::websocket::tunneled_websocket_request(
+            "wss://example.invalid/responses",
+            &HeaderMap::new(),
+            "dGhlIHNhbXBsZSBub25jZQ==",
+        )
+        .unwrap();
+        let mut socket = tracked_tunnel_upgrade(
+            Box::new(client),
+            request,
+            "dGhlIHNhbXBsZSBub25jZQ==",
+            &[],
+            &OriginQuotaHeaders::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(socket.next().await, Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) if text == "ok")
+        );
+        peer.await.unwrap();
+    }
+
+    #[test]
+    fn tunneled_invalid_accept_has_validation_origin() {
+        let error = tungstenite_handshake_error(tokio_tungstenite::tungstenite::Error::Protocol(
+            tokio_tungstenite::tungstenite::error::ProtocolError::SecWebSocketAcceptKeyMismatch,
+        ));
+        assert_eq!(error.origin, CodexErrorOrigin::WebSocketValidation);
+    }
+
+    #[test]
+    fn handshake_quota_rejects_sse_frames() {
+        let body =
+            b"data: {\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"limit\"}}\n\n";
+        assert!(handshake_quota(429, body, true, &HeaderMap::new()).is_none());
+    }
 
     #[test]
     fn validates_tokenized_websocket_upgrade_headers() {

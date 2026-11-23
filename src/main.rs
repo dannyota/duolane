@@ -130,7 +130,23 @@ enum InterceptCommand {
 enum ProviderGroup {
     Auth {
         #[command(subcommand)]
-        command: duolane::provider::AuthCommand,
+        command: CodexAuthCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CodexAuthCommand {
+    Login,
+    Device,
+    Status,
+    Logout,
+    #[command(subcommand)]
+    Key(duolane::providers::codex::cli_api_key::KeyCommand),
+    Order {
+        #[arg(value_enum, conflicts_with = "reset")]
+        sources: Vec<duolane::providers::codex::cli_api_key::AuthSource>,
+        #[arg(long)]
+        reset: bool,
     },
 }
 
@@ -139,7 +155,29 @@ fn main() -> Result<()> {
     if raw.next().is_some_and(|command| command == "claude") {
         return duolane::intercept::run_claude(raw.collect());
     }
-    let cli = Cli::parse();
+    let args: Vec<_> = std::env::args_os().collect();
+    let sensitive = args
+        .windows(3)
+        .any(|args| args[0] == "codex" && args[1] == "auth" && args[2] == "key");
+    let cli = if sensitive {
+        match Cli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+            {
+                error.exit()
+            }
+            Err(_) => {
+                eprintln!("Invalid key command. Use `duolane codex auth key --help` for syntax.");
+                std::process::exit(2);
+            }
+        }
+    } else {
+        Cli::parse_from(args)
+    };
 
     if cli.version_flag {
         println!("duolane {}", VERSION);
@@ -170,30 +208,61 @@ fn main() -> Result<()> {
                 duolane::intercept::check_proxy_environment(port)?;
                 duolane::intercept::raise_open_file_limit();
             }
-            let exposed = match bind_address.parse::<std::net::IpAddr>() {
-                Ok(ip) => !InboundPolicy::from_config(ip)?.is_loopback(),
-                Err(_) => false,
-            };
+            let ip = bind_address.parse::<std::net::IpAddr>().map_err(|err| {
+                anyhow::anyhow!("invalid proxy bind address {bind_address:?}: {err}")
+            })?;
+            let exposed = !InboundPolicy::from_config(ip)?.is_loopback();
             if exposed {
                 eprintln!("{PLAIN_HTTP_WARNING}");
             }
             if traffic_capture_enabled() {
                 eprintln!("{TRAFFIC_CAPTURE_WARNING}");
             }
-            let registry = Registry::with_default_alias();
+            duolane::upstream_url::check_upstream_urls()?;
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
+            let registry = std::sync::Arc::new(
+                runtime.block_on(Registry::for_serve(config::alias_provider()))?,
+            );
+            if let Some(startup) = registry.source_startup() {
+                if startup
+                    .sources()
+                    .order()
+                    .sources()
+                    .contains(&duolane::config::codex_auth::AuthSource::ChatGpt)
+                    && registry
+                        .provider("codex")
+                        .is_some_and(|provider| provider.missing_login_hint().is_some())
+                {
+                    eprintln!("ChatGPT login is unavailable. Run `codex login`.");
+                }
+                for warning in startup.warnings() {
+                    use duolane::providers::codex::source_startup::StartupWarning;
+                    eprintln!(
+                        "{}",
+                        match warning {
+                            StartupWarning::ApiKeyInactive =>
+                                "OpenAI API key is not selected by the Codex auth order.",
+                            StartupWarning::ApiKeyUnavailable =>
+                                "OpenAI API key is unavailable for the Codex auth order.",
+                        }
+                    );
+                }
+            }
             match select_serve_mode(std::io::stdout().is_terminal(), no_monitor) {
                 ServeMode::Plain => {
                     print_server_banner(&bind_address, effective_port, intercept_port, &registry);
                     runtime
-                        .block_on(run_service(ServerConfig {
-                            bind_address,
-                            port: effective_port,
-                            monitor: Some(MonitorHandle::default()),
-                            intercept_port,
-                        }))
+                        .block_on(run_service(
+                            ServerConfig {
+                                bind_address,
+                                port: effective_port,
+                                monitor: Some(MonitorHandle::default()),
+                                intercept_port,
+                            },
+                            registry.clone(),
+                        ))
                         .map_err(|err| anyhow::anyhow!(err))
                 }
                 ServeMode::Monitor => {
@@ -225,11 +294,13 @@ fn main() -> Result<()> {
                             .push_str("  traffic capture on: stores conversation content");
                     }
                     let server_monitor = monitor.clone();
+                    let server_registry = registry.clone();
                     let server_task = runtime.spawn(async move {
-                        let result = server::serve_listeners(
+                        let result = server::serve_listeners_with_registry(
                             listener,
                             intercept,
                             Some(server_monitor),
+                            server_registry,
                             async move {
                                 let _ = shutdown_rx.await;
                             },
@@ -315,10 +386,10 @@ fn main() -> Result<()> {
     }
 }
 
-async fn run_service(config: ServerConfig) -> Result<()> {
+async fn run_service(config: ServerConfig, registry: std::sync::Arc<Registry>) -> Result<()> {
     let mut signals = ServiceShutdownSignals::new()?;
     let (shutdown, stopped) = tokio::sync::oneshot::channel();
-    let server = server::serve_with_shutdown(config, async {
+    let server = server::serve_with_registry(config, registry, async {
         let _ = stopped.await;
     });
     tokio::pin!(server);
@@ -416,28 +487,39 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
     let handlers = provider.cli();
     match command {
         ProviderGroup::Auth { command } => match command {
-            duolane::provider::AuthCommand::Login => {
+            CodexAuthCommand::Login => {
                 if let Err(err) = handlers.login() {
                     eprintln!("{err}");
                     std::process::exit(2);
                 }
                 Ok(())
             }
-            duolane::provider::AuthCommand::Device => {
+            CodexAuthCommand::Device => {
                 if let Err(err) = handlers.device() {
                     eprintln!("{err}");
                     std::process::exit(2);
                 }
                 Ok(())
             }
-            duolane::provider::AuthCommand::Status => {
+            CodexAuthCommand::Status => {
                 if let Err(err) = handlers.status() {
                     println!("{}", terminal_text(&err.to_string()));
                     std::process::exit(1);
                 }
                 Ok(())
             }
-            duolane::provider::AuthCommand::Logout => {
+            CodexAuthCommand::Key(command) => duolane::providers::codex::cli_api_key::run(
+                duolane::providers::codex::cli_api_key::CodexApiAuthCommand::Key(command),
+            ),
+            CodexAuthCommand::Order { sources, reset } => {
+                duolane::providers::codex::cli_api_key::run(
+                    duolane::providers::codex::cli_api_key::CodexApiAuthCommand::Order {
+                        sources,
+                        reset,
+                    },
+                )
+            }
+            CodexAuthCommand::Logout => {
                 handlers.logout()?;
                 Ok(())
             }
@@ -447,10 +529,28 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
 
 fn print_models(registry: &Registry) {
     let provider = "codex";
-    if let Some(hint) = registry.signed_out().get(provider) {
-        println!("{provider}: not signed in, {hint}");
-    } else if let Some(models) = registry.grouped_models().get(provider) {
-        println!("{provider}: {}", terminal_text(&models.join(", ")));
+    use duolane::config::codex_auth::AuthSource;
+    let order = duolane::config::codex_auth::load_order(
+        &paths::config_dir(),
+        std::env::var_os("DUOLANE_CODEX_AUTH_ORDER").as_deref(),
+    );
+    let chatgpt = order
+        .as_ref()
+        .map_or(true, |order| order.sources().contains(&AuthSource::ChatGpt));
+    let api_key = order
+        .as_ref()
+        .is_ok_and(|order| order.sources().contains(&AuthSource::ApiKey));
+    if chatgpt {
+        if let Some(hint) = registry.signed_out().get(provider) {
+            println!("{provider}: not signed in, {hint}");
+        } else if let Some(models) = registry.grouped_models().get(provider) {
+            println!("{provider}: {}", terminal_text(&models.join(", ")));
+        }
+    }
+    if api_key {
+        println!(
+            "codex (api key): models come from your OpenAI account; a running proxy lists them at /v1/models"
+        );
     }
 }
 
@@ -490,7 +590,15 @@ fn print_server_banner(
     if cfg.exists() {
         println!("Config: {}", cfg.display());
     }
-    print_models(registry);
+    if registry.source_startup().is_none_or(|startup| {
+        startup
+            .sources()
+            .order()
+            .sources()
+            .contains(&duolane::config::codex_auth::AuthSource::ChatGpt)
+    }) {
+        print_models(registry);
+    }
     println!();
     println!("Configure Claude Code:");
     println!("  export ANTHROPIC_BASE_URL=\"http://localhost:{port}\"");

@@ -52,11 +52,21 @@ impl CodexHttpClient {
         websocket_sent: Arc<std::sync::atomic::AtomicBool>,
         prepared: Option<(StoredAuth, super::websocket::ReadyWebSocket)>,
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
+        ctx.recovery_budget.begin_websocket();
         let (auth, ready) = match prepared {
             Some((auth, ready)) => (auth, Some(ready)),
+            None if ctx.recovery_budget.is_tracked() => (
+                self.auth_for_buffered_http(&body.reasoning_account, &ctx.recovery_budget)
+                    .await?,
+                None,
+            ),
             None => (self.auth_for(&body.reasoning_account).await?, None),
         };
 
+        if ctx.recovery_budget.is_tracked() {
+            ctx.recovery_budget
+                .set_credential(super::sources::CredentialId::for_chatgpt_auth(&auth));
+        }
         let turn_id = continuation.and_then(super::continuation::ContinuationReservation::turn_id);
         if should_reset_websocket_pool(continuation)
             && let Some(owner) = websocket_pool_owner(continuation)
@@ -155,12 +165,12 @@ impl CodexHttpClient {
                 }
                 result = start => match result {
                     Ok(stream) => stream,
-                    Err(err) if err.status == 401 && !auth_refresh_attempted && !forwarded_any => {
+                    Err(err) if err.status == 401 && !auth_refresh_attempted && !forwarded_any && !ctx.recovery_budget.hosted() => {
                         auth_refresh_attempted = true;
                         ctx.recovery_budget.start();
                         invalidate_live_continuation_pool(continuation.as_ref());
-                        let refresh = self.refreshed_auth(&auth);
-                        auth = match refresh.await {
+                        let refresh = if ctx.recovery_budget.is_tracked() { self.refreshed_auth_buffered_http(&auth, &ctx.recovery_budget).await } else { self.refreshed_auth(&auth).await };
+                        auth = match refresh {
                             Ok(auth) => {
                                 if tx.is_closed() {
                                     abort_abandoned_live_continuation(
@@ -195,7 +205,7 @@ impl CodexHttpClient {
                         continuation_retry_available = false;
                         continue 'attempt;
                     }
-                    Err(err) if continuation_retry_available && is_continuation_retry_error(&err) => {
+                    Err(err) if continuation_retry_available && !ctx.recovery_budget.hosted() && is_continuation_retry_error(&err) => {
                         if !ctx.recovery_budget.try_retry(std::time::Duration::ZERO, false) {
                             let _ = tx.send(Err(CodexError::recovery_exhausted())).await;
                             return;
@@ -258,16 +268,34 @@ impl CodexHttpClient {
                     Err(err) => err.status == 401,
                     Ok(payload) => super::websocket::event_error_status(payload) == Some(401),
                 };
+                let allow_refresh = if unauthorized && ctx.recovery_budget.is_tracked() {
+                    item.as_ref().map_or(true, |payload| {
+                        let (allow, permanent) = unauthorized_event_policy(payload);
+                        if permanent {
+                            ctx.recovery_budget.mark_final_only();
+                        }
+                        allow
+                    })
+                } else {
+                    true
+                };
                 if unauthorized
+                    && allow_refresh
                     && !auth_refresh_attempted
                     && !forwarded_any
                     && !hosted_tool_executed
+                    && !ctx.recovery_budget.hosted()
                 {
                     auth_refresh_attempted = true;
                     ctx.recovery_budget.start();
                     invalidate_live_continuation_pool(continuation.as_ref());
-                    let refresh = self.refreshed_auth(&auth);
-                    auth = match refresh.await {
+                    let refresh = if ctx.recovery_budget.is_tracked() {
+                        self.refreshed_auth_buffered_http(&auth, &ctx.recovery_budget)
+                            .await
+                    } else {
+                        self.refreshed_auth(&auth).await
+                    };
+                    auth = match refresh {
                         Ok(auth) => {
                             if tx.is_closed() {
                                 if let Some(reservation) = continuation.as_ref() {
@@ -329,6 +357,7 @@ impl CodexHttpClient {
                     && is_continuation_retry_error(err)
                     && !forwarded_any
                     && !hosted_tool_executed
+                    && !ctx.recovery_budget.hosted()
                 {
                     if !ctx
                         .recovery_budget
@@ -476,8 +505,23 @@ pub(super) fn should_reset_websocket_pool(
     reason != "disabled"
 }
 
+fn unauthorized_event_policy(payload: &serde_json::Value) -> (bool, bool) {
+    let permanent = super::client_sse::explicit_permanent_event(payload).is_some()
+        || super::events::classify_event_failure(payload)
+            .is_some_and(|failure| super::events::is_context_overflow(None, &failure.message));
+    let quota = super::events::usage_limit_from_event(payload).is_some();
+    (!permanent && !quota, permanent)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plain_unauthorized_event_remains_refreshable() {
+        let payload =
+            serde_json::json!({"type":"error", "status":401, "error":{"message":"unauthorized"}});
+        assert_eq!(super::unauthorized_event_policy(&payload), (true, false));
+    }
+
     use futures_util::StreamExt;
     use tokio::net::TcpListener;
 

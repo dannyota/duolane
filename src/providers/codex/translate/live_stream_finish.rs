@@ -23,7 +23,7 @@ impl LiveStreamTranslator {
         }
         self.close_thinking(traffic, out);
         self.close_open_blocks(traffic, out);
-        self.emit_web_searches(traffic, out);
+        self.emit_web_searches(traffic, out)?;
         self.ensure_message_start(traffic, out);
         let mut usage = payload.get("response").map(parse_codex_usage);
         if let Some(usage) = usage.as_mut() {

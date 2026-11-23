@@ -78,12 +78,35 @@ pub(super) struct WsEvent {
     pub(super) hosted_tool_executed: bool,
 }
 
+#[cfg(test)]
 pub(super) async fn collect_ws_events<S>(
     ws: &mut WebSocketStream<S>,
     idle_timeout_ms: u64,
     pool_owner: Option<&PoolKey>,
     pool_entry: Option<&Arc<PoolEntry>>,
     traffic: Option<&TrafficCapture>,
+) -> Result<(Vec<u8>, Option<WsEvent>), CodexError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    collect_ws_events_tracked(
+        ws,
+        idle_timeout_ms,
+        pool_owner,
+        pool_entry,
+        traffic,
+        &Default::default(),
+    )
+    .await
+}
+
+pub(super) async fn collect_ws_events_tracked<S>(
+    ws: &mut WebSocketStream<S>,
+    idle_timeout_ms: u64,
+    pool_owner: Option<&PoolKey>,
+    pool_entry: Option<&Arc<PoolEntry>>,
+    traffic: Option<&TrafficCapture>,
+    budget: &super::recovery::RecoveryBudget,
 ) -> Result<(Vec<u8>, Option<WsEvent>), CodexError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -95,6 +118,7 @@ where
         pool_entry,
         traffic,
         WEBSOCKET_KEEPALIVE_INTERVAL,
+        budget,
     )
     .await
 }
@@ -106,6 +130,7 @@ async fn collect_ws_events_with_keepalive_interval<S>(
     pool_entry: Option<&Arc<PoolEntry>>,
     traffic: Option<&TrafficCapture>,
     keepalive_interval: Duration,
+    budget: &super::recovery::RecoveryBudget,
 ) -> Result<(Vec<u8>, Option<WsEvent>), CodexError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -167,6 +192,15 @@ where
         match frame {
             Some(Ok(Message::Text(text))) => {
                 if sse_body.len().saturating_add(text.len()) > MAX_BUFFERED_RESPONSE_BYTES {
+                    if budget.is_tracked()
+                        && serde_json::from_str::<serde_json::Value>(&text)
+                            .ok()
+                            .is_some_and(|payload| {
+                                super::client_sse::payload_confirms_hosted(&payload)
+                            })
+                    {
+                        budget.mark_hosted();
+                    }
                     invalidate_pool_owner(pool_owner, pool_entry);
                     break Err(websocket_stream_error(
                         "Codex WebSocket response exceeds the size limit",
@@ -200,7 +234,10 @@ where
                 }
 
                 hosted_tool_executed |=
-                    super::events::event_confirms_hosted_tool_execution(&parsed);
+                    super::client_sse::http_payload_hosted(&parsed, budget.is_tracked());
+                if hosted_tool_executed {
+                    budget.mark_hosted();
+                }
                 if is_terminal_event(&parsed) {
                     break Ok(Some(WsEvent {
                         event_type: parsed
@@ -244,6 +281,9 @@ where
         }
     };
 
+    if !matches!(&terminal_event, Ok(Some(event)) if event.event_type == "response.completed") {
+        budget.mark_ambiguous_hosted();
+    }
     terminal_event
         .map(|event| (sse_body, event))
         .map_err(|error| {
@@ -260,6 +300,7 @@ pub(super) async fn stream_ws_events<S>(
     idle_timeout_ms: u64,
     traffic: Option<Arc<TrafficCapture>>,
     tx: &mpsc::Sender<Result<serde_json::Value, CodexError>>,
+    budget: &super::recovery::RecoveryBudget,
 ) -> (bool, Option<Result<serde_json::Value, CodexError>>)
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -341,6 +382,9 @@ where
                     }
                 };
 
+                if budget.is_tracked() && super::client_sse::payload_confirms_hosted(&parsed) {
+                    budget.mark_hosted();
+                }
                 if let Some(tc) = traffic.as_deref() {
                     tc.write_json_event("040-upstream-event", &parsed);
                 }
@@ -395,12 +439,27 @@ where
                 break;
             }
             Some(Err(error)) => {
-                terminal_item = Some(Err(websocket_transport_error("stream", &error)));
+                let mut failure = websocket_transport_error("stream", &error);
+                if budget.typed_websocket()
+                    && matches!(
+                        error,
+                        tokio_tungstenite::tungstenite::Error::Io(_)
+                            | tokio_tungstenite::tungstenite::Error::Protocol(
+                                tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake
+                            )
+                    )
+                {
+                    failure.origin = CodexErrorOrigin::WebSocketTransient;
+                }
+                terminal_item = Some(Err(failure));
                 break;
             }
         }
     }
 
+    if !reusable {
+        budget.mark_ambiguous_hosted();
+    }
     if let Some(tc) = traffic.as_deref() {
         write_websocket_response_capture(tc, status, started_at.elapsed());
     }
@@ -474,6 +533,83 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn abrupt_loopback_eof_is_transient_only_for_tracked_websocket() {
+        use super::super::recovery::{RecoveryBudget, live_retry_exhausted};
+        use super::super::sources::{FailureKind, ReplayGate};
+        for (tracked, hosted) in [(true, false), (true, true), (false, false)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let peer = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let socket = WebSocketStream::from_raw_socket(socket, Role::Server, None).await;
+                drop(socket);
+            });
+            let socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let mut socket = WebSocketStream::from_raw_socket(socket, Role::Client, None).await;
+            let gate = ReplayGate::new(hosted);
+            let budget = if tracked {
+                RecoveryBudget::with_gate(gate.clone())
+            } else {
+                RecoveryBudget::default()
+            };
+            if tracked {
+                budget.enable_typed_websocket();
+            }
+            let (tx, _rx) = mpsc::channel(1);
+            let (_, terminal) = stream_ws_events(&mut socket, 1_000, None, &tx, &budget).await;
+            let error = terminal.unwrap().unwrap_err();
+            assert_eq!(
+                error.origin,
+                if tracked {
+                    CodexErrorOrigin::WebSocketTransient
+                } else {
+                    CodexErrorOrigin::WebSocket
+                }
+            );
+            if hosted {
+                gate.mark_hosted();
+            }
+            let ctx = crate::provider::RequestContext {
+                recovery_budget: budget.clone(),
+                req_id: "test".into(),
+                session_id: None,
+                traffic: None,
+                monitor: None,
+                passthrough: None,
+            };
+            let exhausted =
+                live_retry_exhausted(&ctx, crate::config::CodexTransport::WebSocket, &error);
+            assert_eq!(
+                budget.failure(exhausted).kind,
+                if tracked && !hosted {
+                    FailureKind::TransientExhausted
+                } else {
+                    FailureKind::Final
+                }
+            );
+            peer.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_live_socket_retains_terminal_output_hosted_before_forwarding() {
+        let (client_io, server_io) = tokio::io::duplex(2048);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        let gate = super::super::sources::ReplayGate::new(true);
+        let budget = super::super::recovery::RecoveryBudget::with_gate(gate.clone());
+        let (tx, mut rx) = mpsc::channel(1);
+        let send = tokio::spawn(async move {
+            server.send(Message::text(r#"{"type":"response.failed","response":{"output":[{"type":"web_search_call"}]}}"#)).await.unwrap();
+        });
+        let (_, terminal) = stream_ws_events(&mut client, 1_000, None, &tx, &budget).await;
+        assert!(terminal.is_some());
+        assert!(gate.hosted());
+        assert!(rx.try_recv().is_err());
+        send.await.unwrap();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn silent_response_wait_sends_keepalive_ping() {
         let (client_io, server_io) = tokio::io::duplex(1024);
@@ -514,6 +650,7 @@ mod tests {
             None,
             None,
             WEBSOCKET_KEEPALIVE_INTERVAL,
+            &Default::default(),
         )
         .await
         {
@@ -553,6 +690,7 @@ mod tests {
             None,
             None,
             Duration::from_millis(10),
+            &Default::default(),
         )
         .await
         {

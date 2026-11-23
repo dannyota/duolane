@@ -30,12 +30,12 @@ fn check_directory(file: &File, leaf: bool) -> Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn check_acl(_: &File) -> Result<()> {
+pub(crate) fn check_acl(_: &File) -> Result<()> {
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-fn check_acl(file: &File) -> Result<()> {
+pub(crate) fn check_acl(file: &File) -> Result<()> {
     use std::ffi::c_void;
     use std::os::fd::AsRawFd;
     unsafe extern "C" {
@@ -92,16 +92,28 @@ fn components(path: &Path) -> VecDeque<OsString> {
 }
 
 pub(crate) fn checked_dir(path: &Path, create: bool) -> Result<Option<File>> {
-    Ok(walk(path, create, false)?.0)
+    Ok(walk(path, create, false, false)?.0)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn checked_strict_dir(path: &Path, create: bool) -> Result<Option<File>> {
+    let dir = walk(path, create, false, true)?.0;
+    if let Some(dir) = &dir {
+        ensure!(
+            fs::fstat(dir)?.st_mode & 0o7777 == 0o700,
+            "unsafe directory permissions"
+        );
+    }
+    Ok(dir)
 }
 
 pub(crate) fn checked_canonical_dir(path: &Path, create: bool) -> Result<Option<PathBuf>> {
-    let (dir, canonical) = walk(path, create, true)?;
+    let (dir, canonical) = walk(path, create, true, false)?;
     Ok(dir.map(|_| canonical))
 }
 
 pub(crate) fn canonical_missing(path: &Path) -> Result<PathBuf> {
-    Ok(walk(path, false, false)?.1)
+    Ok(walk(path, false, false, false)?.1)
 }
 
 #[cfg(target_os = "macos")]
@@ -126,7 +138,12 @@ fn checked_path(_: &File, path: PathBuf) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn walk(path: &Path, create: bool, allow_final_symlink: bool) -> Result<(Option<File>, PathBuf)> {
+fn walk(
+    path: &Path,
+    create: bool,
+    allow_final_symlink: bool,
+    strict: bool,
+) -> Result<(Option<File>, PathBuf)> {
     let mut queue: VecDeque<Option<OsString>> = components(&std::path::absolute(path)?)
         .into_iter()
         .map(Some)
@@ -179,6 +196,7 @@ fn walk(path: &Path, create: bool, allow_final_symlink: bool) -> Result<(Option<
             Err(err) => return Err(err.into()),
         };
         if FileType::from_raw_mode(stat.st_mode) == FileType::Symlink {
+            ensure!(!strict, "unsafe directory symlink");
             ensure!(
                 allow_final_symlink || queue.iter().any(Option::is_some),
                 "unsafe final directory symlink"
@@ -334,7 +352,7 @@ fn check_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn check_private(file: &File) -> Result<()> {
+fn check_private_mode(file: &File, exact: bool) -> Result<()> {
     let stat = fs::fstat(file)?;
     ensure!(
         FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile,
@@ -344,13 +362,24 @@ fn check_private(file: &File) -> Result<()> {
         stat.st_uid == rustix::process::getuid().as_raw(),
         "file has wrong owner"
     );
-    ensure!(stat.st_mode & 0o7777 == 0o600, "unsafe file permissions");
+    ensure!(
+        if exact {
+            stat.st_mode & 0o7777 == 0o600
+        } else {
+            stat.st_mode & 0o7077 == 0
+        },
+        "unsafe file permissions"
+    );
     ensure!(stat.st_nlink == 1, "unsafe file links");
     check_acl(file)?;
     Ok(())
 }
 
-fn open_private(dir: &File, name: &str) -> Result<Option<File>> {
+pub(crate) fn check_private(file: &File) -> Result<()> {
+    check_private_mode(file, true)
+}
+
+fn open_private_mode(dir: &File, name: &str, exact: bool) -> Result<Option<File>> {
     check_name(name)?;
     let file = match fs::openat(
         dir,
@@ -362,8 +391,34 @@ fn open_private(dir: &File, name: &str) -> Result<Option<File>> {
         Err(Errno::NOENT) => return Ok(None),
         Err(err) => return Err(err.into()),
     };
-    check_private(&file)?;
+    check_private_mode(&file, exact)?;
     Ok(Some(file))
+}
+
+fn open_private(dir: &File, name: &str) -> Result<Option<File>> {
+    open_private_mode(dir, name, true)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn key_read(dir: &File, name: &str, limit: u64) -> Result<Option<Vec<u8>>> {
+    let Some(file) = open_private_mode(dir, name, false)? else {
+        return Ok(None);
+    };
+    let mut data = Vec::new();
+    file.take(limit.checked_add(1).context("invalid size limit")?)
+        .read_to_end(&mut data)?;
+    ensure!(data.len() as u64 <= limit, "file exceeds size limit");
+    Ok(Some(data))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn key_remove(dir: &File, name: &str) -> Result<bool> {
+    if open_private_mode(dir, name, false)?.is_none() {
+        return Ok(false);
+    }
+    fs::unlinkat(dir, name, fs::AtFlags::empty())?;
+    fs::fsync(dir)?;
+    Ok(true)
 }
 
 pub(super) fn settings_read(dir: &File) -> Result<Option<Vec<u8>>> {
@@ -404,9 +459,18 @@ pub(crate) fn private_read(dir: &File, name: &str, limit: u64) -> Result<Option<
 }
 
 pub(crate) fn private_replace(dir: &File, name: &str, contents: &[u8]) -> Result<()> {
+    private_replace_mode(dir, name, contents, true)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn key_replace(dir: &File, name: &str, contents: &[u8]) -> Result<()> {
+    private_replace_mode(dir, name, contents, false)
+}
+
+fn private_replace_mode(dir: &File, name: &str, contents: &[u8], exact: bool) -> Result<()> {
     check_name(name)?;
     ensure!(name != ".duolane-lock", "reserved lock file name");
-    open_private(dir, name)?;
+    open_private_mode(dir, name, exact)?;
     let temp = format!(".duolane-{}", uuid::Uuid::new_v4());
     let mut file = File::from(fs::openat(
         dir,
@@ -425,7 +489,7 @@ pub(crate) fn private_replace(dir: &File, name: &str, contents: &[u8]) -> Result
         check_private(&file)?;
         file.write_all(contents)?;
         file.sync_all()?;
-        open_private(dir, name)?;
+        open_private_mode(dir, name, exact)?;
         fs::renameat(dir, temp.as_str(), dir, name)?;
         renamed = true;
         fs::fsync(dir)?;

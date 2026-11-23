@@ -1,28 +1,48 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use crate::logging::create_logger;
-use crate::provider::RequestContext;
-use crate::retry::{compute_backoff_delay, sleep};
-
-use super::auth::token_store::StoredAuth;
 use super::client::*;
-use super::client_body::{CodexHttpBody, CodexHttpBodyCache};
-use super::client_capture::*;
+use super::client_body::CodexHttpBodyCache;
 use super::client_http_tools::{HttpToolState, STALLED_READ_FINISH_FIELD};
 use super::client_sse::*;
 #[cfg(test)]
 pub use super::events::CodexLimitWindow;
 use super::translate::request::ResponsesRequest;
-
+use crate::logging::create_logger;
+use crate::provider::RequestContext;
+use crate::retry::{compute_backoff_delay, sleep};
+use std::sync::Arc;
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 impl CodexHttpClient {
+    #[cfg(test)]
     async fn stream_codex_http_events(
         self: &Arc<Self>,
         body: &ResponsesRequest,
         ctx: &RequestContext,
         http_body: &CodexHttpBodyCache,
     ) -> Result<CodexHttpEventReceiver, CodexError> {
-        let mut auth = self.auth_for(&body.reasoning_account).await?;
+        self.stream_codex_http_events_inner(body, ctx, http_body, false)
+            .await
+    }
+    async fn stream_codex_http_events_inner(
+        self: &Arc<Self>,
+        body: &ResponsesRequest,
+        ctx: &RequestContext,
+        http_body: &CodexHttpBodyCache,
+        tracked: bool,
+    ) -> Result<CodexHttpEventReceiver, CodexError> {
+        if tracked {
+            ctx.recovery_budget.stamp(
+                super::sources::FailureKind::Final,
+                super::api::SendEvidence::NotSent,
+                None,
+            );
+        }
+        let mut auth = if tracked {
+            self.auth_for_buffered_http(&body.reasoning_account, &ctx.recovery_budget)
+                .await?
+        } else {
+            self.auth_for(&body.reasoning_account).await?
+        };
         let http_body = http_body
             .get_or_try_init(|| {
                 self.prepare_http_body(body, ctx.traffic.is_some(), "Failed to serialize request")
@@ -39,13 +59,24 @@ impl CodexHttpClient {
                     ctx,
                     use_responses_lite,
                     &mut auth_refresh_attempted,
+                    tracked,
                 )
                 .await
             {
                 Ok(attempt) => break attempt,
-                Err(error) if retryable_http_stream_error(&error) => {
+                Err(error)
+                    if retryable_http_stream_error(&error)
+                        && !(tracked
+                            && (ctx.recovery_budget.is_final_only()
+                                || ctx.recovery_budget.hosted())) =>
+                {
+                    ctx.recovery_budget.record_cause(&error);
                     if retries >= MAX_BUFFERED_TRANSPORT_RETRIES {
-                        return Err(CodexError::recovery_exhausted());
+                        return Err(if tracked {
+                            ctx.recovery_budget.transient_exhausted()
+                        } else {
+                            CodexError::recovery_exhausted()
+                        });
                     }
                     let delay = compute_backoff_delay(retries, error.retry_after.as_deref());
                     if delay.exceeds_budget {
@@ -55,18 +86,25 @@ impl CodexHttpClient {
                         .recovery_budget
                         .try_retry(Duration::from_millis(delay.wait_ms), false)
                     {
-                        return Err(CodexError::recovery_exhausted());
+                        return Err(if tracked {
+                            ctx.recovery_budget.transient_exhausted()
+                        } else {
+                            CodexError::recovery_exhausted()
+                        });
                     }
                     retries += 1;
                     sleep(delay.wait_ms).await;
                     if ctx.recovery_budget.expired() {
-                        return Err(CodexError::recovery_exhausted());
+                        return Err(if tracked {
+                            ctx.recovery_budget.transient_exhausted()
+                        } else {
+                            CodexError::recovery_exhausted()
+                        });
                     }
                 }
                 Err(error) => return Err(error),
             }
         };
-
         Ok(self.spawn_http_event_stream(
             HttpEventStreamState {
                 resp,
@@ -77,71 +115,22 @@ impl CodexHttpClient {
                 auth_refresh_attempted,
                 use_responses_lite,
                 retries,
+                tracked,
             },
             ctx.clone(),
         ))
     }
-
-    pub(super) async fn stream_codex_http_events_for_owner(
+    pub(super) async fn stream_codex_http_events_for_owner_tracked(
         self: &Arc<Self>,
         body: &ResponsesRequest,
         ctx: &RequestContext,
         http_body: &CodexHttpBodyCache,
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
-        let receiver = self.stream_codex_http_events(body, ctx, http_body).await?;
+        let receiver = self
+            .stream_codex_http_events_inner(body, ctx, http_body, ctx.recovery_budget.is_tracked())
+            .await?;
         Ok(super::websocket::CodexWebSocketEventStream::http(receiver))
     }
-
-    async fn start_http_event_attempt(
-        &self,
-        auth: &mut StoredAuth,
-        http_body: &CodexHttpBody,
-        ctx: &RequestContext,
-        use_responses_lite: bool,
-        auth_refresh_attempted: &mut bool,
-    ) -> Result<(reqwest::Response, Vec<(String, String)>, Instant), CodexError> {
-        loop {
-            let (resp, started_at) = self
-                .start_post_http(auth, http_body, ctx, use_responses_lite)
-                .await?;
-
-            if resp.status().as_u16() == 401 && !*auth_refresh_attempted {
-                *auth_refresh_attempted = true;
-                ctx.recovery_budget.start();
-                *auth = self.refreshed_auth(auth).await.inspect_err(|error| {
-                    if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
-                        ctx.recovery_budget.cancel_unspent_start();
-                    }
-                })?;
-                if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
-                    return Err(CodexError::recovery_exhausted());
-                }
-                continue;
-            }
-
-            if !resp.status().is_success() {
-                let response = self
-                    .collect_http_response(resp, started_at, ctx, &mut false)
-                    .await?;
-                let mut error = codex_status_error(response);
-                error.origin = CodexErrorOrigin::Http;
-                return Err(error);
-            }
-
-            let status = resp.status().as_u16();
-            let headers = response_headers(&resp);
-            if let Some(traffic) = ctx.traffic.as_deref() {
-                write_upstream_response_headers_capture(
-                    traffic,
-                    status,
-                    started_at.elapsed(),
-                    &headers,
-                );
-            }
-            return Ok((resp, headers, started_at));
-        }
-    }
-
     pub(super) async fn stream_codex_auto_events_for_owner(
         self: &Arc<Self>,
         body: &ResponsesRequest,
@@ -165,9 +154,11 @@ impl CodexHttpClient {
                 .size_http_selected
                 .store(true, std::sync::atomic::Ordering::Release);
             return self
-                .stream_codex_http_events_for_owner(body, ctx, http_body)
+                .stream_codex_http_events_for_owner_tracked(body, ctx, http_body)
                 .await;
         }
+        ctx.recovery_budget.enable_typed_websocket();
+        ctx.recovery_budget.begin_websocket();
         let mut prepared = None;
         if allow_size_routing
             && !http_body
@@ -178,7 +169,12 @@ impl CodexHttpClient {
             && self.auto_ws_max_bytes != 0
             && continuation.is_some_and(|c| c.candidate().previous_response_id.is_some())
         {
-            let auth = self.auth_for(&body.reasoning_account).await?;
+            let auth = if ctx.recovery_budget.is_tracked() {
+                self.auth_for_buffered_http(&body.reasoning_account, &ctx.recovery_budget)
+                    .await?
+            } else {
+                self.auth_for(&body.reasoning_account).await?
+            };
             if super::client_live::should_reset_websocket_pool(continuation)
                 && let Some(owner) = super::client_live::websocket_pool_owner(continuation)
             {
@@ -218,7 +214,7 @@ impl CodexHttpClient {
                             .size_http_selected
                             .store(true, std::sync::atomic::Ordering::Release);
                         return self
-                            .stream_codex_http_events_for_owner(body, ctx, http_body)
+                            .stream_codex_http_events_for_owner_tracked(body, ctx, http_body)
                             .await;
                     }
                 }
@@ -237,6 +233,7 @@ impl CodexHttpClient {
         match websocket.recv().await {
             Some(Err(err))
                 if self.auto_http_fallback_enabled
+                    && !ctx.recovery_budget.hosted()
                     && !http_body
                         .websocket_sent
                         .load(std::sync::atomic::Ordering::Acquire)
@@ -245,7 +242,7 @@ impl CodexHttpClient {
                 if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
                     return Err(CodexError::recovery_exhausted());
                 }
-                self.stream_codex_http_events_for_owner(body, ctx, http_body)
+                self.stream_codex_http_events_for_owner_tracked(body, ctx, http_body)
                     .await
             }
             Some(item) => {
@@ -268,7 +265,6 @@ impl CodexHttpClient {
             }),
         }
     }
-
     fn spawn_http_event_stream(
         self: &Arc<Self>,
         state: HttpEventStreamState,
@@ -283,6 +279,7 @@ impl CodexHttpClient {
             mut auth_refresh_attempted,
             use_responses_lite,
             mut retries,
+            tracked,
         } = state;
         let client = self.clone();
         let body_idle_timeout_ms = self.body_idle_timeout_ms;
@@ -338,6 +335,10 @@ impl CodexHttpClient {
                     let chunk = match chunk {
                         Ok(Ok(Some(chunk))) => chunk,
                         Ok(Ok(None)) => {
+                            if tracked {
+                                ctx.recovery_budget.failed_http_body(&decoder);
+                                hosted_tool_executed |= ctx.recovery_budget.hosted();
+                            }
                             let error = match decoder.finish() {
                                 Ok(()) => http_sse_error(
                                     "Codex SSE stream ended before a terminal response event",
@@ -364,6 +365,10 @@ impl CodexHttpClient {
                             return;
                         }
                         Ok(Err(err)) => {
+                            if tracked {
+                                ctx.recovery_budget.failed_http_body(&decoder);
+                                hosted_tool_executed |= ctx.recovery_budget.hosted();
+                            }
                             let error = CodexError {
                                 status: 0,
                                 message: format!(
@@ -391,6 +396,10 @@ impl CodexHttpClient {
                             return;
                         }
                         Err(_) => {
+                            if tracked {
+                                ctx.recovery_budget.failed_http_body(&decoder);
+                                hosted_tool_executed |= ctx.recovery_budget.hosted();
+                            }
                             let error = CodexError {
                                 status: 0,
                                 message: format!(
@@ -426,7 +435,20 @@ impl CodexHttpClient {
                         hosted_tool_executed |= events
                             .iter()
                             .filter_map(|event| event.payload.as_ref())
-                            .any(super::events::event_confirms_hosted_tool_execution);
+                            .any(|payload| {
+                                if tracked {
+                                    payload_confirms_hosted(payload)
+                                } else {
+                                    super::events::event_confirms_hosted_tool_execution(payload)
+                                }
+                            });
+                        if tracked {
+                            ctx.recovery_budget.failed_http_body(&decoder);
+                            ctx.recovery_budget.mark_final_only();
+                            if hosted_tool_executed {
+                                ctx.recovery_budget.mark_hosted();
+                            }
+                        }
                         log_http_stream_end(
                             &log,
                             "codex_http_stream_failed",
@@ -440,6 +462,7 @@ impl CodexHttpClient {
                         if !semantic_output_forwarded
                             && !hosted_tool_executed
                             && retryable_http_stream_error(&error)
+                            && !(tracked && ctx.recovery_budget.is_final_only())
                         {
                             break 'read_attempt error;
                         }
@@ -460,8 +483,10 @@ impl CodexHttpClient {
                             );
                         }
 
-                        hosted_tool_executed |=
-                            super::events::event_confirms_hosted_tool_execution(&payload);
+                        hosted_tool_executed |= http_payload_hosted(&payload, tracked);
+                        if tracked && hosted_tool_executed {
+                            ctx.recovery_budget.mark_hosted();
+                        }
                         let failure = super::events::classify_event_failure(&payload);
                         if failure.is_none() {
                             match tool_state.observe(&mut payload) {
@@ -474,6 +499,17 @@ impl CodexHttpClient {
                             }
                         }
                         let event_kind = super::events::classify_stream_event(&payload);
+                        if tracked
+                            && failure.is_some()
+                            && let Some(error) = trace_http_failure(
+                                &payload,
+                                &response_headers,
+                                &ctx.recovery_budget,
+                            )
+                        {
+                            let _ = tx.send(Err(error)).await;
+                            return;
+                        }
                         if !semantic_output_forwarded {
                             if let Some(limit) = super::events::usage_limit_from_event_with_headers(
                                 &payload,
@@ -493,6 +529,9 @@ impl CodexHttpClient {
                                 && failure.retryable()
                                 && !hosted_tool_executed
                             {
+                                if tracked {
+                                    ctx.recovery_budget.body_uncertain();
+                                }
                                 pending_events.clear();
                                 break 'read_attempt codex_event_failure_error(failure.clone());
                             }
@@ -580,8 +619,11 @@ impl CodexHttpClient {
                 drop(tool_state);
                 drop(pending_events);
                 loop {
+                    ctx.recovery_budget.record_cause(&retry_error);
                     if retries >= MAX_BUFFERED_TRANSPORT_RETRIES {
-                        let _ = tx.send(Err(CodexError::recovery_exhausted())).await;
+                        let _ = tx
+                            .send(Err(ctx.recovery_budget.http_exhausted(tracked)))
+                            .await;
                         return;
                     }
                     let delay = compute_backoff_delay(retries, retry_error.retry_after.as_deref());
@@ -593,7 +635,9 @@ impl CodexHttpClient {
                         .recovery_budget
                         .try_retry(Duration::from_millis(delay.wait_ms), false)
                     {
-                        let _ = tx.send(Err(CodexError::recovery_exhausted())).await;
+                        let _ = tx
+                            .send(Err(ctx.recovery_budget.http_exhausted(tracked)))
+                            .await;
                         return;
                     }
                     retries += 1;
@@ -602,7 +646,9 @@ impl CodexHttpClient {
                         _ = sleep(delay.wait_ms) => {}
                     }
                     if ctx.recovery_budget.expired() {
-                        let _ = tx.send(Err(CodexError::recovery_exhausted())).await;
+                        let _ = tx
+                            .send(Err(ctx.recovery_budget.http_exhausted(tracked)))
+                            .await;
                         return;
                     }
 
@@ -614,6 +660,7 @@ impl CodexHttpClient {
                             &ctx,
                             use_responses_lite,
                             &mut auth_refresh_attempted,
+                            tracked,
                         ) => result
                     };
                     match next_attempt {
@@ -623,7 +670,12 @@ impl CodexHttpClient {
                             started_at = next_started_at;
                             continue 'attempts;
                         }
-                        Err(error) if retryable_http_stream_error(&error) => {
+                        Err(error)
+                            if retryable_http_stream_error(&error)
+                                && !(tracked
+                                    && (ctx.recovery_budget.hosted()
+                                        || ctx.recovery_budget.is_final_only())) =>
+                        {
                             retry_error = error;
                         }
                         Err(error) => {
@@ -655,6 +707,450 @@ mod tests {
         stream.write_all(body).await.unwrap();
         stream.write_all(b"\r\n").await.unwrap();
         stream.flush().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tracked_live_http_startup_exhaustion_and_header_timeout() {
+        use super::super::api::SendEvidence;
+        use super::super::sources::{FailureKind, ReplayGate, SourceAttempt};
+        for timeout in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for _ in 0..if timeout { 1 } else { 4 } {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = [0_u8; 16384];
+                    assert!(stream.read(&mut request).await.unwrap() > 0);
+                    if timeout {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    } else {
+                        stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nretry-after: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+                    }
+                }
+            });
+            let gate = ReplayGate::new(timeout);
+            let attempt = SourceAttempt::new(
+                crate::config::codex_auth::AuthSource::ChatGpt,
+                &http_test_context(),
+                gate.clone(),
+            );
+            let mut client = http_test_client(format!("http://{addr}/responses"), 1_000);
+            client.header_timeout_ms = 50;
+            let client = Arc::new(client);
+            client.auth_manager().set_test_auth(http_test_auth());
+            let error = client
+                .stream_codex_http_events_for_owner_tracked(
+                    &buffered_test_request(),
+                    &attempt.context,
+                    &Default::default(),
+                )
+                .await
+                .err()
+                .unwrap();
+            let failure = attempt.failure(error);
+            assert!(
+                failure.kind
+                    == if timeout {
+                        FailureKind::Final
+                    } else {
+                        FailureKind::TransientExhausted
+                    }
+            );
+            assert!(failure.send == SendEvidence::OutcomeUnknown);
+            assert!(failure.credential.is_some());
+            assert_eq!(gate.ambiguous_hosted(), timeout);
+            assert_eq!(gate.may_switch(failure.kind, failure.send), !timeout);
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_live_websocket_401_quota_does_not_probe_or_refresh() {
+        use super::super::provider_test_support::{emit_live_event, next_live_websocket_request};
+        use super::super::sources::{CredentialId, FailureKind, ReplayGate, SourceAttempt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            next_live_websocket_request(&mut ws).await;
+            emit_live_event(&mut ws, &serde_json::json!({"type":"error", "status":401, "error":{"type":"usage_limit_reached","message":"limit","resets_at":1234567890}})).await;
+        });
+        let attempt = SourceAttempt::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            &http_test_context(),
+            ReplayGate::new(false),
+        );
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let mut events = client
+            .stream_codex_websocket_events_tracked(
+                &buffered_test_request(),
+                &attempt.context,
+                None,
+                Arc::default(),
+            )
+            .await
+            .unwrap();
+        assert!(events.recv().await.expect("terminal event").is_ok());
+        let failure = attempt.failure(CodexError::new(400, "later error".into()));
+        assert!(failure.kind == FailureKind::Final);
+        let expected = CredentialId::for_chatgpt_auth(&http_test_auth());
+        assert!(failure.credential == Some(expected));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tracked_live_websocket_401_permanent_precedes_refresh() {
+        use super::super::provider_test_support::{emit_live_event, next_live_websocket_request};
+        use super::super::sources::{ReplayGate, SourceAttempt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            next_live_websocket_request(&mut ws).await;
+            emit_live_event(&mut ws, &serde_json::json!({"type":"error", "status":401, "error":{"code":"invalid_prompt","message":"bad request"}})).await;
+        });
+        let attempt = SourceAttempt::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            &http_test_context(),
+            ReplayGate::new(false),
+        );
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let mut events = client
+            .stream_codex_websocket_events_tracked(
+                &buffered_test_request(),
+                &attempt.context,
+                None,
+                Arc::default(),
+            )
+            .await
+            .unwrap();
+        let item = events.recv().await.expect("terminal event");
+        assert!(item.is_ok());
+        assert!(attempt.context.recovery_budget.is_final_only());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tracked_live_401_permanent_precedes_refresh() {
+        use super::super::sources::{ReplayGate, SourceAttempt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut socket).await;
+            let body = br#"{"error":{"type":"invalid_request_error","message":"bad request"}}"#;
+            let header = format!(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(header.as_bytes()).await.unwrap();
+            socket.write_all(body).await.unwrap();
+        });
+        let attempt = SourceAttempt::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            &http_test_context(),
+            ReplayGate::new(false),
+        );
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let err = client
+            .stream_codex_http_events_for_owner_tracked(
+                &buffered_test_request(),
+                &attempt.context,
+                &Default::default(),
+            )
+            .await
+            .err()
+            .expect("permanent error");
+        assert!(err.origin == CodexErrorOrigin::Http);
+        assert_eq!(err.status, 401);
+        assert!(attempt.context.recovery_budget.is_final_only());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tracked_live_http_startup_denial_and_permanent_error() {
+        use super::super::api::SendEvidence;
+        use super::super::sources::{FailureKind, ReplayGate, SourceAttempt};
+        for permanent in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 16384];
+                assert!(stream.read(&mut request).await.unwrap() > 0);
+                let body: &[u8] = if permanent {
+                    br#"{"error":{"type":"invalid_request_error","message":"invalid"}}"#
+                } else {
+                    br#"{"error":{"type":"usage_limit_reached","message":"limit"}}"#
+                };
+                let status = if permanent {
+                    "500 Internal Server Error"
+                } else {
+                    "429 Too Many Requests"
+                };
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                stream.write_all(body).await.unwrap();
+            });
+            let gate = ReplayGate::new(true);
+            let attempt = SourceAttempt::new(
+                crate::config::codex_auth::AuthSource::ChatGpt,
+                &http_test_context(),
+                gate.clone(),
+            );
+            let client = Arc::new(http_test_client(format!("http://{addr}/responses"), 1_000));
+            client.auth_manager().set_test_auth(http_test_auth());
+            let error = client
+                .stream_codex_http_events_for_owner_tracked(
+                    &buffered_test_request(),
+                    &attempt.context,
+                    &Default::default(),
+                )
+                .await
+                .err()
+                .unwrap();
+            let failure = attempt.failure(error);
+            if permanent {
+                assert!(failure.kind == FailureKind::Final);
+                assert!(gate.ambiguous_hosted());
+                assert!(!gate.may_switch(failure.kind, failure.send));
+            } else {
+                assert!(failure.kind == FailureKind::UsageLimit);
+                assert!(failure.send == SendEvidence::DeniedBeforeExecution);
+                assert!(failure.credential.is_some());
+                assert!(gate.may_switch(failure.kind, failure.send));
+            }
+            server.await.unwrap();
+        }
+    }
+
+    async fn startup_review_case(case: u8) {
+        use super::super::sources::{FailureKind, ReplayGate, SourceAttempt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut count = 0;
+            while let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(Duration::from_millis(600), listener.accept()).await
+            {
+                count += 1;
+                let mut request = [0_u8; 16384];
+                assert!(stream.read(&mut request).await.unwrap() > 0);
+                let (status, body, extra): (&str, &[u8], usize) = match case {
+                    0 => ("503 Service Unavailable", b"data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"web_search_call\"}]}}\n\n", 0),
+                    1 if count == 1 => ("429 Too Many Requests", b"{", 10),
+                    1 => ("429 Too Many Requests", br#"{"error":{"type":"usage_limit_reached","message":"limit"}}"#, 0),
+                    _ => ("500 Internal Server Error", br#"{"error":{"message":"input exceeds context window"}}"#, 0),
+                };
+                stream.write_all(format!("HTTP/1.1 {status}\r\ncontent-length: {}\r\nretry-after: 0\r\nconnection: close\r\n\r\n", body.len()+extra).as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+                if count == 4 {
+                    break;
+                }
+            }
+            count
+        });
+        let gate = ReplayGate::new(true);
+        let attempt = SourceAttempt::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            &http_test_context(),
+            gate.clone(),
+        );
+        let client = Arc::new(http_test_client(format!("http://{addr}/responses"), 1_000));
+        client.auth_manager().set_test_auth(http_test_auth());
+        let error = client
+            .stream_codex_http_events_for_owner_tracked(
+                &buffered_test_request(),
+                &attempt.context,
+                &Default::default(),
+            )
+            .await
+            .err()
+            .unwrap();
+        let failure = attempt.failure(error);
+        let count = server.await.unwrap();
+        match case {
+            0 => {
+                assert!(gate.hosted());
+                assert_eq!(count, 1);
+            }
+            1 => {
+                assert!(gate.ambiguous_hosted());
+                assert_eq!(count, 2);
+                assert!(failure.kind == FailureKind::UsageLimit);
+                assert!(!gate.may_switch(failure.kind, failure.send));
+            }
+            _ => {
+                assert_eq!(count, 1);
+                assert!(failure.kind == FailureKind::Final);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_startup_hosted_evidence_stops_retry() {
+        startup_review_case(0).await;
+    }
+
+    #[tokio::test]
+    async fn tracked_startup_truncated_denial_retains_ambiguity() {
+        startup_review_case(1).await;
+    }
+
+    #[tokio::test]
+    async fn tracked_startup_context_message_is_final() {
+        startup_review_case(2).await;
+    }
+
+    async fn tracked_live_body_case(hosted: bool) {
+        use super::super::api::SendEvidence;
+        use super::super::sources::{FailureKind, ReplayGate, SourceAttempt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut count = 0;
+            while let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(Duration::from_millis(700), listener.accept()).await
+            {
+                count += 1;
+                let mut request = [0_u8; 16384];
+                assert!(stream.read(&mut request).await.unwrap() > 0);
+                let body: &[u8] = if hosted {
+                    b"data: {\"type\":\"response.web_search_call.completed\",\"item_id\":\"s\",\"output_index\":0}\n\n"
+                } else {
+                    b"data: {\"type\":\"response.failed\",\"status_code\":503,\"error\":{\"message\":\"server error\",\"retry_after\":\"0\"}}\n\n"
+                };
+                stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()+5).as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+                if count == 4 {
+                    break;
+                }
+            }
+            count
+        });
+        let gate = ReplayGate::new(hosted);
+        let attempt = SourceAttempt::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            &http_test_context(),
+            gate.clone(),
+        );
+        let client = Arc::new(http_test_client(format!("http://{addr}/responses"), 1_000));
+        client.auth_manager().set_test_auth(http_test_auth());
+        let mut events = client
+            .stream_codex_http_events_for_owner_tracked(
+                &buffered_test_request(),
+                &attempt.context,
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+        let error = loop {
+            if let Some(Err(error)) = events.recv().await {
+                break error;
+            }
+        };
+        let failure = attempt.failure(error);
+        let count = server.await.unwrap();
+        assert!(failure.send == SendEvidence::OutcomeUnknown);
+        if hosted {
+            assert!(gate.hosted());
+            assert_eq!(count, 1);
+            assert!(!gate.may_switch(failure.kind, failure.send));
+        } else {
+            assert_eq!(count, 4);
+            assert!(failure.kind == FailureKind::TransientExhausted);
+            assert!(gate.may_switch(failure.kind, failure.send));
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_live_body_hosted_failure_gates_replay() {
+        tracked_live_body_case(true).await;
+    }
+
+    #[tokio::test]
+    async fn tracked_live_body_transient_exhaustion_is_typed() {
+        tracked_live_body_case(false).await;
+    }
+
+    #[tokio::test]
+    async fn tracked_live_body_quota_permanent_and_corruption() {
+        use super::super::api::SendEvidence;
+        use super::super::sources::{FailureKind, ReplayGate, SourceAttempt};
+        for case in 0..4 {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 16384];
+                assert!(stream.read(&mut request).await.unwrap() > 0);
+                let body: &[u8] = match case {
+                    0 => b"data: {\"type\":\"error\",\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"limit\"}}\n\n",
+                    1 => b"data: {\"type\":\"error\",\"status_code\":500,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"invalid\"}}\n\n",
+                    2 => b"data: {\"type\":\"response.failed\",\"response\":{\"output\":[{\"type\":\"web_search_call\"}],\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"limit\"}}}\n\n",
+                    _ => b"data: {broken}\n\n",
+                };
+                stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(300), listener.accept())
+                        .await
+                        .is_err()
+                );
+            });
+            let gate = ReplayGate::new(true);
+            let attempt = SourceAttempt::new(
+                crate::config::codex_auth::AuthSource::ChatGpt,
+                &http_test_context(),
+                gate.clone(),
+            );
+            let client = Arc::new(http_test_client(format!("http://{addr}/responses"), 1_000));
+            client.auth_manager().set_test_auth(http_test_auth());
+            let mut events = client
+                .stream_codex_http_events_for_owner_tracked(
+                    &buffered_test_request(),
+                    &attempt.context,
+                    &Default::default(),
+                )
+                .await
+                .unwrap();
+            let error = loop {
+                if let Some(Err(error)) = events.recv().await {
+                    break error;
+                }
+            };
+            let failure = attempt.failure(error);
+            assert!(failure.send == SendEvidence::OutcomeUnknown);
+            assert!(
+                failure.kind
+                    == if case == 0 || case == 2 {
+                        FailureKind::UsageLimit
+                    } else {
+                        FailureKind::Final
+                    }
+            );
+            assert!(!gate.may_switch(failure.kind, failure.send));
+            if case == 2 {
+                assert!(gate.hosted());
+            }
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1142,6 +1638,70 @@ mod tests {
                 }
             };
             assert!(error.is_recovery_exhausted());
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_auto_transient_upgrade_falls_back_for_both_modes() {
+        use super::super::sources::{ReplayGate, SourceAttempt};
+        for live in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let _ = read_http_request(&mut socket).await;
+                socket.write_all(b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+                let (mut socket, _) =
+                    tokio::time::timeout(Duration::from_secs(3), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let request = read_http_request(&mut socket).await;
+                assert!(request.starts_with(b"POST "));
+                let body = b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(header.as_bytes()).await.unwrap();
+                socket.write_all(body).await.unwrap();
+            });
+            let client = Arc::new(authenticated_http_test_client(format!(
+                "http://{addr}/responses"
+            )));
+            let attempt = SourceAttempt::new(
+                crate::config::codex_auth::AuthSource::ChatGpt,
+                &http_test_context(),
+                ReplayGate::new(false),
+            );
+            let request = buffered_test_request();
+            let cache = CodexHttpBodyCache::new();
+            if live {
+                let mut events = client
+                    .stream_codex_auto_events_for_owner(
+                        &request,
+                        &attempt.context,
+                        &cache,
+                        None,
+                        true,
+                    )
+                    .await
+                    .unwrap();
+                assert!(events.recv().await.unwrap().is_ok());
+            } else {
+                let response = client
+                    .post_codex_with_transport(
+                        &request,
+                        &attempt.context,
+                        None,
+                        crate::config::CodexTransport::Auto,
+                        &cache,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status, 200);
+            }
             server.await.unwrap();
         }
     }

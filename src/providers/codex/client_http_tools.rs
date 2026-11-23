@@ -102,6 +102,14 @@ impl HttpToolState {
     }
 
     pub(super) fn observe(&mut self, payload: &mut Value) -> Result<bool, CodexError> {
+        self.observe_inner(payload, false)
+    }
+
+    pub(super) fn observe_strict(&mut self, payload: &mut Value) -> Result<bool, CodexError> {
+        self.observe_inner(payload, true)
+    }
+
+    fn observe_inner(&mut self, payload: &mut Value, strict: bool) -> Result<bool, CodexError> {
         let item = &payload["item"];
         match (string_field(payload, "type"), string_field(item, "type")) {
             (Some("response.output_item.added"), Some("function_call")) => {
@@ -109,7 +117,7 @@ impl HttpToolState {
                 Ok(false)
             }
             (Some("response.function_call_arguments.delta"), _) => {
-                if let Some(completed) = self.hold_delta(payload)? {
+                if let Some(completed) = self.hold_delta(payload, strict)? {
                     *payload = completed;
                     Ok(true)
                 } else {
@@ -162,7 +170,7 @@ impl HttpToolState {
         Ok(())
     }
 
-    fn hold_delta(&mut self, payload: &Value) -> Result<Option<Value>, CodexError> {
+    fn hold_delta(&mut self, payload: &Value, strict: bool) -> Result<Option<Value>, CodexError> {
         let delta = string_field(payload, "delta")
             .ok_or_else(|| http_tool_error("Codex HTTP function call delta is missing a string"))?;
         let sole_call = self.calls.len() == 1;
@@ -173,7 +181,7 @@ impl HttpToolState {
         check_args_size(call.args.len() + delta.len())?;
         self.bytes = checked_pending_bytes(self.bytes, delta.len())?;
         call.args.push_str(delta);
-        if !sole_call {
+        if strict || !sole_call {
             return Ok(None);
         }
         let Some(args) = repair_whitespace_stalled_read_args(&call.name, &call.args) else {

@@ -1,5 +1,5 @@
 #[cfg(unix)]
-mod store;
+pub(crate) mod store;
 #[cfg(unix)]
 mod transcripts;
 
@@ -171,6 +171,7 @@ mod unix {
         let mut command = Command::new("claude");
         command
             .args(["auth", "login", "--claudeai"])
+            .env_remove("DUOLANE_OPENAI_API_KEY")
             .env("CLAUDE_CONFIG_DIR", &profile.path);
         inherit_login_lock(&mut command, &profile._lock)?;
         let result = (|| -> Result<()> {

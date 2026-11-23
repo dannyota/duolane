@@ -8,7 +8,7 @@ use super::client::*;
 use super::client_live::*;
 pub use super::events::CodexUsageLimit;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CodexError {
     pub status: u16,
     pub message: String,
@@ -27,7 +27,9 @@ const CODEX_GZIP_INPUT_LIMIT_DETAIL: &str = "codex_gzip_input_limit";
 pub enum CodexErrorOrigin {
     Http,
     WebSocket,
+    WebSocketTransient,
     WebSocketHandshake,
+    WebSocketValidation,
     WebSocketOverload,
     Auth,
     BufferedHttp,
@@ -196,7 +198,7 @@ pub(super) fn codex_status_error(response: CodexResponse) -> CodexError {
     }
 }
 
-fn codex_status_error_message(body: &[u8]) -> Option<String> {
+pub(super) fn codex_status_error_message(body: &[u8]) -> Option<String> {
     let (text, code) = match serde_json::from_slice::<serde_json::Value>(body) {
         Ok(value) => (
             value
@@ -249,8 +251,10 @@ pub(super) fn should_retry_codex_status(status: u16) -> bool {
 pub(super) fn codex_error_origin_name(origin: CodexErrorOrigin) -> &'static str {
     match origin {
         CodexErrorOrigin::Http => "http",
-        CodexErrorOrigin::WebSocket => "websocket",
-        CodexErrorOrigin::WebSocketHandshake => "websocket_handshake",
+        CodexErrorOrigin::WebSocket | CodexErrorOrigin::WebSocketTransient => "websocket",
+        CodexErrorOrigin::WebSocketHandshake | CodexErrorOrigin::WebSocketValidation => {
+            "websocket_handshake"
+        }
         CodexErrorOrigin::WebSocketOverload => "websocket_overload",
         CodexErrorOrigin::Auth => "auth",
         CodexErrorOrigin::BufferedHttp => "buffered_http",
@@ -260,7 +264,10 @@ pub(super) fn codex_error_origin_name(origin: CodexErrorOrigin) -> &'static str 
 }
 
 pub(super) fn is_retryable_transport_error(err: &CodexError) -> bool {
-    if err.is_recovery_exhausted() || err.is_websocket_overload() {
+    if err.is_recovery_exhausted()
+        || err.is_websocket_overload()
+        || err.origin == CodexErrorOrigin::WebSocketValidation
+    {
         return false;
     }
     if matches!(
@@ -269,7 +276,10 @@ pub(super) fn is_retryable_transport_error(err: &CodexError) -> bool {
     ) {
         return false;
     }
-    if err.origin == CodexErrorOrigin::WebSocketHandshake {
+    if matches!(
+        err.origin,
+        CodexErrorOrigin::WebSocketHandshake | CodexErrorOrigin::WebSocketTransient
+    ) {
         if err.detail.as_deref() == Some(super::websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL) {
             return false;
         }
@@ -337,7 +347,10 @@ pub(super) fn should_refresh_after_unauthorized(
 }
 
 pub(super) fn should_fallback_to_http(err: &CodexError) -> bool {
-    (err.origin == CodexErrorOrigin::WebSocketHandshake || err.is_websocket_overload())
+    (err.origin == CodexErrorOrigin::WebSocketHandshake
+        || (err.origin == CodexErrorOrigin::WebSocketTransient
+            && matches!(err.status, 500 | 502 | 503 | 504 | 529))
+        || err.is_websocket_overload())
         && err.status != http::StatusCode::PROXY_AUTHENTICATION_REQUIRED.as_u16()
         && err.detail.as_deref() != Some(super::websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL)
 }
@@ -495,6 +508,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn transient_upgrade_failure_can_fallback() {
+        let err = CodexError {
+            status: 502,
+            message: "upgrade failed".into(),
+            detail: None,
+            retry_after: None,
+            usage_limit: None,
+            origin: CodexErrorOrigin::WebSocketTransient,
+        };
+        assert!(should_fallback_to_http(&err));
     }
 
     #[test]

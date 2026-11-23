@@ -7,6 +7,7 @@ use crate::retry::{compute_backoff_delay, sleep};
 
 use super::auth::token_store::StoredAuth;
 use super::client::*;
+use super::client_auth::retry_auth;
 use super::client_body::CodexHttpBody;
 use super::client_capture::*;
 use super::search::{SearchRequest, SearchResponse};
@@ -301,14 +302,19 @@ impl CodexHttpClient {
         body: &SearchRequest,
         ctx: &RequestContext,
     ) -> Result<SearchResponse, CodexError> {
-        let mut auth = self.auth_manager.get_auth().await.map_err(|e| CodexError {
-            status: 401,
-            message: "Auth error".to_string(),
-            detail: Some(e.to_string()),
-            retry_after: None,
-            usage_limit: None,
-            origin: CodexErrorOrigin::Auth,
-        })?;
+        ctx.recovery_budget.begin_http_attempt();
+        let mut auth = retry_auth(&ctx.recovery_budget, || self.auth_manager.get_auth())
+            .await
+            .map_err(|e| CodexError {
+                status: 401,
+                message: "Auth error".to_string(),
+                detail: Some(e.to_string()),
+                retry_after: None,
+                usage_limit: None,
+                origin: CodexErrorOrigin::Auth,
+            })?;
+        ctx.recovery_budget
+            .set_credential(super::sources::CredentialId::for_chatgpt_auth(&auth));
         let http_body = self
             .prepare_http_body(
                 body,
@@ -320,17 +326,68 @@ impl CodexHttpClient {
         let mut retries = 0_u32;
 
         loop {
+            ctx.recovery_budget
+                .set_kind(super::sources::FailureKind::Final);
             let response = self
                 .attempt_post_search(&auth, &http_body, ctx, &body.id)
                 .await?;
+            if ctx.recovery_budget.is_tracked() {
+                if !(200..300).contains(&response.status)
+                    && serde_json::from_slice::<SearchResponse>(&response.body).is_ok()
+                {
+                    ctx.recovery_budget.mark_hosted();
+                }
+                if response.status >= 500 {
+                    ctx.recovery_budget.mark_ambiguous_hosted();
+                }
+                let permanent = super::client::explicit_permanent_buffered_error(&response.body);
+                if permanent.is_some()
+                    || super::client::codex_status_error_message(&response.body)
+                        .is_some_and(|message| super::events::is_context_overflow(None, &message))
+                {
+                    ctx.recovery_budget.mark_final_only();
+                    let mut error = codex_status_error(response);
+                    error.usage_limit = None;
+                    if let Some(failure) = permanent.filter(|failure| failure.context_window) {
+                        error.detail =
+                            Some(format!("{} (context_length_exceeded)", failure.message));
+                    }
+                    return Err(error);
+                }
+                if super::events::usage_limit_from_response(&response.body, &response.headers)
+                    .is_some()
+                {
+                    ctx.recovery_budget
+                        .set_kind(super::sources::FailureKind::UsageLimit);
+                    if super::recovery::RecoveryBudget::quota_denied_before_execution(
+                        response.status,
+                        &response.body,
+                        false,
+                    ) {
+                        ctx.recovery_budget
+                            .set_send(super::api::SendEvidence::DeniedBeforeExecution);
+                    } else {
+                        ctx.recovery_budget.mark_ambiguous_hosted();
+                    }
+                    return Err(codex_status_error(response));
+                }
+                if ctx.recovery_budget.hosted() {
+                    return Err(codex_status_error(response));
+                }
+                if response.status == 429 {
+                    ctx.recovery_budget.mark_ambiguous_hosted();
+                }
+            }
             if response.status == 401 && !auth_refresh_attempted {
                 auth_refresh_attempted = true;
                 ctx.recovery_budget.start();
-                auth = self
-                    .auth_manager
-                    .force_refresh(&auth.access)
-                    .await
-                    .map_err(auth_refresh_error)?;
+                auth = retry_auth(&ctx.recovery_budget, || {
+                    self.auth_manager.force_refresh(&auth.access)
+                })
+                .await
+                .map_err(auth_refresh_error)?;
+                ctx.recovery_budget
+                    .set_credential(super::sources::CredentialId::for_chatgpt_auth(&auth));
                 if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
                     return Err(CodexError::recovery_exhausted());
                 }
@@ -369,7 +426,7 @@ impl CodexHttpClient {
             if !(200..300).contains(&response.status) {
                 return Err(codex_status_error(response));
             }
-            return serde_json::from_slice(&response.body).map_err(|e| CodexError {
+            let result = serde_json::from_slice(&response.body).map_err(|e| CodexError {
                 status: 502,
                 message: "Failed to decode Codex search response".to_string(),
                 detail: Some(e.to_string()),
@@ -377,6 +434,12 @@ impl CodexHttpClient {
                 usage_limit: None,
                 origin: CodexErrorOrigin::Http,
             });
+            if result.is_ok() {
+                ctx.recovery_budget.mark_hosted();
+            } else {
+                ctx.recovery_budget.mark_ambiguous_hosted();
+            }
+            return result;
         }
     }
 
@@ -399,29 +462,42 @@ impl CodexHttpClient {
             request = request.header(key.as_str(), value.as_bytes());
         }
         let started_at = Instant::now();
+        ctx.recovery_budget
+            .set_send(super::api::SendEvidence::OutcomeUnknown);
         let mut response = tokio::time::timeout(
             Duration::from_millis(self.header_timeout_ms),
             http_body.apply(request).send(),
         )
         .await
-        .map_err(|_| CodexError {
-            status: 0,
-            message: format!(
-                "Timed out waiting {}ms for Codex search response headers",
-                self.header_timeout_ms
-            ),
-            detail: None,
-            retry_after: None,
-            usage_limit: None,
-            origin: CodexErrorOrigin::Http,
+        .map_err(|_| {
+            ctx.recovery_budget.mark_ambiguous_hosted();
+            CodexError {
+                status: 0,
+                message: format!(
+                    "Timed out waiting {}ms for Codex search response headers",
+                    self.header_timeout_ms
+                ),
+                detail: None,
+                retry_after: None,
+                usage_limit: None,
+                origin: CodexErrorOrigin::Http,
+            }
         })?
-        .map_err(|e| CodexError {
-            status: 0,
-            message: format!("Codex search network error: {e}"),
-            detail: None,
-            retry_after: None,
-            usage_limit: None,
-            origin: CodexErrorOrigin::Http,
+        .map_err(|e| {
+            if e.is_connect() {
+                ctx.recovery_budget
+                    .set_send(super::api::SendEvidence::NotSent);
+            } else {
+                ctx.recovery_budget.mark_ambiguous_hosted();
+            }
+            CodexError {
+                status: 0,
+                message: format!("Codex search network error: {e}"),
+                detail: None,
+                retry_after: None,
+                usage_limit: None,
+                origin: CodexErrorOrigin::Http,
+            }
         })?;
 
         let status = response.status().as_u16();
@@ -443,7 +519,8 @@ impl CodexHttpClient {
                 &mut false,
                 &mut false,
             )
-            .await?;
+            .await
+            .inspect_err(|_| ctx.recovery_budget.mark_ambiguous_hosted())?;
 
         if let Some(traffic) = ctx.traffic.as_deref() {
             write_upstream_response_capture(traffic, status, started_at.elapsed(), &headers, &body);
@@ -465,6 +542,79 @@ mod tests {
 
     use super::super::client_test_support::*;
     use super::*;
+
+    #[tokio::test]
+    async fn tracked_search_quota_and_ambiguous_retry_have_distinct_replay_evidence() {
+        use super::super::sources::{FailureKind, ReplayGate, SourceAttempt};
+        use crate::config::codex_auth::AuthSource;
+        for first_status in [None, Some(503), Some(429)] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for index in 0..=usize::from(first_status.is_some()) {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let _ = read_http_request(&mut stream).await;
+                    if index == 0
+                        && let Some(status) = first_status
+                    {
+                        let response = format!(
+                            "HTTP/1.1 {status} Error\r\ncontent-length: 0\r\nretry-after: 0\r\nconnection: close\r\n\r\n"
+                        );
+                        stream.write_all(response.as_bytes()).await.unwrap();
+                    } else {
+                        let body =
+                            br#"{"error":{"type":"usage_limit_reached","resets_at":2000000000}}"#;
+                        let headers = format!(
+                            "HTTP/1.1 429 Too Many Requests\r\ncontent-length: {}\r\nretry-after: 0\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        stream.write_all(headers.as_bytes()).await.unwrap();
+                        stream.write_all(body).await.unwrap();
+                    }
+                }
+            });
+            let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+            let gate = ReplayGate::new(true);
+            let attempt =
+                SourceAttempt::new(AuthSource::ChatGpt, &http_test_context(), gate.clone());
+            let request = super::super::search::SearchRequest {
+                id: "session".into(),
+                model: "model".into(),
+                reasoning: None,
+                input: None,
+                commands: super::super::search::SearchCommands {
+                    search_query: vec![super::super::search::SearchQuery { q: "query".into() }],
+                },
+                settings: super::super::search::SearchSettings {
+                    filters: None,
+                    allowed_callers: vec!["direct"],
+                    external_web_access: true,
+                },
+                max_output_tokens: 2500,
+            };
+            let error = client
+                .post_search(&request, &attempt.context)
+                .await
+                .unwrap_err();
+            let failure = attempt.failure(error);
+            assert!(failure.kind == FailureKind::UsageLimit);
+            assert!(
+                failure.credential
+                    == Some(super::super::sources::CredentialId::for_chatgpt_auth(
+                        &http_test_auth()
+                    ))
+            );
+            assert_eq!(
+                failure.error.usage_limit.as_ref().unwrap().resets_at,
+                Some(2_000_000_000)
+            );
+            assert_eq!(
+                gate.may_switch(failure.kind, failure.send),
+                first_status.is_none()
+            );
+            server.await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn search_refresh_and_failures_share_four_attempt_limit() {

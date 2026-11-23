@@ -1,5 +1,5 @@
 use super::AppState;
-use super::openai::{log_native_request_completed, native_session_id};
+use super::openai::{log_native_request_completed, native_session_id, native_source_error};
 use super::request_monitor::{RequestMonitorGuard, monitor_response_body, redacted_query};
 use crate::{
     logging::create_logger,
@@ -59,8 +59,20 @@ async fn dispatch_image_request(
     let session_id = native_session_id(&headers);
     if let Some(monitor) = state.monitor.as_ref() {
         monitor.request_started(&req_id, session_id.clone(), None, EndpointKind::Images);
+        monitor.codex_source(&req_id, "chatgpt");
     }
     let request_guard = RequestMonitorGuard::new(state.monitor.clone(), req_id.clone());
+    if let Some(response) = native_source_error(&state.registry).await {
+        log_native_request_completed(
+            &log,
+            &req_id,
+            operation.label(),
+            None,
+            response.status(),
+            started_at,
+        );
+        return monitor_response_body(response, request_guard);
+    }
 
     if uri.query().is_some() {
         let response = image_error_response(ImageRequestError {

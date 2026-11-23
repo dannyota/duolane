@@ -11,7 +11,7 @@ fn check_upstream_url_settings(settings: Vec<(&'static str, String)>) -> anyhow:
     Ok(())
 }
 
-fn upstream_url_problem(raw: &str) -> Option<&'static str> {
+pub(crate) fn upstream_url_problem(raw: &str) -> Option<&'static str> {
     let Ok(url) = url::Url::parse(raw) else {
         return Some("is not a valid absolute URL");
     };

@@ -10,6 +10,41 @@ use crate::traffic::TrafficCapture;
 
 use super::count_tokens::{approx_token_count, truncate_to_token_budget};
 
+pub(super) fn invalid_search_response(
+    ctx: &crate::provider::RequestContext,
+    message: String,
+) -> axum::response::Response {
+    let mut response = crate::anthropic::error::json_error(
+        http::StatusCode::BAD_REQUEST,
+        "invalid_request_error",
+        message.clone(),
+    );
+    if ctx.recovery_budget.is_tracked() {
+        response
+            .extensions_mut()
+            .insert(std::sync::Arc::new(super::sources::SourceFailure {
+                kind: super::sources::FailureKind::Final,
+                send: super::api::SendEvidence::NotSent,
+                credential: None,
+                error: super::client::CodexError::new(400, message),
+            }));
+    }
+    response
+}
+
+pub(super) fn tracked_error_response(
+    ctx: &crate::provider::RequestContext,
+    error: super::client::CodexError,
+) -> axum::response::Response {
+    let mut response = super::error_response::map_codex_error_to_response(&error);
+    if ctx.recovery_budget.is_tracked() {
+        response.extensions_mut().insert(std::sync::Arc::new(
+            ctx.recovery_budget.failure_with_cause(error),
+        ));
+    }
+    response
+}
+
 const SEARCH_OUTPUT_TOKEN_BUDGET: u64 = 2_500;
 const SEARCH_ASSISTANT_CONTEXT_TOKEN_BUDGET: u64 = 1_000;
 const SEARCH_USER_CONTEXT_MESSAGES: usize = 2;
@@ -419,6 +454,10 @@ fn search_filters(req: &MessagesRequest) -> Option<SearchFilters> {
         .as_array()?
         .iter()
         .find(|tool| tool.get("type").and_then(Value::as_str) == Some("web_search_20250305"))?;
+    search_tool_filters(tool)
+}
+
+pub(super) fn search_tool_filters(tool: &Value) -> Option<SearchFilters> {
     let allowed_domains = string_array(tool.get("allowed_domains"));
     let blocked_domains = string_array(tool.get("blocked_domains"));
     (allowed_domains.is_some() || blocked_domains.is_some()).then_some(SearchFilters {

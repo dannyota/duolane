@@ -111,7 +111,6 @@ pub(super) fn render_request_detail(
                     .unwrap_or_else(|| "-".to_string()),
                 http_status_color(request.http_status),
             ),
-            detail_line("provider", request.provider.as_deref().unwrap_or("-"), TEAL),
             detail_line("model", request.model.as_deref().unwrap_or("-"), DIM_WHITE),
             detail_line("effort", request.effort.as_deref().unwrap_or("-"), YELLOW),
             detail_line("latency", format_duration(request.latency), DIM_WHITE),
@@ -133,6 +132,15 @@ pub(super) fn render_request_detail(
                 DIM_WHITE,
             ),
         ];
+        let provider = request.provider.as_deref().unwrap_or("-");
+        if let Some(source) = &request.codex_source {
+            lines.insert(
+                1,
+                detail_line("provider", format!("{provider} [{source}]"), TEAL),
+            );
+        } else {
+            lines.insert(8, detail_line("provider", provider, TEAL));
+        }
         if let Some(error) = request.error.as_deref().filter(|error| !error.is_empty()) {
             lines.push(detail_line("detail", error, YELLOW));
         }
@@ -175,6 +183,35 @@ mod tests {
     use crate::monitor::snapshot::MonitorSnapshot;
     use crate::monitor::{EndpointKind, MonitorHandle, mock_state};
     use crate::tui::tests::{buffer_text, draw};
+
+    #[test]
+    fn claude_detail_keeps_started_in_five_line_body() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("request-1", None, None, EndpointKind::Messages);
+        monitor.provider_selected("request-1", "anthropic", "model", None);
+        monitor.request_completed("request-1", 200, None, None);
+        let state: MonitorSnapshot = monitor.snapshot().into();
+        let detail = draw(120, 7, |frame| {
+            render_request_detail(frame, frame.area(), &state, 0)
+        });
+        assert!(buffer_text(&detail).contains("started"));
+    }
+
+    #[test]
+    fn request_detail_displays_sanitized_codex_source() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("request-1", None, None, EndpointKind::Messages);
+        monitor.codex_source("request-1", "api key (from chatgpt: usage limit)\x1b");
+        monitor.request_completed("request-1", 200, None, None);
+        let state: MonitorSnapshot = monitor.snapshot().into();
+        let state = state.for_terminal();
+        let detail = draw(120, 24, |frame| {
+            render_request_detail(frame, frame.area(), &state, 0)
+        });
+        let text = buffer_text(&detail);
+        assert!(text.contains("api key (from chatgpt: usage limit)"));
+        assert!(!text.contains('\x1b'));
+    }
 
     #[test]
     fn mock_request_detail_exposes_error_and_capture_fields() {

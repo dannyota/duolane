@@ -1,18 +1,8 @@
-use axum::body::Body;
-use axum::response::{IntoResponse, Response};
-use bytes::Bytes;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use crate::anthropic::sse::{parse_sse_events, usage_from_anthropic_sse};
-use crate::config;
-use crate::logging::create_logger;
-use crate::provider::RequestContext;
-#[cfg(test)]
-use crate::request_identity::ConversationIdentity;
-use crate::retry::{compute_backoff_delay, sleep};
-
 use super::client::CodexHttpClient;
+use super::client_sse::{
+    append_live_metadata_payload, event_stream_response, record_live_stream_downstream_capture,
+    record_live_stream_progress, single_live_stream_response, translate_live_stream_payload,
+};
 use super::compaction::CompactionAttempt;
 #[cfg(test)]
 use super::compaction::{begin_compaction, store_compaction};
@@ -21,6 +11,7 @@ use super::continuation::ContinuationReservation;
 use super::continuation::continuation_candidate_for_owner;
 use super::error_response::*;
 use super::live_completion::*;
+use super::recovery::live_retry_exhausted;
 use super::request_state::*;
 use super::translate::live_stream::LiveStreamTranslator;
 #[cfg(test)]
@@ -28,15 +19,20 @@ use super::translate::reasoning_signature::ReasoningAccount;
 #[cfg(test)]
 use super::translate::request::{TranslateOptions, translate_request};
 use super::*;
-
+use crate::config;
+use crate::logging::create_logger;
+use crate::provider::RequestContext;
+#[cfg(test)]
+use crate::request_identity::ConversationIdentity;
+use crate::retry::{compute_backoff_delay, sleep};
+use axum::response::Response;
+use bytes::Bytes;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 const MAX_RETRYABLE_LIVE_STREAM_RETRIES: u32 = 3;
-
 pub(super) const MAX_EMPTY_COMPLETION_RETRIES: u32 = 2;
-
 pub(super) const EMPTY_CODEX_COMPLETION_DETAIL: &str = "empty_codex_completion";
-
 const LIVE_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
-
 enum LiveStreamStart {
     Response(Response),
     Retry {
@@ -44,13 +40,11 @@ enum LiveStreamStart {
         full_context_retry_attempted: bool,
     },
 }
-
 #[derive(Clone, Copy)]
 pub(super) struct LiveStreamCompaction {
     pub(super) compact_boundary: bool,
     pub(super) attempt: Option<CompactionAttempt>,
 }
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn live_stream_response(
     client: Arc<CodexHttpClient>,
@@ -64,6 +58,9 @@ pub(super) async fn live_stream_response(
     successful_tool_tail: bool,
     websocket_sent: Arc<std::sync::atomic::AtomicBool>,
 ) -> Response {
+    if transport == config::CodexTransport::WebSocket {
+        ctx.recovery_budget.enable_typed_websocket();
+    }
     let model = model.to_string();
     let started_at = Instant::now();
     let request_continuation = continuation.clone();
@@ -76,12 +73,11 @@ pub(super) async fn live_stream_response(
     let mut attempt = 0_u32;
     let mut continuation = Some(continuation);
     let http_body = client_body::CodexHttpBodyCache::with_websocket_sent(websocket_sent);
-
     loop {
         let upstream_events = match transport {
             config::CodexTransport::Http => {
                 client
-                    .stream_codex_http_events_for_owner(&request_body, &ctx, &http_body)
+                    .stream_codex_http_events_for_owner_tracked(&request_body, &ctx, &http_body)
                     .await
             }
             config::CodexTransport::WebSocket => {
@@ -110,7 +106,7 @@ pub(super) async fn live_stream_response(
             Ok(events) => events,
             Err(err) if err.origin == client::CodexErrorOrigin::Http => {
                 cleanup.abort();
-                return map_codex_error_to_response(&err);
+                return tracked_error_response(&ctx, &err);
             }
             Err(err) if retryable_live_start_codex_error(&err) => {
                 empty_completion_attempts = 0;
@@ -127,34 +123,33 @@ pub(super) async fn live_stream_response(
                 }
                 if attempt >= MAX_RETRYABLE_LIVE_STREAM_RETRIES {
                     cleanup.abort();
-                    return map_codex_error_to_response(&client::CodexError::recovery_exhausted());
+                    return exhausted_response(&ctx, transport, &err);
                 }
                 let delay = compute_backoff_delay(attempt, err.retry_after.as_deref());
                 if delay.exceeds_budget {
                     cleanup.abort();
-                    return map_codex_error_to_response(&err);
+                    return tracked_error_response(&ctx, &err);
                 }
                 if !ctx
                     .recovery_budget
                     .try_retry(Duration::from_millis(delay.wait_ms), false)
                 {
                     cleanup.abort();
-                    return map_codex_error_to_response(&client::CodexError::recovery_exhausted());
+                    return exhausted_response(&ctx, transport, &err);
                 }
                 attempt += 1;
                 sleep(delay.wait_ms).await;
                 if ctx.recovery_budget.expired() {
                     cleanup.abort();
-                    return map_codex_error_to_response(&client::CodexError::recovery_exhausted());
+                    return exhausted_response(&ctx, transport, &err);
                 }
                 continue;
             }
             Err(err) => {
                 cleanup.abort();
-                return map_codex_error_to_response(&err);
+                return tracked_error_response(&ctx, &err);
             }
         };
-
         match live_stream_response_once(
             upstream_events,
             message_id.clone(),
@@ -178,7 +173,14 @@ pub(super) async fn live_stream_response(
             } => {
                 if error.origin == client::CodexErrorOrigin::Http {
                     cleanup.abort();
-                    return map_codex_error_to_response(&error);
+                    return tracked_error_response(&ctx, &error);
+                }
+                if transport != config::CodexTransport::Http
+                    && ctx.recovery_budget.is_tracked()
+                    && ctx.recovery_budget.hosted()
+                {
+                    cleanup.abort();
+                    return tracked_error_response(&ctx, &error);
                 }
                 if error.detail.as_deref() == Some(EMPTY_CODEX_COMPLETION_DETAIL) {
                     empty_completion_attempts += 1;
@@ -188,7 +190,7 @@ pub(super) async fn live_stream_response(
                 let dropped = drop_live_continuation_for_retry(&mut continuation);
                 if full_context_retry_attempted && is_missing_previous_response_error(&error) {
                     cleanup.abort();
-                    return map_codex_error_to_response(&error);
+                    return tracked_error_response(&ctx, &error);
                 }
                 if dropped && is_missing_previous_response_error(&error) {
                     if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
@@ -215,7 +217,7 @@ pub(super) async fn live_stream_response(
                         );
                     }
                     cleanup.abort();
-                    return map_codex_error_to_response(&client::CodexError::recovery_exhausted());
+                    return exhausted_response(&ctx, transport, &error);
                 }
                 let delay = compute_backoff_delay(attempt, error.retry_after.as_deref());
                 if delay.exceeds_budget {
@@ -233,26 +235,52 @@ pub(super) async fn live_stream_response(
                         );
                     }
                     cleanup.abort();
-                    return map_codex_error_to_response(&error);
+                    return tracked_error_response(&ctx, &error);
                 }
                 if !ctx.recovery_budget.try_retry(
                     Duration::from_millis(delay.wait_ms),
                     is_empty_completion_error(&error),
                 ) {
                     cleanup.abort();
-                    return map_codex_error_to_response(&client::CodexError::recovery_exhausted());
+                    return exhausted_response(&ctx, transport, &error);
                 }
                 attempt += 1;
                 sleep(delay.wait_ms).await;
+                if transport != config::CodexTransport::Http && ctx.recovery_budget.hosted() {
+                    cleanup.abort();
+                    return tracked_error_response(&ctx, &error);
+                }
                 if ctx.recovery_budget.expired() {
                     cleanup.abort();
-                    return map_codex_error_to_response(&client::CodexError::recovery_exhausted());
+                    return exhausted_response(&ctx, transport, &error);
                 }
             }
         }
     }
 }
-
+fn exhausted_response(
+    ctx: &RequestContext,
+    transport: config::CodexTransport,
+    cause: &client::CodexError,
+) -> Response {
+    let exhausted = live_retry_exhausted(ctx, transport, cause);
+    let mut response = map_codex_error_to_response(&exhausted);
+    if ctx.recovery_budget.is_tracked() {
+        response
+            .extensions_mut()
+            .insert(Arc::new(ctx.recovery_budget.failure(cause.clone())));
+    }
+    response
+}
+pub(super) fn tracked_error_response(ctx: &RequestContext, error: &client::CodexError) -> Response {
+    let mut response = map_codex_error_to_response(error);
+    if ctx.recovery_budget.is_tracked() {
+        response.extensions_mut().insert(Arc::new(
+            ctx.recovery_budget.failure_with_cause(error.clone()),
+        ));
+    }
+    response
+}
 fn provider_retry(
     upstream_events: &websocket::CodexWebSocketEventStream,
     error: client::CodexError,
@@ -264,7 +292,6 @@ fn provider_retry(
         full_context_retry_attempted,
     }
 }
-
 #[allow(clippy::too_many_arguments)]
 async fn live_stream_response_once(
     mut upstream_events: websocket::CodexWebSocketEventStream,
@@ -278,18 +305,41 @@ async fn live_stream_response_once(
     accept_empty: bool,
 ) -> LiveStreamStart {
     let is_http = upstream_events.is_http();
+    let tracked_http = ctx.recovery_budget.is_tracked();
+    let mut semantic_ready = false;
     let mut translator = LiveStreamTranslator::for_request(message_id, model, &request_body)
         .with_http_tool_commits(is_http);
     let mut upstream_sse_body = Vec::new();
     let mut pending_chunk = Vec::new();
     let mut generation_started = false;
     let mut hosted_tool_executed = false;
-
     while let Some(item) = upstream_events.recv().await {
+        hosted_tool_executed |= tracked_http && ctx.recovery_budget.hosted();
         let payload = match item {
             Ok(payload) => payload,
-            Err(err) => {
-                if !hosted_tool_executed && retryable_live_start_codex_error(&err) {
+            Err(mut err) => {
+                if !is_http && tracked_http {
+                    ctx.recovery_budget.record_websocket_handshake_error(&err);
+                    if err.origin == client::CodexErrorOrigin::WebSocket
+                        && matches!(
+                            err.detail.as_deref(),
+                            Some(
+                                websocket::WEBSOCKET_MISSING_TERMINAL_DETAIL
+                                    | client::TRANSPORT_UNEXPECTED_EOF_DETAIL
+                                    | websocket::WEBSOCKET_KEEPALIVE_FAILURE_DETAIL
+                            )
+                        )
+                    {
+                        ctx.recovery_budget.body_uncertain();
+                        err.origin = client::CodexErrorOrigin::WebSocketTransient;
+                    }
+                }
+                if !hosted_tool_executed
+                    && !(tracked_http && ctx.recovery_budget.hosted())
+                    && !(tracked_http
+                        && (err.usage_limit.is_some() || ctx.recovery_budget.is_final_only()))
+                    && retryable_live_start_codex_error(&err)
+                {
                     return provider_retry(&upstream_events, err);
                 }
                 abort_request_state(
@@ -297,10 +347,27 @@ async fn live_stream_response_once(
                     &request_continuation,
                     compaction.attempt,
                 );
-                return LiveStreamStart::Response(map_codex_error_to_response(&err));
+                return LiveStreamStart::Response(tracked_error_response(&ctx, &err));
             }
         };
         hosted_tool_executed |= events::event_confirms_hosted_tool_execution(&payload);
+        if tracked_http
+            && !is_http
+            && super::client_sse::trace_http_failure(&payload, &[], &ctx.recovery_budget).is_some()
+        {
+            abort_request_state(
+                ctx.session_id.as_deref(),
+                &request_continuation,
+                compaction.attempt,
+            );
+            if let Some(mut failure) = events::classify_event_failure(&payload) {
+                if failure.status >= 500 {
+                    failure.status = 400;
+                }
+                return LiveStreamStart::Response(map_codex_event_failure_to_response(&failure));
+            }
+            return LiveStreamStart::Response(map_codex_failure_to_response("Invalid request"));
+        }
         if !generation_started && codex_generation_event(&payload) {
             if let Some(monitor) = ctx.monitor.as_ref() {
                 monitor.generation_started(&ctx.req_id);
@@ -318,15 +385,34 @@ async fn live_stream_response_once(
                         &request_continuation,
                         compaction.attempt,
                     );
-                    return LiveStreamStart::Response(usage_limit_response(&limit));
+                    let mut response = usage_limit_response(&limit);
+                    if tracked_http {
+                        let origin = if is_http {
+                            client::CodexErrorOrigin::BufferedHttp
+                        } else {
+                            client::CodexErrorOrigin::BufferedWebSocket
+                        };
+                        let error = client::codex_usage_limit_error(limit, origin);
+                        response
+                            .extensions_mut()
+                            .insert(Arc::new(ctx.recovery_budget.failure(error)));
+                    }
+                    return LiveStreamStart::Response(response);
                 }
                 if let Some(failure) = events::classify_event_failure(&payload) {
-                    if !hosted_tool_executed && failure.retryable() {
+                    if !hosted_tool_executed
+                        && !(tracked_http && ctx.recovery_budget.hosted())
+                        && failure.retryable()
+                    {
                         return provider_retry(
                             &upstream_events,
                             codex_event_failure_error(
                                 &failure,
-                                client::CodexErrorOrigin::WebSocket,
+                                super::recovery::websocket_event_origin(
+                                    tracked_http && !is_http,
+                                    &failure,
+                                    &payload,
+                                ),
                             ),
                         );
                     }
@@ -347,6 +433,9 @@ async fn live_stream_response_once(
                 return LiveStreamStart::Response(map_codex_failure_to_response(&message));
             }
         };
+        if tracked_http {
+            semantic_ready |= super::client_sse::translated_content_ready(&chunk);
+        }
         pending_chunk.extend_from_slice(&chunk);
         if is_codex_success_terminal_event(&payload)
             && !events::is_standard_max_output_tokens_incomplete(&payload)
@@ -354,13 +443,13 @@ async fn live_stream_response_once(
             && !(accept_empty && terminal_status_is_completed(&payload))
         {
             let error = empty_live_completion_error();
-            if hosted_tool_executed {
+            if hosted_tool_executed || (tracked_http && ctx.recovery_budget.hosted()) {
                 abort_request_state(
                     ctx.session_id.as_deref(),
                     &request_continuation,
                     compaction.attempt,
                 );
-                return LiveStreamStart::Response(map_codex_error_to_response(&error));
+                return LiveStreamStart::Response(tracked_error_response(&ctx, &error));
             }
             create_logger("codex").warn(
                 "codex_empty_completion_retry",
@@ -376,7 +465,13 @@ async fn live_stream_response_once(
             );
             return provider_retry(&upstream_events, error);
         }
-        if translator.has_semantic_output() && !pending_chunk.is_empty() {
+        if translator.has_semantic_output()
+            && !pending_chunk.is_empty()
+            && (!tracked_http || semantic_ready)
+        {
+            if tracked_http {
+                ctx.recovery_budget.mark_committed();
+            }
             record_live_stream_downstream_capture(&ctx, &pending_chunk);
             record_live_stream_progress(&ctx, &pending_chunk);
             if terminal {
@@ -403,6 +498,9 @@ async fn live_stream_response_once(
             ));
         }
         if terminal {
+            if tracked_http && is_codex_success_terminal_event(&payload) {
+                ctx.recovery_budget.mark_committed();
+            }
             update_continuation_from_upstream(
                 ctx.session_id.as_deref(),
                 &request_continuation,
@@ -413,7 +511,9 @@ async fn live_stream_response_once(
                 compaction.compact_boundary,
             );
             if pending_chunk.is_empty() {
-                return LiveStreamStart::Response(empty_live_stream_response());
+                return LiveStreamStart::Response(event_stream_response(
+                    futures_util::stream::empty::<Result<Bytes, std::io::Error>>(),
+                ));
             }
             record_live_stream_downstream_capture(&ctx, &pending_chunk);
             record_live_stream_progress(&ctx, &pending_chunk);
@@ -421,67 +521,20 @@ async fn live_stream_response_once(
         }
     }
 
-    let error = websocket::missing_terminal_error();
-    if hosted_tool_executed {
+    let mut error = websocket::missing_terminal_error();
+    if tracked_http && !is_http {
+        ctx.recovery_budget.body_uncertain();
+        error.origin = client::CodexErrorOrigin::WebSocketTransient;
+    }
+    if hosted_tool_executed || (tracked_http && ctx.recovery_budget.hosted()) {
         abort_request_state(
             ctx.session_id.as_deref(),
             &request_continuation,
             compaction.attempt,
         );
-        return LiveStreamStart::Response(map_codex_error_to_response(&error));
+        return LiveStreamStart::Response(tracked_error_response(&ctx, &error));
     }
     provider_retry(&upstream_events, error)
-}
-
-fn translate_live_stream_payload(
-    translator: &mut LiveStreamTranslator,
-    payload: &serde_json::Value,
-    traffic: Option<&crate::traffic::TrafficCapture>,
-) -> Result<(Vec<u8>, bool), String> {
-    let chunk = translator.accept(payload, traffic)?;
-    let terminal = events::event_is_terminal(payload) || translator.is_finished();
-    Ok((chunk, terminal))
-}
-
-fn record_live_stream_downstream_capture(ctx: &RequestContext, chunk: &[u8]) {
-    let Some(traffic) = ctx.traffic.as_ref() else {
-        return;
-    };
-    for event in parse_sse_events(chunk) {
-        let Ok(data) = serde_json::from_str::<serde_json::Value>(&event.data) else {
-            continue;
-        };
-        traffic.write_json_event(
-            "050-downstream-event",
-            &serde_json::json!({
-                "event": event.event.as_deref().unwrap_or("message"),
-                "data": data,
-            }),
-        );
-    }
-}
-
-fn record_live_stream_progress(ctx: &RequestContext, chunk: &[u8]) {
-    if let Some(monitor) = ctx.monitor.as_ref() {
-        let (input_tokens, output_tokens) = usage_from_anthropic_sse(chunk);
-        monitor.stream_progress(
-            &ctx.req_id,
-            chunk.len() as u64,
-            count_sse_events(chunk),
-            input_tokens,
-            output_tokens,
-        );
-    }
-}
-
-fn single_live_stream_response(chunk: Vec<u8>) -> Response {
-    event_stream_response(futures_util::stream::once(async move {
-        Ok::<Bytes, std::io::Error>(Bytes::from(chunk))
-    }))
-}
-
-fn empty_live_stream_response() -> Response {
-    event_stream_response(futures_util::stream::empty::<Result<Bytes, std::io::Error>>())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -642,47 +695,6 @@ fn remaining_live_stream_response(
     event_stream_response(stream)
 }
 
-fn append_live_metadata_payload(buffer: &mut Vec<u8>, payload: &serde_json::Value, is_http: bool) {
-    if is_http
-        && payload["type"] == "response.output_item.done"
-        && events::is_function_call_item(payload)
-        && let Some(index) = payload["output_index"].as_u64()
-    {
-        let item = &payload["item"];
-        append_upstream_sse_payload(
-            buffer,
-            &serde_json::json!({
-                "type": "response.output_item.added",
-                "output_index": index,
-                "item": {"type": "function_call", "call_id": item["call_id"], "name": item["name"]}
-            }),
-        );
-    }
-    append_upstream_sse_payload(buffer, payload);
-}
-
-fn append_upstream_sse_payload(buffer: &mut Vec<u8>, payload: &serde_json::Value) {
-    let text = payload.to_string();
-    for line in text.lines() {
-        buffer.extend_from_slice(b"data: ");
-        buffer.extend_from_slice(line.as_bytes());
-        buffer.push(b'\n');
-    }
-    buffer.push(b'\n');
-}
-
-fn event_stream_response<S>(stream: S) -> Response
-where
-    S: futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
-{
-    let headers = [
-        (http::header::CONTENT_TYPE, "text/event-stream"),
-        (http::header::CACHE_CONTROL, "no-cache"),
-        (http::header::CONNECTION, "keep-alive"),
-    ];
-    (headers, Body::from_stream(stream)).into_response()
-}
-
 #[cfg(test)]
 mod tests {
     use futures_util::StreamExt;
@@ -691,6 +703,524 @@ mod tests {
 
     use super::super::provider_test_support::*;
     use super::*;
+
+    #[tokio::test]
+    async fn tracked_http_terminal_hosted_and_context_use_one_send() {
+        use super::super::client_test_support::{http_test_auth, http_test_client};
+        use super::super::sources::{ReplayGate, SourceAttempt};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for hosted in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 16384];
+                assert!(stream.read(&mut request).await.unwrap() > 0);
+                let body: &[u8] = if hosted {
+                    b"data: {\"type\":\"response.failed\",\"status_code\":503,\"response\":{\"output\":[{\"type\":\"web_search_call\"}],\"error\":{\"message\":\"upstream failed\"}}}\n\n"
+                } else {
+                    b"data: {\"type\":\"error\",\"status_code\":500,\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"too long\"}}\n\n"
+                };
+                stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(400), listener.accept())
+                        .await
+                        .is_err()
+                );
+            });
+            let (_, _, base, mut request_body) = empty_terminal_fixture();
+            request_body.reasoning_account = ReasoningAccount::new(Some("acct"));
+            let gate = ReplayGate::new(hosted);
+            let attempt = SourceAttempt::new(
+                crate::config::codex_auth::AuthSource::ChatGpt,
+                &base,
+                gate.clone(),
+            );
+            let client = Arc::new(http_test_client(format!("http://{addr}/responses"), 1_000));
+            client.auth_manager().set_test_auth(http_test_auth());
+            let events = client
+                .stream_codex_http_events_for_owner_tracked(
+                    &request_body,
+                    &attempt.context,
+                    &Default::default(),
+                )
+                .await
+                .unwrap();
+            let result = live_stream_response_once(
+                events,
+                "msg_test".to_string(),
+                "gpt-test",
+                attempt.context,
+                ContinuationReservation::for_owner_turn(None, None),
+                request_body,
+                LiveStreamCompaction {
+                    compact_boundary: false,
+                    attempt: None,
+                },
+                config::CodexTransport::Http,
+                false,
+            )
+            .await;
+            let LiveStreamStart::Response(response) = result else {
+                panic!("terminal failure must not retry");
+            };
+            assert!(!gate.committed());
+            if hosted {
+                assert!(gate.hosted());
+            } else {
+                assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["error"]["type"], "invalid_request_error");
+                assert!(
+                    body["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("prompt is too long")
+                );
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_hosted_prelude_never_retries_or_commits_held_search() {
+        use super::super::sources::{ReplayGate, SourceAttempt};
+        for case in 0..3 {
+            let (_, _, base, request_body) = empty_terminal_fixture();
+            let gate = ReplayGate::new(true);
+            let attempt = SourceAttempt::new(
+                crate::config::codex_auth::AuthSource::ChatGpt,
+                &base,
+                gate.clone(),
+            );
+            gate.mark_hosted();
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            if case == 2 {
+                tx.send(Ok(serde_json::json!({"type":"response.created"})))
+                    .await
+                    .unwrap();
+                tx.send(Ok(serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"web_search_call","id":"s"}}))).await.unwrap();
+            }
+            let payload = if case == 1 {
+                serde_json::json!({"type":"response.completed", "response":{"id":"r", "status":"completed", "output":[{"type":"web_search_call"}]}})
+            } else {
+                serde_json::json!({"type":"response.failed", "status_code":503, "response":{"output":[{"type":"web_search_call"}],"error":{"message":"upstream failed"}}})
+            };
+            tx.send(Ok(payload)).await.unwrap();
+            let result = live_stream_response_once(
+                websocket::CodexWebSocketEventStream::http(rx),
+                "msg_test".to_string(),
+                "gpt-test",
+                attempt.context,
+                ContinuationReservation::for_owner_turn(None, None),
+                request_body,
+                LiveStreamCompaction {
+                    compact_boundary: false,
+                    attempt: None,
+                },
+                config::CodexTransport::Http,
+                false,
+            )
+            .await;
+            assert!(matches!(result, LiveStreamStart::Response(_)));
+            assert!(!gate.committed());
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_context_code_keeps_invalid_request_envelope() {
+        let (_, _, base, _) = empty_terminal_fixture();
+        let gate = super::super::sources::ReplayGate::new(false);
+        let attempt = super::super::sources::SourceAttempt::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            &base,
+            gate,
+        );
+        let payload = serde_json::json!({"type":"error","status_code":500,"error":{"code":"context_length_exceeded","message":"too long"}});
+        let error = super::super::client_sse::trace_http_failure(
+            &payload,
+            &[],
+            &attempt.context.recovery_budget,
+        )
+        .unwrap();
+        let response = map_codex_error_to_response(&error);
+        assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("prompt is too long")
+        );
+    }
+
+    #[tokio::test]
+    async fn tracked_websocket_quota_preserves_unknown_send_and_ambiguity() {
+        use super::super::api::SendEvidence;
+        use super::super::sources::{FailureKind, ReplayGate, SourceAttempt};
+        let (tx, rx, base, request_body) = empty_terminal_fixture();
+        let gate = ReplayGate::new(true);
+        let attempt = SourceAttempt::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            &base,
+            gate.clone(),
+        );
+        attempt
+            .context
+            .recovery_budget
+            .set_send(SendEvidence::OutcomeUnknown);
+        tx.send(Ok(serde_json::json!({"type":"error", "error":{"type":"usage_limit_reached","message":"limit"}}))).await.unwrap();
+        let result = live_stream_response_once(
+            rx,
+            "msg_test".to_string(),
+            "gpt-test",
+            attempt.context.clone(),
+            ContinuationReservation::for_owner_turn(None, None),
+            request_body,
+            LiveStreamCompaction {
+                compact_boundary: false,
+                attempt: None,
+            },
+            config::CodexTransport::WebSocket,
+            false,
+        )
+        .await;
+        assert!(matches!(result, LiveStreamStart::Response(_)));
+        let failure = attempt.failure(client::CodexError::recovery_exhausted());
+        assert_eq!(failure.kind, FailureKind::UsageLimit);
+        assert_eq!(failure.send, SendEvidence::OutcomeUnknown);
+        assert!(gate.ambiguous_hosted());
+        assert!(!gate.committed());
+        assert!(!gate.may_switch(failure.kind, failure.send));
+    }
+
+    #[tokio::test]
+    async fn tracked_auto_websocket_quota_preserves_unknown_send_and_ambiguity() {
+        use super::super::api::SendEvidence;
+        use super::super::sources::{FailureKind, ReplayGate, SourceAttempt};
+        let (tx, rx, base, request_body) = empty_terminal_fixture();
+        let gate = ReplayGate::new(true);
+        let attempt = SourceAttempt::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            &base,
+            gate.clone(),
+        );
+        attempt
+            .context
+            .recovery_budget
+            .set_send(SendEvidence::OutcomeUnknown);
+        tx.send(Ok(serde_json::json!({"type":"error", "status":401, "error":{"type":"usage_limit_reached","message":"limit","resets_at":1234567890}}))).await.unwrap();
+        let result = live_stream_response_once(
+            rx,
+            "msg_test".to_string(),
+            "gpt-test",
+            attempt.context.clone(),
+            ContinuationReservation::for_owner_turn(None, None),
+            request_body,
+            LiveStreamCompaction {
+                compact_boundary: false,
+                attempt: None,
+            },
+            config::CodexTransport::Auto,
+            false,
+        )
+        .await;
+        let LiveStreamStart::Response(response) = result else {
+            panic!("response expected")
+        };
+        let failure = response
+            .extensions()
+            .get::<std::sync::Arc<super::super::sources::SourceFailure>>()
+            .expect("typed failure");
+        assert!(failure.kind == FailureKind::UsageLimit);
+        assert!(
+            failure
+                .error
+                .usage_limit
+                .as_ref()
+                .and_then(|limit| limit.resets_at)
+                == Some(1234567890)
+        );
+        let failure = attempt.failure(client::CodexError::recovery_exhausted());
+        assert_eq!(failure.kind, FailureKind::UsageLimit);
+        assert_eq!(failure.send, SendEvidence::OutcomeUnknown);
+        assert!(gate.ambiguous_hosted());
+        assert!(!gate.committed());
+        assert!(!gate.may_switch(failure.kind, failure.send));
+    }
+
+    #[tokio::test]
+    async fn tracked_websocket_unknown_terminal_does_not_become_transient() {
+        use super::super::sources::{FailureKind, ReplayGate, SourceAttempt};
+        let (tx, rx, base, body) = empty_terminal_fixture();
+        let attempt = SourceAttempt::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            &base,
+            ReplayGate::new(false),
+        );
+        tx.send(Ok(serde_json::json!({"type":"response.failed","response":{"error":{"message":"mystery"}}}))).await.unwrap();
+        let LiveStreamStart::Retry { error, .. } = live_stream_response_once(
+            rx,
+            "m".into(),
+            "gpt-test",
+            attempt.context.clone(),
+            ContinuationReservation::for_owner_turn(None, None),
+            body,
+            LiveStreamCompaction {
+                compact_boundary: false,
+                attempt: None,
+            },
+            config::CodexTransport::WebSocket,
+            false,
+        )
+        .await
+        else {
+            panic!("legacy retry expected")
+        };
+        let exhausted =
+            live_retry_exhausted(&attempt.context, config::CodexTransport::WebSocket, &error);
+        assert_eq!(attempt.failure(exhausted).kind, FailureKind::Final);
+    }
+
+    #[tokio::test]
+    async fn unknown_terminal_does_not_poison_later_websocket_drop() {
+        use super::super::sources::{FailureKind, ReplayGate, SourceAttempt};
+        let (tx, rx, base, body) = empty_terminal_fixture();
+        let gate = ReplayGate::new(true);
+        let attempt = SourceAttempt::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            &base,
+            gate.clone(),
+        );
+        tx.send(Ok(serde_json::json!({"type":"response.failed","response":{"error":{"message":"mystery"}}}))).await.unwrap();
+        let LiveStreamStart::Retry { .. } = live_stream_response_once(
+            rx,
+            "m".into(),
+            "gpt-test",
+            attempt.context.clone(),
+            ContinuationReservation::for_owner_turn(None, None),
+            body.clone(),
+            LiveStreamCompaction {
+                compact_boundary: false,
+                attempt: None,
+            },
+            config::CodexTransport::WebSocket,
+            false,
+        )
+        .await
+        else {
+            panic!("retry expected")
+        };
+        let (tx, rx, _, _) = empty_terminal_fixture();
+        tx.send(Err(websocket::missing_terminal_error()))
+            .await
+            .unwrap();
+        let LiveStreamStart::Retry { error, .. } = live_stream_response_once(
+            rx,
+            "m".into(),
+            "gpt-test",
+            attempt.context.clone(),
+            ContinuationReservation::for_owner_turn(None, None),
+            body,
+            LiveStreamCompaction {
+                compact_boundary: false,
+                attempt: None,
+            },
+            config::CodexTransport::WebSocket,
+            false,
+        )
+        .await
+        else {
+            panic!("retry expected")
+        };
+        let exhausted =
+            live_retry_exhausted(&attempt.context, config::CodexTransport::WebSocket, &error);
+        assert_eq!(
+            attempt.failure(exhausted).kind,
+            FailureKind::TransientExhausted
+        );
+        assert!(gate.ambiguous_hosted());
+    }
+
+    #[tokio::test]
+    async fn tracked_websocket_transient_and_empty_have_distinct_exhaustion() {
+        use super::super::sources::{FailureKind, ReplayGate, SourceAttempt};
+        for transient in [true, false] {
+            let (tx, rx, base, body) = empty_terminal_fixture();
+            let attempt = SourceAttempt::new(
+                crate::config::codex_auth::AuthSource::ChatGpt,
+                &base,
+                ReplayGate::new(false),
+            );
+            let payload = if transient {
+                serde_json::json!({"type":"error","status_code":503,"error":{"message":"Gateway timeout"}})
+            } else {
+                serde_json::json!({"type":"response.completed","response":{"status":"completed","output":[]}})
+            };
+            tx.send(Ok(payload)).await.unwrap();
+            let LiveStreamStart::Retry { error, .. } = live_stream_response_once(
+                rx,
+                "m".into(),
+                "gpt-test",
+                attempt.context.clone(),
+                ContinuationReservation::for_owner_turn(None, None),
+                body,
+                LiveStreamCompaction {
+                    compact_boundary: false,
+                    attempt: None,
+                },
+                config::CodexTransport::WebSocket,
+                false,
+            )
+            .await
+            else {
+                panic!("retry expected")
+            };
+            let exhausted =
+                live_retry_exhausted(&attempt.context, config::CodexTransport::WebSocket, &error);
+            assert_eq!(
+                attempt.failure(exhausted).kind,
+                if transient {
+                    FailureKind::TransientExhausted
+                } else {
+                    FailureKind::Final
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_websocket_commits_only_deliverable_output() {
+        use super::super::sources::{ReplayGate, SourceAttempt};
+        for output in [false, true] {
+            let (tx, rx, base, body) = empty_terminal_fixture();
+            let gate = ReplayGate::new(false);
+            let attempt = SourceAttempt::new(
+                crate::config::codex_auth::AuthSource::ChatGpt,
+                &base,
+                gate.clone(),
+            );
+            tx.send(Ok(serde_json::json!({"type":"response.created"})))
+                .await
+                .unwrap();
+            if output {
+                tx.send(Ok(serde_json::json!({"type":"response.output_text.delta","output_index":0,"delta":"hello"}))).await.unwrap();
+            } else {
+                tx.send(Ok(serde_json::json!({"type":"error","error":{"type":"usage_limit_reached","message":"limit"}}))).await.unwrap();
+            }
+            assert!(matches!(
+                live_stream_response_once(
+                    rx,
+                    "m".into(),
+                    "gpt-test",
+                    attempt.context,
+                    ContinuationReservation::for_owner_turn(None, None),
+                    body,
+                    LiveStreamCompaction {
+                        compact_boundary: false,
+                        attempt: None
+                    },
+                    config::CodexTransport::WebSocket,
+                    false
+                )
+                .await,
+                LiveStreamStart::Response(_)
+            ));
+            assert_eq!(gate.committed(), output);
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_websocket_permanent_event_preserves_envelope() {
+        use super::super::sources::{ReplayGate, SourceAttempt};
+        let (tx, rx, base, body) = empty_terminal_fixture();
+        let attempt = SourceAttempt::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            &base,
+            ReplayGate::new(false),
+        );
+        tx.send(Ok(serde_json::json!({"type":"error","status_code":422,"error":{"code":"invalid_prompt","message":"invalid input","retry_after":7}}))).await.unwrap();
+        let LiveStreamStart::Response(response) = live_stream_response_once(
+            rx,
+            "m".into(),
+            "gpt-test",
+            attempt.context,
+            ContinuationReservation::for_owner_turn(None, None),
+            body,
+            LiveStreamCompaction {
+                compact_boundary: false,
+                attempt: None,
+            },
+            config::CodexTransport::WebSocket,
+            false,
+        )
+        .await
+        else {
+            panic!("expected terminal response")
+        };
+        assert_eq!(response.status(), 422);
+        assert_eq!(
+            response.headers().get(http::header::RETRY_AFTER).unwrap(),
+            "7"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["type"], "invalid_request_error");
+    }
+
+    #[tokio::test]
+    async fn tracked_http_commits_only_deliverable_output() {
+        use super::super::sources::{ReplayGate, SourceAttempt};
+        for case in 0..3 {
+            let (_, _, base, request_body) = empty_terminal_fixture();
+            let gate = ReplayGate::new(false);
+            let attempt = SourceAttempt::new(
+                crate::config::codex_auth::AuthSource::ChatGpt,
+                &base,
+                gate.clone(),
+            );
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            let payload = match case {
+                0 => {
+                    serde_json::json!({"type":"error", "error":{"type":"usage_limit_reached","message":"limit"}})
+                }
+                1 => {
+                    serde_json::json!({"type":"response.output_text.delta", "output_index":0, "delta":"hello"})
+                }
+                _ => {
+                    serde_json::json!({"type":"response.completed", "response":{"id":"r", "status":"completed", "output":[], "usage":{}}})
+                }
+            };
+            tx.send(Ok(payload)).await.unwrap();
+            let result = live_stream_response_once(
+                websocket::CodexWebSocketEventStream::http(rx),
+                "msg_test".to_string(),
+                "gpt-test",
+                attempt.context,
+                ContinuationReservation::for_owner_turn(None, None),
+                request_body,
+                LiveStreamCompaction {
+                    compact_boundary: false,
+                    attempt: None,
+                },
+                config::CodexTransport::Http,
+                case == 2,
+            )
+            .await;
+            assert!(matches!(result, LiveStreamStart::Response(_)));
+            assert_eq!(gate.committed(), case != 0);
+        }
+    }
 
     #[tokio::test]
     async fn terminal_only_incomplete_upstream_is_not_empty_completion() {
@@ -1137,6 +1667,120 @@ mod tests {
         while let Some(frame) = body.frame().await {
             frame.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn tracked_auto_http_startup_exhaustion_preserves_upstream_error() {
+        use super::super::client_test_support::{
+            authenticated_http_test_client, buffered_test_request, http_test_context,
+            read_http_request,
+        };
+        use super::super::sources::{FailureKind, ReplayGate, SourceAttempt, SourceFailure};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut socket).await;
+            use tokio::io::AsyncWriteExt;
+            socket.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nretry-after: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+        });
+        let attempt = SourceAttempt::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            &http_test_context(),
+            ReplayGate::new(false),
+        );
+        for _ in 0..3 {
+            assert!(
+                attempt
+                    .context
+                    .recovery_budget
+                    .try_retry(Duration::ZERO, false)
+            );
+        }
+        let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        client.request_compression = crate::config::CodexRequestCompression::Gzip;
+        client.auto_ws_max_bytes = 1;
+        let response = live_stream_response(
+            Arc::new(client),
+            "msg".into(),
+            "gpt-test",
+            attempt.context,
+            buffered_test_request(),
+            ContinuationReservation::for_owner_turn(None, None),
+            LiveStreamCompaction {
+                compact_boundary: false,
+                attempt: None,
+            },
+            config::CodexTransport::Auto,
+            false,
+            Arc::default(),
+        )
+        .await;
+        let failure = response
+            .extensions()
+            .get::<Arc<SourceFailure>>()
+            .expect("typed source failure");
+        assert!(failure.kind == FailureKind::TransientExhausted);
+        assert!(failure.error.origin == client::CodexErrorOrigin::Http);
+        assert_eq!(failure.error.status, 503);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tracked_auto_live_exhaustion_preserves_upstream_error() {
+        use super::super::client_test_support::{
+            authenticated_http_test_client, buffered_test_request, http_test_context,
+        };
+        use super::super::sources::{FailureKind, ReplayGate, SourceAttempt, SourceFailure};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            next_live_websocket_request(&mut ws).await;
+            emit_live_event(&mut ws, &serde_json::json!({"type":"response.created"})).await;
+            emit_live_event(&mut ws, &serde_json::json!({"type":"error", "status":503, "error":{"code":"server_error","message":"upstream busy"}})).await;
+        });
+        let attempt = SourceAttempt::new(
+            crate::config::codex_auth::AuthSource::ChatGpt,
+            &http_test_context(),
+            ReplayGate::new(false),
+        );
+        for _ in 0..3 {
+            assert!(
+                attempt
+                    .context
+                    .recovery_budget
+                    .try_retry(Duration::ZERO, false)
+            );
+        }
+        let response = live_stream_response(
+            Arc::new(authenticated_http_test_client(format!(
+                "http://{addr}/responses"
+            ))),
+            "msg".into(),
+            "gpt-test",
+            attempt.context,
+            buffered_test_request(),
+            ContinuationReservation::for_owner_turn(None, None),
+            LiveStreamCompaction {
+                compact_boundary: false,
+                attempt: None,
+            },
+            config::CodexTransport::Auto,
+            false,
+            Arc::default(),
+        )
+        .await;
+        assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+        let failure = response
+            .extensions()
+            .get::<Arc<SourceFailure>>()
+            .expect("typed source failure");
+        assert!(failure.kind == FailureKind::TransientExhausted);
+        assert_eq!(failure.error.status, 503);
+        assert!(failure.error.origin == client::CodexErrorOrigin::WebSocketTransient);
+        server.await.unwrap();
     }
 
     #[tokio::test]

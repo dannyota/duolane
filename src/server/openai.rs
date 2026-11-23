@@ -25,6 +25,32 @@ use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
+pub(super) async fn native_source_error(registry: &crate::registry::Registry) -> Option<Response> {
+    let startup = registry.source_startup()?;
+    if startup
+        .sources()
+        .order()
+        .sources()
+        .contains(&crate::config::codex_auth::AuthSource::ChatGpt)
+        && let Some(provider) = registry.codex_provider()
+        && provider
+            .current_credential_snapshot()
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    {
+        return None;
+    }
+    Some(
+        OpenAiError::invalid(
+            "This route needs a ChatGPT login and chatgpt in duolane codex auth order",
+            None::<&str>,
+        )
+        .response(),
+    )
+}
+
 pub(super) async fn handler_responses(
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
@@ -50,8 +76,20 @@ pub(super) async fn handler_responses(
     let session_id = native_session_id(&headers);
     if let Some(monitor) = state.monitor.as_ref() {
         monitor.request_started(&req_id, session_id.clone(), None, EndpointKind::Responses);
+        monitor.codex_source(&req_id, "chatgpt");
     }
     let request_guard = RequestMonitorGuard::new(state.monitor.clone(), req_id.clone());
+    if let Some(response) = native_source_error(&state.registry).await {
+        log_native_request_completed(
+            &log,
+            &req_id,
+            "responses",
+            None,
+            response.status(),
+            started_at,
+        );
+        return monitor_response_body(response, request_guard);
+    }
     let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_OPENAI_REQUEST_BYTES).await {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -280,10 +318,19 @@ pub(super) async fn handler_chat_completions(
     let affinity = session_state
         .as_ref()
         .and_then(|session| session.affinity_provider.as_ref());
-    let Some(provider) = state
-        .registry
-        .provider_for_model(&normalized_model, affinity)
-    else {
+    let api_only = state.registry.source_startup().is_some_and(|startup| {
+        startup.sources().order().sources() == [crate::config::codex_auth::AuthSource::ApiKey]
+    });
+    let provider = if api_only {
+        state
+            .registry
+            .translated_provider_for_model(&normalized_model, affinity)
+    } else {
+        state
+            .registry
+            .provider_for_model(&normalized_model, affinity)
+    };
+    let Some(provider) = provider else {
         let response = OpenAiError::invalid(
             format!(
                 "Unknown model \"{normalized_model}\". {}",
@@ -296,6 +343,73 @@ pub(super) async fn handler_chat_completions(
     };
     if provider.name() != "codex" {
         let response = OpenAiError::unsupported_provider(provider.name()).response();
+        log_routed_openai_request_completed(
+            &log,
+            &req_id,
+            "chat_completions",
+            provider.name(),
+            Some(&normalized_model),
+            response.status(),
+            started_at,
+        );
+        return monitor_response_body(response, request_guard);
+    }
+    if api_only {
+        let current = session::record_session_request(
+            session_id.as_deref(),
+            session_state.as_ref(),
+            provider.name(),
+            &normalized_model,
+            now,
+        );
+        let traffic = create_traffic_capture(TrafficCaptureOptions {
+            req_id: req_id.clone(),
+            session_id: session_id.clone(),
+            session_seq: current.as_ref().map(|session| session.seq),
+            provider: Some(provider.name().to_string()),
+            state_dir_override: None,
+        })
+        .map(Arc::new);
+        if let Some(capture) = traffic.as_ref() {
+            if let Some(monitor) = state.monitor.as_ref() {
+                monitor.traffic_capture_path(&req_id, capture.root().to_path_buf());
+            }
+            capture.write_json(
+                "000-metadata",
+                &json!({
+                    "reqId": &req_id, "sessionId": &session_id,
+                    "sessionSeq": current.as_ref().map(|session| session.seq),
+                    "kind": "chat_completions", "provider": provider.name(),
+                    "model": &normalized_model, "requestedModel": &requested_model,
+                    "method": method.as_str(), "path": &path, "query": &query,
+                    "headers": headers_to_record(&headers),
+                }),
+            );
+            capture.write_json("010-openai-chat-completions-request", &body);
+        }
+        if let Some(monitor) = state.monitor.as_ref()
+            && let Some(current) = current.as_ref()
+        {
+            monitor.session_sequence_resolved(&req_id, current.seq);
+        }
+        let context = RequestContext {
+            recovery_budget: Default::default(),
+            req_id: req_id.clone(),
+            session_id,
+            traffic,
+            monitor: state.monitor.clone(),
+            passthrough: None,
+        };
+        if let Some(monitor) = state.monitor.as_ref() {
+            monitor.provider_selected(&req_id, provider.name(), &normalized_model, None);
+        }
+        let response = crate::providers::codex::selected_chat::handle(
+            &state.registry,
+            &body,
+            &requested_model,
+            &context,
+        )
+        .await;
         log_routed_openai_request_completed(
             &log,
             &req_id,
@@ -324,6 +438,9 @@ pub(super) async fn handler_chat_completions(
             monitor.session_sequence_resolved(&req_id, current.seq);
         }
         monitor.provider_selected(&req_id, provider.name(), &normalized_model, effort.clone());
+        if provider.name() == "codex" {
+            monitor.codex_source(&req_id, "chatgpt");
+        }
     }
     let traffic = create_traffic_capture(TrafficCaptureOptions {
         req_id: req_id.clone(),

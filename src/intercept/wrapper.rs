@@ -142,6 +142,7 @@ fn child_command(
         .args(picker::arguments(arguments, profile, managed))
         .args(arguments)
         .env_remove(BASE_URL_VARIABLE)
+        .env_remove("DUOLANE_OPENAI_API_KEY")
         .envs(child_variables(install));
     if let Some(profile) = profile {
         command.env("CLAUDE_CONFIG_DIR", profile.path());
@@ -334,6 +335,21 @@ fn start(mut command: Command) -> anyhow::Result<()> {
 #[cfg(all(test, unix))]
 mod account_tests {
     use super::*;
+
+    #[test]
+    fn intercept_child_removes_openai_key() {
+        let install = Install {
+            password: "toy".into(),
+            port: 1234,
+            ca: PathBuf::new(),
+        };
+        let command = child_command(&[], None, &install, None);
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "DUOLANE_OPENAI_API_KEY" && value.is_none())
+        );
+    }
 
     #[test]
     fn intercept_child_keeps_arguments_and_sets_only_child_profile() {

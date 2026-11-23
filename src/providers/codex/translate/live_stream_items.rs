@@ -54,7 +54,7 @@ impl LiveStreamTranslator {
         );
         if payload[STALLED_READ_FINISH_FIELD].as_bool() == Some(true) {
             self.close_open_blocks(traffic, out);
-            self.emit_web_searches(traffic, out);
+            self.emit_web_searches(traffic, out)?;
             self.emit_finish(STOP_TOOL_USE, None, traffic, out);
         }
         Ok(())
@@ -337,7 +337,8 @@ impl LiveStreamTranslator {
         &mut self,
         traffic: Option<&TrafficCapture>,
         out: &mut Vec<u8>,
-    ) {
+    ) -> Result<(), String> {
+        self.check_web_output_limit(out.len())?;
         let searches = std::mem::take(&mut self.web_searches);
         for search in searches {
             let index = search.index.unwrap_or_else(|| self.next_content_index());
@@ -443,5 +444,6 @@ impl LiveStreamTranslator {
                 &serde_json::json!({"type": "content_block_stop", "index": index}),
             );
         }
+        Ok(())
     }
 }

@@ -38,7 +38,7 @@ rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"]
 rustls-native-certs = "0.8"
 socket2 = { version = "0.6", features = ["all"] }
 webpki-roots = "1"
-hyper = { version = "1", features = ["http1", "server"] }
+hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["client-proxy", "http1", "server-auto", "server-graceful", "service", "tokio"] }
 url = "2"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
@@ -46,8 +46,11 @@ crossterm = "0.29"
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 tiktoken-rs = { version = "0.12", default-features = false }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
+
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", default-features = false, features = ["fs", "process"] }
+rustix = { version = "1", default-features = false, features = ["fs", "process", "termios"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

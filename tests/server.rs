@@ -1038,6 +1038,7 @@ async fn monitor_tracks_image_endpoint_without_session_affinity() {
     let state = monitor.snapshot();
     assert_eq!(state.recent.len(), 1);
     assert_eq!(state.recent[0].endpoint.label(), "images");
+    assert_eq!(state.recent[0].codex_source.as_deref(), Some("chatgpt"));
     assert_eq!(state.recent[0].status, RequestStatus::Failed);
     assert!(state.recent[0].session_seq.is_none());
     assert!(state.recent[0].traffic_capture_path.is_none());
@@ -1684,4 +1685,579 @@ async fn models_endpoint_tolerates_unknown_query_params() {
     let app = app(Arc::new(Registry::with_default_alias()));
     let (status, _) = get_models(app, "/v1/models?limit=1000&after_id=x").await;
     assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn models_endpoint_chatgpt_order_lists_codex_when_signed_out() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Registry::for_serve_with_input(
+        AliasProvider::Anthropic,
+        StartupInput {
+            config_dir: dir.path().to_owned(),
+            order: Some("chatgpt".into()),
+            key: None,
+            base_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let (_, value) = get_models(app(Arc::new(registry)), "/v1/models").await;
+    assert!(
+        value["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "gpt-6.1-sol")
+    );
+}
+
+#[tokio::test]
+async fn models_endpoint_uses_selected_api_catalog() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let upstream = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(|| async { axum::Json(json!({"data": [{"id": "gpt-99-sol"}]})) }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let registry = Registry::for_serve_with_input(
+        AliasProvider::Anthropic,
+        StartupInput {
+            config_dir: dir.path().to_owned(),
+            order: Some("api-key".into()),
+            key: Some("toy-key".into()),
+            base_url: Some(base.into()),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(registry.provider_for_model("gpt-99-sol", None).is_none());
+    assert_eq!(
+        registry
+            .translated_provider_for_model("gpt-99-sol", None)
+            .unwrap()
+            .name(),
+        "codex"
+    );
+    assert!(
+        registry
+            .translated_provider_for_model("gpt-98-sol", None)
+            .is_some()
+    );
+    let (_, value) = get_models(app(Arc::new(registry)), "/v1/models").await;
+    let ids: Vec<_> = value["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"gpt-99-sol"));
+    assert!(!ids.contains(&"gpt-5.5"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn models_endpoint_distinguishes_empty_unknown_and_excluded_catalogs() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    let upstream = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(move || {
+            let seen = seen.clone();
+            async move {
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    (StatusCode::OK, axum::Json(json!({"data": []})))
+                } else {
+                    (StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({})))
+                }
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    for (order, key, expected, requests) in [
+        ("api-key", Some("toy-key"), false, 1),
+        ("api-key", Some("toy-key"), true, 2),
+        ("chatgpt", Some("toy-key"), true, 2),
+        ("api-key", None, false, 2),
+    ] {
+        let registry = Registry::for_serve_with_input(
+            AliasProvider::Anthropic,
+            StartupInput {
+                config_dir: dir.path().to_owned(),
+                order: Some(order.into()),
+                key: key.map(Into::into),
+                base_url: Some(base.clone().into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            registry
+                .translated_provider_for_model("gpt-99-sol", None)
+                .is_some(),
+            order == "api-key"
+        );
+        let (_, value) = get_models(app(Arc::new(registry)), "/v1/models").await;
+        let found = value["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["id"] == "gpt-5.5");
+        assert_eq!(found, expected);
+        assert_eq!(count.load(Ordering::SeqCst), requests);
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn models_endpoint_codex_claude_aliases_require_a_usable_source() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let count = Arc::new(AtomicUsize::new(0));
+    let upstream = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(move || {
+            let count = count.clone();
+            async move {
+                let ids = if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    json!([])
+                } else {
+                    json!([{"id": "gpt-6-sol"}])
+                };
+                axum::Json(json!({"data": ids}))
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    for expected in [false, true] {
+        let registry = Registry::for_serve_with_input(
+            AliasProvider::Codex,
+            StartupInput {
+                config_dir: dir.path().to_owned(),
+                order: Some("api-key".into()),
+                key: Some("toy-key".into()),
+                base_url: Some(base.clone().into()),
+            },
+        )
+        .await
+        .unwrap();
+        let (_, value) = get_models(app(Arc::new(registry)), "/v1/models").await;
+        let data = value["data"].as_array().unwrap();
+        assert!(
+            data.iter()
+                .any(|v| v["id"] == "opus" && v["display_name"] == "opus (anthropic)")
+        );
+        assert_eq!(
+            data.iter()
+                .any(|v| v["id"] == "opus" && v["display_name"] == "opus (codex)"),
+            expected
+        );
+        assert!(
+            !data
+                .iter()
+                .any(|v| v["id"] == "sonnet" && v["display_name"] == "sonnet (codex)")
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn api_only_messages_selects_api_and_never_chatgpt_without_key() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let valid = Arc::new(AtomicBool::new(true));
+    let upstream = axum::Router::new()
+        .route("/v1/models", axum::routing::get(|| async { axum::Json(json!({"data":[{"id":"gpt-99-sol"},{"id":"gpt-99-luna"}]})) }))
+        .route("/v1/responses", axum::routing::post({
+            let calls = calls.clone();
+            let valid = valid.clone();
+            move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
+                let calls = calls.clone();
+                let valid = valid.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let expected = if calls.load(Ordering::SeqCst) == 1 { "gpt-99-sol" } else { "gpt-99-luna" };
+                    valid.fetch_and(headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer toy-key") && body["model"] == expected, Ordering::SeqCst);
+                    concat!(
+                        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n",
+                        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hello\"}\n\n",
+                        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n")
+                }
+            }
+        }));
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    for (key, model, expected) in [
+        (Some("toy-key"), "gpt-99-sol", StatusCode::OK),
+        (None, "gpt-99-sol", StatusCode::UNAUTHORIZED),
+    ] {
+        let registry = Registry::for_serve_with_input(
+            AliasProvider::Anthropic,
+            StartupInput {
+                config_dir: dir.path().to_owned(),
+                order: Some("api-key".into()),
+                key: key.map(Into::into),
+                base_url: Some(base.clone().into()),
+            },
+        )
+        .await
+        .unwrap();
+        let router = app(Arc::new(registry));
+        if key.is_some() {
+            let request = Request::builder().method(Method::POST).uri("/v1/messages").header("content-type", "application/json").body(Body::from(json!({"model":"gpt-99-sol", "messages":[{"role":"user","content":"hello"}], "system":[{"type":"text","text":"You are a security monitor for autonomous AI coding agents."}]}).to_string())).unwrap();
+            let unavailable = messages_response(router.clone(), "gpt-98-sol").await;
+            assert_eq!(unavailable.status(), StatusCode::BAD_REQUEST);
+            let regular = messages_response(router.clone(), model).await;
+            assert_eq!(regular.status(), StatusCode::OK);
+            let response = router.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            continue;
+        }
+        let response = messages_response(router, model).await;
+        assert_eq!(response.status(), expected);
+        if key.is_none() {
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(
+                value["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("duolane codex auth key set"))
+            );
+        }
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(valid.load(Ordering::SeqCst));
+    server.abort();
+}
+
+#[tokio::test]
+async fn mixed_order_api_context_error_is_final() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let upstream = axum::Router::new()
+        .route("/v1/models", axum::routing::get(|| async { axum::Json(json!({"data":[{"id":"gpt-99-sol"}]})) }))
+        .route("/v1/responses", axum::routing::post({
+            let calls = calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    (StatusCode::BAD_REQUEST, axum::Json(json!({"error":{"code":"context_length_exceeded","message":"context length exceeded"}})))
+                }
+            }
+        }));
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let registry = Registry::for_serve_with_input(
+        AliasProvider::Anthropic,
+        StartupInput {
+            config_dir: dir.path().to_owned(),
+            order: Some("api-key,chatgpt".into()),
+            key: Some("toy-key".into()),
+            base_url: Some(base.into()),
+        },
+    )
+    .await
+    .unwrap();
+    let response = messages_response(app(Arc::new(registry)), "gpt-99-sol").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn missing_selected_credentials_give_order_appropriate_commands() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    for (order, login) in [("api-key", false), ("chatgpt,api-key", true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::for_serve_with_input(
+            AliasProvider::Anthropic,
+            StartupInput {
+                config_dir: dir.path().to_owned(),
+                order: Some(order.into()),
+                key: None,
+                base_url: Some("http://127.0.0.1:1/v1".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let response = messages_response(app(Arc::new(registry)), "sol").await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("duolane codex auth key set"));
+        assert!(message.contains("duolane codex auth order"));
+        assert_eq!(message.contains("codex login"), login);
+    }
+}
+
+#[tokio::test]
+async fn api_only_chat_routes_exact_model_and_rejects_missing_key_and_invalid_fields() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let valid = Arc::new(AtomicBool::new(true));
+    let upstream = axum::Router::new()
+        .route("/v1/models", axum::routing::get(|| async { axum::Json(json!({"data":[{"id":"gpt-99-sol"}]})) }))
+        .route("/v1/responses", axum::routing::post({
+            let calls = calls.clone();
+            let valid = valid.clone();
+            move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
+                let calls = calls.clone();
+                let valid = valid.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    valid.fetch_and(headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer toy-key") && body["model"] == "gpt-99-sol", Ordering::SeqCst);
+                    concat!("data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n", "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hello\"}\n\n", "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n", "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n")
+                }
+            }
+        }));
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    for key in [Some("toy-key"), None] {
+        let registry = Registry::for_serve_with_input(
+            AliasProvider::Anthropic,
+            StartupInput {
+                config_dir: dir.path().to_owned(),
+                order: Some("api-key".into()),
+                key: key.map(Into::into),
+                base_url: Some(base.clone().into()),
+            },
+        )
+        .await
+        .unwrap();
+        let router = app_with_options(Arc::new(registry), None, true);
+        for (invalid, streaming) in [(false, false), (true, false), (false, true)] {
+            if key.is_none() && (invalid || streaming) {
+                continue;
+            }
+            let mut body =
+                json!({"model":"gpt-99-sol","messages":[{"role":"user","content":"hello"}]});
+            if invalid {
+                body["max_tokens"] = json!(5);
+            }
+            if streaming {
+                body["stream"] = json!(true);
+            }
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if key.is_none() {
+                    StatusCode::UNAUTHORIZED
+                } else if invalid {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::OK
+                }
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            if streaming {
+                let text = std::str::from_utf8(&bytes).unwrap();
+                assert!(text.contains("chat.completion.chunk"));
+                assert!(text.contains("data: [DONE]"));
+            } else {
+                let value: Value = serde_json::from_slice(&bytes).unwrap();
+                if key.is_none() {
+                    assert_eq!(value["error"]["type"], "authentication_error");
+                    let message = value["error"]["message"].as_str().unwrap();
+                    assert!(message.contains("duolane codex auth key set"));
+                    assert!(message.contains("duolane codex auth order"));
+                } else if !invalid {
+                    assert_eq!(value["object"], "chat.completion");
+                }
+            }
+        }
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(valid.load(Ordering::SeqCst));
+    server.abort();
+}
+
+#[tokio::test]
+async fn api_only_chat_quota_cache_and_exhausted_retry_are_safe() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for quota in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let upstream = axum::Router::new()
+            .route(
+                "/v1/models",
+                axum::routing::get(|| async { axum::Json(json!({"data":[{"id":"gpt-99-sol"}]})) }),
+            )
+            .route(
+                "/v1/responses",
+                axum::routing::post(move || {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        if quota {
+                            (
+                                StatusCode::TOO_MANY_REQUESTS,
+                                [("retry-after", "120")],
+                                axum::Json(json!({"error":{"code":"insufficient_quota"}})),
+                            )
+                        } else {
+                            (
+                                StatusCode::BAD_GATEWAY,
+                                [("retry-after", "120")],
+                                axum::Json(json!({"error":{"type":"server_error"}})),
+                            )
+                        }
+                    }
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let registry = Registry::for_serve_with_input(
+            AliasProvider::Anthropic,
+            StartupInput {
+                config_dir: dir.path().to_owned(),
+                order: Some("api-key".into()),
+                key: Some("toy-key".into()),
+                base_url: Some(base.into()),
+            },
+        )
+        .await
+        .unwrap();
+        let router = app_with_options(Arc::new(registry), None, true);
+        for request_number in 0..if quota { 2 } else { 1 } {
+            let response = router.clone().oneshot(Request::builder().method(Method::POST).uri("/v1/chat/completions").header("content-type", "application/json").body(Body::from(json!({"model":"gpt-99-sol","messages":[{"role":"user","content":"hello"}]}).to_string())).unwrap()).await.unwrap();
+            assert_eq!(
+                response.status(),
+                if quota {
+                    StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            );
+            if !quota || request_number == 1 {
+                assert_eq!(response.headers()["x-should-retry"], "false");
+            }
+            if quota && request_number == 1 {
+                assert_eq!(
+                    response.headers()["anthropic-ratelimit-unified-status"],
+                    "rejected"
+                );
+                assert!(
+                    response
+                        .headers()
+                        .contains_key("anthropic-ratelimit-unified-reset")
+                );
+                assert!(!response.headers().contains_key("retry-after"));
+                assert!(
+                    !response
+                        .headers()
+                        .contains_key("anthropic-ratelimit-unified-representative-claim")
+                );
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn api_only_chat_empty_catalog_and_typed_upstream_errors_are_safe() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for case in 0..3 {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let upstream = axum::Router::new()
+            .route("/v1/models", axum::routing::get(move || async move { axum::Json(json!({"data": if case == 0 { json!([]) } else { json!([{"id":"gpt-99-sol"}]) }})) }))
+            .route("/v1/responses", axum::routing::post(move || {
+                let count = count.clone();
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    if case == 1 { (StatusCode::BAD_REQUEST, axum::Json(json!({"error":{"code":"context_length_exceeded", "message":"private upstream sentinel"}}))) }
+                    else { (StatusCode::FORBIDDEN, axum::Json(json!({"error":{"type":"invalid_request_error", "message":"private upstream sentinel"}}))) }
+                }
+            }));
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let registry = Registry::for_serve_with_input(
+            AliasProvider::Anthropic,
+            StartupInput {
+                config_dir: dir.path().to_owned(),
+                order: Some("api-key".into()),
+                key: Some("toy-key".into()),
+                base_url: Some(base.into()),
+            },
+        )
+        .await
+        .unwrap();
+        let response = app_with_options(Arc::new(registry), None, true).oneshot(Request::builder().method(Method::POST).uri("/v1/chat/completions").header("content-type", "application/json").body(Body::from(json!({"model":"gpt-99-sol","messages":[{"role":"user","content":"hello"}]}).to_string())).unwrap()).await.unwrap();
+        assert_eq!(
+            response.status(),
+            if case == 2 {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["error"]["type"],
+            if case == 2 {
+                "permission_error"
+            } else {
+                "invalid_request_error"
+            }
+        );
+        assert!(
+            !value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("private upstream sentinel")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), usize::from(case != 0));
+        server.abort();
+    }
 }

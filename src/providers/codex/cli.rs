@@ -19,21 +19,28 @@ impl CliHandlers for CodexCli {
 
     fn status(&self) -> Result<(), anyhow::Error> {
         let store = file_store();
-        let stored = store.load_auth()?;
-        match stored {
-            Some(auth) => {
+        let chatgpt = store.load_auth();
+        match &chatgpt {
+            Ok(Some(auth)) => {
                 println!(
                     "Account: {}",
                     crate::text::terminal_text(auth.account_id.as_deref().unwrap_or("(none)"))
                 );
                 println!("{}", format_expiry(auth.expires, now_ms()));
                 println!("Storage: {} (Codex CLI)", store.auth_path());
-                Ok(())
             }
-            None => anyhow::bail!(
+            Ok(None) => println!(
                 "No Codex credentials. Run `codex login` to create {}",
                 store.auth_path()
             ),
+            Err(error) => println!("{}", crate::text::terminal_text(&error.to_string())),
+        }
+        let key_usable = super::cli_api_key::status()?;
+        match chatgpt {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) if key_usable => Ok(()),
+            Ok(None) => anyhow::bail!("No usable Codex credentials"),
+            Err(error) => Err(error),
         }
     }
 

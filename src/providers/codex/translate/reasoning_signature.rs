@@ -21,9 +21,15 @@ pub(crate) fn is_codex_signature(signature: &str) -> bool {
     signature.starts_with(CODEX_FAMILY_PREFIX)
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct ReasoningAccount {
     tag: Option<String>,
+}
+
+impl std::fmt::Debug for ReasoningAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReasoningAccount([REDACTED])")
+    }
 }
 
 impl ReasoningAccount {
@@ -31,6 +37,20 @@ impl ReasoningAccount {
         Self {
             tag: account_id.filter(|id| !id.is_empty()).map(account_tag),
         }
+    }
+
+    pub fn for_api_key(key: &[u8]) -> Self {
+        let mut context = digest::Context::new(&digest::SHA256);
+        context.update(b"openai-api-key:");
+        context.update(key);
+        let tag = context
+            .finish()
+            .as_ref()
+            .iter()
+            .take(ACCOUNT_TAG_BYTES)
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Self { tag: Some(tag) }
     }
 
     pub(crate) fn tag(&self) -> Option<&str> {
@@ -223,6 +243,33 @@ mod tests {
         }
         assert!(is_proxy_reasoning_signature("duolane:codex:v2:x"));
         assert!(!is_proxy_reasoning_signature("ccp:codex:v1:x"));
+    }
+
+    #[test]
+    fn reasoning_account_debug_redacts_tags() {
+        for account in [
+            ReasoningAccount::for_api_key(b"toy-key"),
+            ReasoningAccount::new(Some("acct")),
+        ] {
+            let formatted = format!("{account:?}");
+            assert!(!formatted.contains(account.tag().unwrap()));
+        }
+    }
+
+    #[test]
+    fn api_key_reasoning_is_scoped_to_key_and_source() {
+        let account = ReasoningAccount::for_api_key(b"toy-key");
+        let signature = account.sign(&replay()).unwrap();
+        assert_eq!(account.replay(Some(&signature)), Some(replay()));
+        assert_eq!(
+            ReasoningAccount::for_api_key(b"other-key").replay(Some(&signature)),
+            None
+        );
+        assert_eq!(
+            ReasoningAccount::new(Some("toy-key")).replay(Some(&signature)),
+            None
+        );
+        assert!(account.tag() == Some("6426a6369ead0707"));
     }
 
     #[test]

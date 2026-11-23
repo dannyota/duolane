@@ -51,7 +51,7 @@ pub fn is_family_alias(model: &str) -> bool {
     FAMILY_ALIASES.contains(&model.strip_prefix("anthropic-").unwrap_or(model))
 }
 
-fn version(id: &str, family: &str) -> Option<[String; 3]> {
+pub(in crate::providers::codex) fn version(id: &str, family: &str) -> Option<[String; 3]> {
     let suffix = format!("-{family}");
     let numbers = id.strip_prefix("gpt-")?.strip_suffix(&suffix)?;
     let parts: Vec<_> = numbers.split('.').collect();
@@ -100,15 +100,7 @@ pub(crate) fn resolve_family_in(model: &str, catalog: &[CatalogModel]) -> Option
             .filter_map(|id| version(id, family).map(|v| ((*id).to_string(), v, false)))
             .collect();
     }
-    candidates.sort_by(|a, b| {
-        for (x, y) in a.1.iter().zip(&b.1) {
-            let order = y.len().cmp(&x.len()).then_with(|| y.cmp(x));
-            if !order.is_eq() {
-                return order;
-            }
-        }
-        a.0.cmp(&b.0)
-    });
+    candidates.sort_by(|a, b| compare_family_versions((&a.0, &a.1), (&b.0, &b.1)));
     candidates.into_iter().next().map(|(model, _, lite)| {
         let family_catalog_lite = (!ALLOWED_MODELS.contains(&model.as_str())).then_some(lite);
         ResolvedModel {
@@ -117,6 +109,19 @@ pub(crate) fn resolve_family_in(model: &str, catalog: &[CatalogModel]) -> Option
             family_catalog_lite,
         }
     })
+}
+
+pub(crate) fn compare_family_versions(
+    a: (&str, &[String; 3]),
+    b: (&str, &[String; 3]),
+) -> std::cmp::Ordering {
+    for (x, y) in a.1.iter().zip(b.1) {
+        let order = y.len().cmp(&x.len()).then_with(|| y.cmp(x));
+        if !order.is_eq() {
+            return order;
+        }
+    }
+    a.0.cmp(b.0)
 }
 
 pub fn alias_target(model: &str) -> Option<&'static str> {
@@ -143,6 +148,14 @@ pub struct ResolvedModel {
 }
 
 impl ResolvedModel {
+    pub(in crate::providers::codex) fn from_api(model: super::model_api::ApiResolvedModel) -> Self {
+        Self {
+            model: model.model,
+            service_tier: model.service_tier,
+            family_catalog_lite: Some(false),
+        }
+    }
+
     pub(in crate::providers::codex) fn assert_allowed(&self) -> Result<(), ModelNotAllowedError> {
         if self.family_catalog_lite.is_some() {
             Ok(())

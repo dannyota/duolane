@@ -39,6 +39,25 @@ fn models_prints_codex_provider() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn models_lists_codex_when_api_key_order_is_selected() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    for (order, chatgpt) in [("api-key", false), ("chatgpt,api-key", true)] {
+        let output = Command::cargo_bin("duolane")?
+            .arg("models")
+            .env("DUOLANE_CONFIG_DIR", dir.path())
+            .env("CODEX_HOME", dir.path())
+            .env("DUOLANE_CODEX_AUTH_ORDER", order)
+            .output()?;
+        assert!(output.status.success());
+        let output = String::from_utf8(output.stdout)?;
+        assert!(output.contains("codex (api key): models come from your OpenAI account; a running proxy lists them at /v1/models"));
+        assert_eq!(output.contains("codex: "), chatgpt);
+        assert!(!output.contains("gpt-6.1-sol"));
+    }
+    Ok(())
+}
+
+#[test]
 fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin("duolane")?;
     cmd.arg("--help");
@@ -656,4 +675,281 @@ fn claude_accounts_selection_follows_config_alias() {
         std::fs::read(alias.join("claude-accounts/.selected")).unwrap(),
         b"default\n"
     );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn codex_api_auth_cli_keeps_key_and_order_safe() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let dir = temp.path().canonicalize()?;
+    let run = |args: &[&str],
+               input: Option<&[u8]>,
+               extra: &[(&str, &str)]|
+     -> Result<std::process::Output, Box<dyn std::error::Error>> {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_duolane"));
+        command
+            .args(args)
+            .env("DUOLANE_CONFIG_DIR", &dir)
+            .env_remove("DUOLANE_CODEX_AUTH_ORDER")
+            .env_remove("DUOLANE_OPENAI_API_KEY")
+            .env("DUOLANE_OPENAI_BASE_URL", "invalid")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (key, value) in extra {
+            command.env(key, value);
+        }
+        let mut child = command.spawn()?;
+        if let Some(input) = input {
+            child.stdin.take().unwrap().write_all(input)?;
+        } else {
+            drop(child.stdin.take());
+        }
+        Ok(child.wait_with_output()?)
+    };
+    let result = run(
+        &["codex", "auth", "key", "set", "--no-verify"],
+        Some(b"toy-credential\n"),
+        &[],
+    )?;
+    assert!(result.status.success());
+    for (status_code, size, should_succeed) in [
+        (200, 2, true),
+        (401, 2, false),
+        (200, 1024 * 1024 + 1, false),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}/v1", listener.local_addr()?);
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let count = socket.read(&mut request).unwrap();
+            let expected = if should_succeed {
+                b"Bearer other-toy".as_slice()
+            } else {
+                b"Bearer failed-toy".as_slice()
+            };
+            let correct_key = request[..count]
+                .windows(expected.len())
+                .any(|part| part == expected);
+            let header = format!(
+                "HTTP/1.1 {status_code} response\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n"
+            );
+            let _ = socket.write_all(header.as_bytes());
+            let _ = socket.write_all(&vec![b'x'; size]);
+            correct_key
+        });
+        let result = run(
+            &["codex", "auth", "key", "set"],
+            Some(if should_succeed {
+                b"other-toy\n"
+            } else {
+                b"failed-toy\n"
+            }),
+            &[
+                ("DUOLANE_OPENAI_BASE_URL", &url),
+                ("DUOLANE_OPENAI_API_KEY", "env-toy"),
+            ],
+        )?;
+        assert!(server.join().unwrap());
+        assert_eq!(result.status.success(), should_succeed);
+        let stored = std::fs::read(dir.join("credentials/openai-api-key"))?;
+        assert!(stored == b"other-toy\n");
+        let entered = if should_succeed {
+            b"other-toy".as_slice()
+        } else {
+            b"failed-toy".as_slice()
+        };
+        assert!(!result.stdout.windows(entered.len()).any(|v| v == entered));
+        assert!(!result.stderr.windows(entered.len()).any(|v| v == entered));
+    }
+    let order = run(&["codex", "auth", "order"], None, &[])?;
+    assert!(order.status.success());
+    assert!(String::from_utf8_lossy(&order.stdout).contains("chatgpt"));
+    let status = run(&["codex", "auth", "status"], None, &[])?;
+    assert!(!status.status.success());
+    assert!(!status.stdout.windows(9).any(|v| v == b"other-toy"));
+    assert!(!status.stderr.windows(9).any(|v| v == b"other-toy"));
+    let change = run(&["codex", "auth", "order", "api-key"], None, &[])?;
+    assert!(change.status.success());
+    assert!(String::from_utf8_lossy(&change.stdout).contains("Restart"));
+    let status = run(&["codex", "auth", "status"], None, &[])?;
+    assert!(status.status.success());
+    assert!(!status.stdout.windows(9).any(|v| v == b"other-toy"));
+    assert!(!status.stderr.windows(9).any(|v| v == b"other-toy"));
+    let removed = run(
+        &["codex", "auth", "key", "remove"],
+        None,
+        &[("DUOLANE_OPENAI_API_KEY", "toy-env")],
+    )?;
+    assert!(removed.status.success());
+    assert!(String::from_utf8_lossy(&removed.stdout).contains("environment key remains"));
+    assert!(!removed.stdout.windows(7).any(|v| v == b"toy-env"));
+    let reset = run(&["codex", "auth", "order", "--reset"], None, &[])?;
+    assert!(reset.status.success());
+    assert!(String::from_utf8_lossy(&reset.stdout).contains("chatgpt"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_api_auth_cli_rejects_non_unicode_key_without_panic()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::ffi::OsStringExt;
+    let temp = TempDir::new()?;
+    let secret = b"toy-nonunicode-\xff";
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_duolane"))
+        .args(["codex", "auth", "status"])
+        .env("DUOLANE_CONFIG_DIR", temp.path())
+        .env(
+            "DUOLANE_OPENAI_API_KEY",
+            std::ffi::OsString::from_vec(secret.to_vec()),
+        )
+        .output()?;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output
+            .stdout
+            .windows(b"No Codex credentials".len())
+            .any(|s| s == b"No Codex credentials")
+    );
+    assert!(
+        output
+            .stdout
+            .windows(b"invalid OpenAI API key".len())
+            .any(|s| s == b"invalid OpenAI API key")
+    );
+    let prefix = b"toy-nonunicode-";
+    assert!(!output.stdout.windows(prefix.len()).any(|s| s == prefix));
+    assert!(!output.stderr.windows(prefix.len()).any(|s| s == prefix));
+    assert!(
+        !output
+            .stderr
+            .windows(b"panicked".len())
+            .any(|s| s == b"panicked")
+    );
+    Ok(())
+}
+
+#[test]
+fn codex_api_auth_cli_rejects_positional_key_without_disclosure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let secret = b"positional-toy";
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_duolane"))
+        .args(["codex", "auth", "key", "set", "positional-toy"])
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!output.stdout.windows(secret.len()).any(|s| s == secret));
+    assert!(!output.stderr.windows(secret.len()).any(|s| s == secret));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_rejects_invalid_order_before_binding() -> Result<(), Box<dyn std::error::Error>> {
+    let config = TempDir::new()?;
+    let occupied = TcpListener::bind("127.0.0.1:0")?;
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_duolane"))
+        .args([
+            "serve",
+            "--no-monitor",
+            "--port",
+            &occupied.local_addr()?.port().to_string(),
+        ])
+        .env("DUOLANE_CONFIG_DIR", config.path())
+        .env("DUOLANE_CODEX_AUTH_ORDER", "invalid")
+        .env("DUOLANE_OPENAI_API_KEY", "toy-key")
+        .env("DUOLANE_OPENAI_BASE_URL", "http://127.0.0.1:1/v1")
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("DUOLANE_CODEX_AUTH_ORDER"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_fetches_models_only_once_when_api_key_is_selected()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+    let upstream = TcpListener::bind("127.0.0.1:0")?;
+    upstream.set_nonblocking(true)?;
+    let base = format!("http://{}/v1", upstream.local_addr()?);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicBool::new(false));
+    let seen = calls.clone();
+    let stopped = done.clone();
+    let fixture = thread::spawn(move || {
+        while !stopped.load(Ordering::SeqCst) {
+            match upstream.accept() {
+                Ok((mut stream, _)) => {
+                    let mut request = [0; 4096];
+                    let _ = stream.read(&mut request);
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"data\":[]}");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10))
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        for (order, expected) in [(None, 0), (Some("api-key"), 1)] {
+            let config = TempDir::new()?;
+            let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_duolane"));
+            command.env_remove("DUOLANE_CODEX_AUTH_ORDER");
+            if let Some(order) = order {
+                command.env("DUOLANE_CODEX_AUTH_ORDER", order);
+            }
+            let child = command
+                .args(["serve", "--no-monitor", "--port", &port.to_string()])
+                .env("DUOLANE_CONFIG_DIR", config.path())
+                .env("CODEX_HOME", config.path())
+                .env("DUOLANE_OPENAI_API_KEY", "toy-key")
+                .env("DUOLANE_OPENAI_BASE_URL", &base)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+            let mut child = ChildGuard(child);
+            let mut stream = wait_for_service(&mut child, port)?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            stream.write_all(
+                b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            assert!(response.starts_with("HTTP/1.1 200 "));
+            assert_eq!(calls.load(Ordering::SeqCst), expected);
+            child.0.kill()?;
+            child.0.wait()?;
+            let mut stderr = String::new();
+            child
+                .0
+                .stderr
+                .take()
+                .unwrap()
+                .take(65536)
+                .read_to_string(&mut stderr)?;
+            assert_eq!(stderr.contains("codex login"), order.is_none());
+            let mut stdout = String::new();
+            child
+                .0
+                .stdout
+                .take()
+                .unwrap()
+                .take(65536)
+                .read_to_string(&mut stdout)?;
+            assert_eq!(stdout.contains("codex login"), order.is_none());
+        }
+        Ok(())
+    })();
+    done.store(true, Ordering::SeqCst);
+    fixture.join().unwrap();
+    result
 }
