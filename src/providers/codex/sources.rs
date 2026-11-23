@@ -125,6 +125,13 @@ pub enum SkipMark {
     RejectedCredential,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceDecision {
+    Stale,
+    Ready,
+    Marked(SkipMark),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CredentialObservation(pub u64);
 
@@ -181,6 +188,21 @@ impl CodexSources {
         }
         slot.mark
             .filter(|mark| !matches!(mark, SkipMark::UsageLimit { until } if now >= *until))
+    }
+
+    pub fn decision(&self, source: AuthSource, id: CredentialId, now: Instant) -> SourceDecision {
+        let slots = self.slots.lock().unwrap_or_else(|err| err.into_inner());
+        let slot = &slots[index(source)];
+        if slot.current != Some(id) {
+            return SourceDecision::Stale;
+        }
+        match slot
+            .mark
+            .filter(|mark| !matches!(mark, SkipMark::UsageLimit { until } if now >= *until))
+        {
+            Some(mark) => SourceDecision::Marked(mark),
+            None => SourceDecision::Ready,
+        }
     }
 
     pub fn mark(&self, source: AuthSource, failure: &SourceFailure, now: Instant) {

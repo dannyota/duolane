@@ -1444,3 +1444,8 @@ mod tests {
 
 #[cfg(test)]
 mod compact_transport_tests;
+
+#[cfg(test)]
+mod source_selector_tests;
+
+pub mod source_selector;
