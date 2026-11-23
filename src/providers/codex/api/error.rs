@@ -64,8 +64,7 @@ impl ApiFailure {
         let known = |v: Option<&str>, values: &[&str]| v.is_some_and(|v| values.contains(&v));
         let context =
             known(code, &["context_length_exceeded"]) || known(typ, &["context_length_exceeded"]);
-        let permanent = [
-            "invalid_request_error",
+        let must_stop = [
             "invalid_prompt",
             "cyber_policy",
             "bio_policy",
@@ -73,7 +72,13 @@ impl ApiFailure {
         ];
         let kind = if context {
             ApiFailureKind::ContextOverflow
-        } else if known(code, &permanent) || known(typ, &permanent) {
+        } else if !stream && status == 401 && !known(code, &must_stop) && !known(typ, &must_stop) {
+            ApiFailureKind::Rejected
+        } else if known(code, &must_stop)
+            || known(typ, &must_stop)
+            || code == Some("invalid_request_error")
+            || typ == Some("invalid_request_error")
+        {
             ApiFailureKind::Invalid
         } else if status >= 500 {
             ApiFailureKind::Transient
@@ -163,5 +168,46 @@ mod overflow_tests {
                 .as_str()
                 .is_some_and(|s| s.contains("prompt is too long"))
         );
+    }
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::{ApiFailure, ApiFailureKind, SendEvidence};
+    use serde_json::json;
+
+    #[test]
+    fn api_http_unauthorized_rejects_invalid_api_key() {
+        let value = json!({"error":{"message":"rejected","type":"invalid_request_error","param":null,"code":"invalid_api_key"}});
+        let failure = ApiFailure::upstream(401, Some(&value), false, false);
+        assert_eq!(failure.kind, ApiFailureKind::Rejected);
+        assert_eq!(failure.send, SendEvidence::DeniedBeforeExecution);
+    }
+
+    #[test]
+    fn api_http_unauthorized_preserves_must_stop_errors() {
+        for name in [
+            "invalid_prompt",
+            "cyber_policy",
+            "bio_policy",
+            "usage_not_included",
+        ] {
+            for value in [
+                json!({"error":{"code":name}}),
+                json!({"error":{"type":name}}),
+            ] {
+                let failure = ApiFailure::upstream(401, Some(&value), false, false);
+                assert_eq!(failure.kind, ApiFailureKind::Invalid);
+                assert_eq!(failure.send, SendEvidence::OutcomeUnknown);
+            }
+        }
+    }
+
+    #[test]
+    fn api_sse_unauthorized_preserves_invalid_request() {
+        let value = json!({"error":{"type":"invalid_request_error"}});
+        let failure = ApiFailure::upstream(401, Some(&value), false, true);
+        assert_eq!(failure.kind, ApiFailureKind::Invalid);
+        assert_eq!(failure.send, SendEvidence::OutcomeUnknown);
     }
 }

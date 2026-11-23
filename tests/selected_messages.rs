@@ -57,7 +57,7 @@ async fn chatgpt_quota_falls_back_and_marks_source() {
                 return (StatusCode::BAD_REQUEST, "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"upstream marker\"}}");
             }
             if reject.load(Ordering::SeqCst) == 2 {
-                return (StatusCode::UNAUTHORIZED, "{\"error\":{\"message\":\"rejected\"}}");
+                return (StatusCode::UNAUTHORIZED, "{\"error\":{\"message\":\"rejected\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_api_key\"}}");
             }
             (StatusCode::OK, "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hello\"}\n\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n")
         }}
