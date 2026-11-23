@@ -272,7 +272,7 @@ fn exhausted_response(
     }
     response
 }
-fn tracked_error_response(ctx: &RequestContext, error: &client::CodexError) -> Response {
+pub(super) fn tracked_error_response(ctx: &RequestContext, error: &client::CodexError) -> Response {
     let mut response = map_codex_error_to_response(error);
     if ctx.recovery_budget.is_tracked() {
         response.extensions_mut().insert(Arc::new(

@@ -32,6 +32,7 @@ pub mod recovery;
 mod request_state;
 pub mod request_summary;
 pub mod search;
+mod selected_chatgpt;
 pub(crate) mod selected_messages;
 pub mod source_startup;
 pub mod sources;
@@ -104,7 +105,7 @@ impl CodexProvider {
         conversation_identity: Option<ConversationIdentity>,
     ) -> Response {
         let model = body.model.as_deref().unwrap_or("opus");
-        let mut resolved =
+        let resolved =
             resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
         if let Err(e) = resolved.assert_allowed() {
             return json_error(
@@ -116,30 +117,8 @@ impl CodexProvider {
                 ),
             );
         }
-        let standalone_search = search::is_standalone_search_request(&body);
-        let use_responses_lite = !standalone_search
-            && apply_model_lane_for_request(&mut resolved, &body, config::codex_full_lane());
-        let configured_transport = config::codex_transport();
-        let websocket_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let compaction_websocket_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let handle_for_account = |ctx, conversation_identity| {
-            self.handle_messages_for_account(
-                &body,
-                ctx,
-                conversation_identity,
-                &resolved,
-                standalone_search,
-                use_responses_lite,
-                configured_transport,
-                websocket_sent.clone(),
-                compaction_websocket_sent.clone(),
-            )
-        };
-        let response = handle_for_account(ctx.clone(), conversation_identity.clone()).await;
-        if response.extensions().get::<CodexAccountChanged>().is_none() {
-            return response;
-        }
-        handle_for_account(ctx, conversation_identity).await
+        self.handle_messages_resolved(&body, ctx, conversation_identity, resolved)
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -322,7 +301,7 @@ impl CodexProvider {
                         translated.input.len(),
                         Some(&error.to_string()),
                     );
-                    return map_codex_error_to_response(&error);
+                    return live_response::tracked_error_response(&ctx, &error);
                 }
                 Err(error) => {
                     abort_compaction_attempt(Some(session_id), Some(attempt));
@@ -458,7 +437,7 @@ impl CodexProvider {
                     );
                     abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
                     abort_continuation_for_owner(&request_continuation);
-                    return map_codex_error_to_response(&e);
+                    return live_response::tracked_error_response(&ctx, &e);
                 }
             };
             if !is_empty_codex_success_completion(&response.body, &translated.reasoning_account) {
@@ -1449,3 +1428,6 @@ mod compact_transport_tests;
 mod source_selector_tests;
 
 pub mod source_selector;
+
+#[cfg(test)]
+mod tracked_messages_tests;
