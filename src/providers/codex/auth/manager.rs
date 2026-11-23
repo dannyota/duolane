@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::LazyLock;
-#[cfg(test)]
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex as AsyncMutex;
@@ -10,7 +9,7 @@ use super::jwt::{TokenResponse, extract_account_id, validate_token_response};
 use super::token_store::{CodexTokenStore, StoredAuth};
 use crate::auth::AuthStorage;
 use crate::config::codex_auth::AuthSource;
-use crate::providers::codex::sources::CredentialId;
+use crate::providers::codex::sources::{CredentialId, CredentialObservation};
 use crate::providers::codex::translate::reasoning_signature::ReasoningAccount;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -54,6 +53,13 @@ const SAVE_RETRY_PAUSE: Duration = Duration::from_millis(100);
 
 static CODEX_REFRESH_LOCK: LazyLock<Arc<AsyncMutex<()>>> =
     LazyLock::new(|| Arc::new(AsyncMutex::new(())));
+static SNAPSHOT_SEQUENCE: Mutex<u64> = Mutex::new(0);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ObservedCredential {
+    pub id: CredentialId,
+    pub observation: CredentialObservation,
+}
 
 pub struct CodexAuthManager<S: AuthStorage<StoredAuth>> {
     pub store: Arc<CodexTokenStore<S>>,
@@ -83,6 +89,42 @@ impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
                 .expect("failed to create Codex OAuth refresh client"),
             token_endpoint,
         }
+    }
+
+    pub async fn current_credential_snapshot(
+        &self,
+    ) -> Result<Option<ObservedCredential>, anyhow::Error> {
+        let store = self.store.clone();
+        #[cfg(test)]
+        let test_auth = self.test_auth.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut sequence = SNAPSHOT_SEQUENCE
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Codex snapshot lock poisoned"))?;
+            #[cfg(test)]
+            let auth = match test_auth
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Codex test auth lock poisoned"))?
+                .clone()
+            {
+                Some(auth) => Some(auth),
+                None => store.load_auth()?,
+            };
+            #[cfg(not(test))]
+            let auth = store.load_auth()?;
+            let Some(auth) = auth.filter(|auth| !auth.refresh.is_empty()) else {
+                return Ok(None);
+            };
+            *sequence = sequence
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("Codex snapshot sequence exhausted"))?;
+            Ok(Some(ObservedCredential {
+                id: CredentialId::new(AuthSource::ChatGpt, auth.refresh.as_bytes()),
+                observation: CredentialObservation(*sequence),
+            }))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Codex snapshot task failed: {e}"))?
     }
 
     pub async fn get_auth(&self) -> Result<StoredAuth, anyhow::Error> {
@@ -332,6 +374,93 @@ mod tests {
 
     fn test_store() -> CodexTokenStore<InMemoryAuthStore<StoredAuth>> {
         CodexTokenStore::new(InMemoryAuthStore::new())
+    }
+
+    #[tokio::test]
+    async fn snapshot_is_passive_and_orders_rotations() {
+        use crate::config::codex_auth::load_order;
+        use crate::providers::codex::api::SendEvidence;
+        use crate::providers::codex::client::CodexError;
+        use crate::providers::codex::sources::{
+            CodexSources, FailureKind, SkipMark, SourceFailure,
+        };
+        use std::path::Path;
+        use tokio::time::Instant;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let manager = CodexAuthManager::new_with_token_endpoint(
+            test_store(),
+            format!("http://{}/oauth/token", listener.local_addr().unwrap()),
+        );
+        assert!(
+            manager
+                .current_credential_snapshot()
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut auth = StoredAuth {
+            access: "toy-access".into(),
+            refresh: "toy-old".into(),
+            expires: 0,
+            account_id: None,
+        };
+        manager.store.save_auth(auth.clone()).unwrap();
+        let old = manager
+            .current_credential_snapshot()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(old.id == CredentialId::new(AuthSource::ChatGpt, b"toy-old"));
+        auth.refresh = "toy-new".into();
+        manager.store.save_auth(auth.clone()).unwrap();
+        let new = manager
+            .current_credential_snapshot()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(new.id != old.id && new.observation > old.observation);
+        let sources = CodexSources::new(load_order(Path::new("unused"), None).unwrap());
+        let now = Instant::now();
+        assert!(sources.register(AuthSource::ChatGpt, new.id, new.observation));
+        sources.mark(
+            AuthSource::ChatGpt,
+            &SourceFailure {
+                kind: FailureKind::RejectedCredential,
+                send: SendEvidence::DeniedBeforeExecution,
+                error: CodexError::new(401, String::new()),
+                credential: Some(new.id),
+            },
+            now,
+        );
+        assert!(!sources.register(AuthSource::ChatGpt, old.id, old.observation));
+        assert_eq!(
+            sources.skip(AuthSource::ChatGpt, new.id, now),
+            Some(SkipMark::RejectedCredential)
+        );
+        auth.refresh.clear();
+        manager.store.save_auth(auth).unwrap();
+        assert!(
+            manager
+                .current_credential_snapshot()
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+        manager.set_test_auth(StoredAuth {
+            access: "toy-access".into(),
+            refresh: "toy-mock".into(),
+            expires: 0,
+            account_id: None,
+        });
+        let mock = manager
+            .current_credential_snapshot()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(mock.id == CredentialId::new(AuthSource::ChatGpt, b"toy-mock"));
     }
 
     struct FailingReadStore;
