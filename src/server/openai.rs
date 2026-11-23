@@ -25,6 +25,32 @@ use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
+pub(super) async fn native_source_error(registry: &crate::registry::Registry) -> Option<Response> {
+    let startup = registry.source_startup()?;
+    if startup
+        .sources()
+        .order()
+        .sources()
+        .contains(&crate::config::codex_auth::AuthSource::ChatGpt)
+        && let Some(provider) = registry.codex_provider()
+        && provider
+            .current_credential_snapshot()
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    {
+        return None;
+    }
+    Some(
+        OpenAiError::invalid(
+            "This route needs a ChatGPT login and chatgpt in duolane codex auth order",
+            None::<&str>,
+        )
+        .response(),
+    )
+}
+
 pub(super) async fn handler_responses(
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
@@ -52,6 +78,17 @@ pub(super) async fn handler_responses(
         monitor.request_started(&req_id, session_id.clone(), None, EndpointKind::Responses);
     }
     let request_guard = RequestMonitorGuard::new(state.monitor.clone(), req_id.clone());
+    if let Some(response) = native_source_error(&state.registry).await {
+        log_native_request_completed(
+            &log,
+            &req_id,
+            "responses",
+            None,
+            response.status(),
+            started_at,
+        );
+        return monitor_response_body(response, request_guard);
+    }
     let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_OPENAI_REQUEST_BYTES).await {
         Ok(bytes) => bytes,
         Err(_) => {
