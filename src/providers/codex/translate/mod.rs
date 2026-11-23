@@ -5,6 +5,7 @@ mod live_stream_finish;
 mod live_stream_items;
 pub(super) mod live_stream_read_args;
 pub mod model_allowlist;
+pub mod model_api;
 pub mod model_catalog;
 pub mod read_rewrite;
 pub mod reasoning_signature;

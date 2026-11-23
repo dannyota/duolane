@@ -56,6 +56,32 @@ impl Registry {
         self.source_startup.as_ref()
     }
 
+    pub fn resolve_api_model(
+        &self,
+        requested: &str,
+    ) -> Option<crate::providers::codex::translate::model_api::ApiResolvedModel> {
+        let startup = self.source_startup.as_ref()?;
+        let api = startup.api_client()?;
+        let catalog = api.catalog();
+        crate::providers::codex::translate::model_api::resolve_api_model(
+            requested,
+            catalog.as_deref(),
+        )
+    }
+
+    pub fn source_models(&self, chatgpt: Option<&[String]>) -> Option<Vec<String>> {
+        let startup = self.source_startup.as_ref()?;
+        let catalog = startup.api_client().and_then(|api| api.catalog());
+        let api = startup.api_client().map(|_| catalog.as_deref());
+        Some(
+            crate::providers::codex::translate::model_api::source_model_union(
+                startup.sources().order().sources(),
+                chatgpt,
+                api,
+            ),
+        )
+    }
+
     pub fn new(alias_provider: AliasProvider) -> Self {
         let mut models: BTreeMap<String, Vec<String>> = BTreeMap::new();
         models.insert(

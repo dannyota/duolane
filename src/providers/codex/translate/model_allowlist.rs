@@ -100,15 +100,7 @@ pub(crate) fn resolve_family_in(model: &str, catalog: &[CatalogModel]) -> Option
             .filter_map(|id| version(id, family).map(|v| ((*id).to_string(), v, false)))
             .collect();
     }
-    candidates.sort_by(|a, b| {
-        for (x, y) in a.1.iter().zip(&b.1) {
-            let order = y.len().cmp(&x.len()).then_with(|| y.cmp(x));
-            if !order.is_eq() {
-                return order;
-            }
-        }
-        a.0.cmp(&b.0)
-    });
+    candidates.sort_by(|a, b| compare_family_versions((&a.0, &a.1), (&b.0, &b.1)));
     candidates.into_iter().next().map(|(model, _, lite)| {
         let family_catalog_lite = (!ALLOWED_MODELS.contains(&model.as_str())).then_some(lite);
         ResolvedModel {
@@ -117,6 +109,19 @@ pub(crate) fn resolve_family_in(model: &str, catalog: &[CatalogModel]) -> Option
             family_catalog_lite,
         }
     })
+}
+
+pub(crate) fn compare_family_versions(
+    a: (&str, &[String; 3]),
+    b: (&str, &[String; 3]),
+) -> std::cmp::Ordering {
+    for (x, y) in a.1.iter().zip(b.1) {
+        let order = y.len().cmp(&x.len()).then_with(|| y.cmp(x));
+        if !order.is_eq() {
+            return order;
+        }
+    }
+    a.0.cmp(b.0)
 }
 
 pub fn alias_target(model: &str) -> Option<&'static str> {
