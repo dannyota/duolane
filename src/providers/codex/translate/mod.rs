@@ -22,7 +22,7 @@ mod request_options;
 #[cfg(test)]
 mod request_test_support;
 mod request_tool_result;
-mod request_tools;
+pub(super) mod request_tools;
 mod request_types;
 pub mod stream;
 pub mod web_search_compat;

@@ -148,6 +148,14 @@ pub struct ResolvedModel {
 }
 
 impl ResolvedModel {
+    pub(in crate::providers::codex) fn from_api(model: super::model_api::ApiResolvedModel) -> Self {
+        Self {
+            model: model.model,
+            service_tier: model.service_tier,
+            family_catalog_lite: Some(false),
+        }
+    }
+
     pub(in crate::providers::codex) fn assert_allowed(&self) -> Result<(), ModelNotAllowedError> {
         if self.family_catalog_lite.is_some() {
             Ok(())

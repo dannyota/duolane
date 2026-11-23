@@ -227,15 +227,28 @@ async fn dispatch_request(
     let session_affinity = session_state
         .as_ref()
         .and_then(|state| state.affinity_provider.as_ref());
-    let original_provider = state
-        .registry
-        .provider_for_model(&normalized_model, session_affinity);
+    let api_only = !count_tokens
+        && state.registry.source_startup().is_some_and(|startup| {
+            startup.sources().order().sources() == [crate::config::codex_auth::AuthSource::ApiKey]
+        });
+    let lookup = |model: &str, affinity| {
+        if api_only {
+            state
+                .registry
+                .translated_provider_for_model(model, affinity)
+        } else {
+            state.registry.provider_for_model(model, affinity)
+        }
+    };
+    let original_provider = lookup(&normalized_model, session_affinity);
     let configured_auto_review_model = crate::config::auto_review_model();
     let auto_review_route = original_provider.as_ref().and_then(|provider| {
         apply_auto_review_model(
             &mut body,
             count_tokens,
-            configured_auto_review_model.as_deref(),
+            configured_auto_review_model
+                .as_deref()
+                .or_else(|| (api_only && provider.name() == "codex").then_some("luna")),
             provider.name(),
         )
     });
@@ -245,7 +258,7 @@ async fn dispatch_request(
     }
 
     let provider = if auto_review_route.is_some() {
-        state.registry.provider_for_model(&normalized_model, None)
+        lookup(&normalized_model, None)
     } else {
         original_provider
     };
@@ -441,6 +454,18 @@ async fn dispatch_request(
 
     let response = if count_tokens {
         provider.handle_count_tokens(body, context).await
+    } else if api_only && provider.name() == "codex" {
+        crate::providers::codex::selected_messages::handle(
+            &state.registry,
+            &body,
+            &context,
+            if auto_review_route.is_some() {
+                None
+            } else {
+                conversation_identity.as_ref()
+            },
+        )
+        .await
     } else {
         provider
             .handle_messages_with_conversation_identity(

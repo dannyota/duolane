@@ -32,6 +32,7 @@ pub mod recovery;
 mod request_state;
 pub mod request_summary;
 pub mod search;
+pub(crate) mod selected_messages;
 pub mod source_startup;
 pub mod sources;
 pub mod transcription;
@@ -74,8 +75,7 @@ use async_trait::async_trait;
 use axum::Json;
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 pub(crate) fn clear_session_compaction(session_id: &str) {
     compaction::clear_compaction(session_id);
 }

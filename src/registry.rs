@@ -256,7 +256,16 @@ impl Registry {
     ) -> Option<Arc<dyn Provider>> {
         self.provider_for_model(raw_model, session_affinity)
             .or_else(|| {
-                self.resolve_api_model(raw_model)?;
+                let startup = self.source_startup.as_ref()?;
+                if !startup
+                    .sources()
+                    .order()
+                    .sources()
+                    .contains(&crate::config::codex_auth::AuthSource::ApiKey)
+                {
+                    return None;
+                }
+                crate::providers::codex::translate::model_api::resolve_api_model(raw_model, None)?;
                 self.handlers.get("codex").cloned()
             })
     }

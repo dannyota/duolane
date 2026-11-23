@@ -28,18 +28,23 @@ fn valid_id(id: &str) -> bool {
                 .any(|family| version(id, family).is_some()))
 }
 
-pub fn resolve_api_model(requested: &str, catalog: Option<&[String]>) -> Option<ApiResolvedModel> {
-    let normalized = crate::registry::normalize_incoming_model(requested);
+fn parse_tier(normalized: &str) -> Option<(&str, Option<ServiceTier>)> {
     let (base, service_tier) = if let Some(base) = normalized.strip_suffix("-ultrafast") {
         (base, Some(ServiceTier::Priority))
     } else if let Some(base) = normalized.strip_suffix("-fast") {
         (base, Some(ServiceTier::Priority))
     } else {
-        (normalized.as_str(), None)
+        (normalized, None)
     };
     if service_tier.is_some() && !valid_id(base) {
         return None;
     }
+    Some((base, service_tier))
+}
+
+pub fn resolve_api_model(requested: &str, catalog: Option<&[String]>) -> Option<ApiResolvedModel> {
+    let normalized = crate::registry::normalize_incoming_model(requested);
+    let (base, service_tier) = parse_tier(&normalized)?;
     let fallback: Vec<String> = ALLOWED_MODELS.iter().map(|id| (*id).to_string()).collect();
     let candidates = catalog.unwrap_or(&fallback);
     let model = if is_family_alias(base) {
@@ -66,6 +71,21 @@ pub fn resolve_api_model(requested: &str, catalog: Option<&[String]>) -> Option<
         model,
         service_tier,
     })
+}
+
+pub fn resolve_api_model_with_override(
+    requested: &str,
+    catalog: Option<&[String]>,
+    override_model: Option<&str>,
+) -> Option<ApiResolvedModel> {
+    let Some(override_model) = override_model.filter(|model| !model.is_empty()) else {
+        return resolve_api_model(requested, catalog);
+    };
+    let mut resolved = resolve_api_model(override_model, catalog)?;
+    let normalized = crate::registry::normalize_incoming_model(requested);
+    let (_, requested_tier) = parse_tier(&normalized)?;
+    resolved.service_tier = resolved.service_tier.or(requested_tier);
+    Some(resolved)
 }
 
 pub fn source_model_union(
@@ -104,6 +124,41 @@ mod tests {
     use super::*;
     use crate::config::codex_auth::AuthSource;
     use crate::providers::codex::translate::request::ServiceTier;
+
+    #[test]
+    fn override_resolves_in_api_catalog_and_preserves_requested_tier() {
+        let catalog = vec!["gpt-99-sol".to_string()];
+        let model =
+            resolve_api_model_with_override("gpt-98-sol-fast", Some(&catalog), Some("gpt-99-sol"))
+                .unwrap();
+        assert_eq!(model.model, "gpt-99-sol");
+        assert_eq!(model.service_tier, Some(ServiceTier::Priority));
+        assert!(
+            resolve_api_model_with_override("gpt-99-sol", Some(&catalog), Some("gpt-98-sol"))
+                .is_none()
+        );
+        assert!(resolve_api_model_with_override("gpt-98-sol", Some(&catalog), None).is_none());
+        assert!(
+            resolve_api_model_with_override(
+                "claude-opus-5-fast",
+                Some(&catalog),
+                Some("gpt-99-sol")
+            )
+            .is_none()
+        );
+        assert!(
+            resolve_api_model_with_override(
+                "claude-opus-5-fast",
+                Some(&catalog),
+                Some("gpt-99-sol-fast")
+            )
+            .is_none()
+        );
+        assert!(
+            resolve_api_model_with_override("claude-opus-5", Some(&catalog), Some("gpt-99-sol"))
+                .is_some()
+        );
+    }
 
     #[test]
     fn aliases_resolve_against_each_source_and_numeric_versions() {

@@ -41,11 +41,15 @@ impl ApiFailure {
             ApiFailureKind::Invalid => (400, "OpenAI API rejected the request"),
             ApiFailureKind::Other => (502, "OpenAI API response could not be processed"),
         };
+        let mut error = CodexError::new(status, message.into());
+        if kind == ApiFailureKind::ContextOverflow {
+            error.detail = Some(message.into());
+        }
         Self {
             kind,
             send,
             hosted_executed: hosted,
-            error: CodexError::new(status, message.into()),
+            error,
         }
     }
 
@@ -133,5 +137,31 @@ impl ApiFailure {
             failure.error.status = status;
         }
         failure
+    }
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    #[tokio::test]
+    async fn api_context_overflow_uses_canonical_sanitized_response() {
+        use super::{ApiFailure, ApiFailureKind, SendEvidence};
+        let failure = ApiFailure::local(
+            ApiFailureKind::ContextOverflow,
+            SendEvidence::NotSent,
+            false,
+        );
+        let response =
+            crate::providers::codex::error_response::map_codex_error_to_response(&failure.error);
+        assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(value["error"]["type"] == "invalid_request_error");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .is_some_and(|s| s.contains("prompt is too long"))
+        );
     }
 }
