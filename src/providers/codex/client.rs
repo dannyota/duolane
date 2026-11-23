@@ -78,6 +78,16 @@ impl Default for CodexHttpClient {
         Self::new()
     }
 }
+impl super::CodexProvider {
+    pub async fn current_credential_snapshot(
+        &self,
+    ) -> anyhow::Result<Option<super::auth::manager::ObservedCredential>> {
+        self.client
+            .auth_manager()
+            .current_credential_snapshot()
+            .await
+    }
+}
 impl CodexHttpClient {
     pub fn new() -> Self {
         let timeout_ms = config::codex_header_timeout_ms();

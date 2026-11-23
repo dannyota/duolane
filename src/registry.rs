@@ -25,6 +25,7 @@ pub struct Registry {
     alias_provider: AliasProvider,
     source_startup: Option<Arc<crate::providers::codex::source_startup::SourceStartup>>,
     dynamic_codex: bool,
+    codex_provider: Option<Arc<crate::providers::codex::CodexProvider>>,
     models: BTreeMap<String, Vec<String>>,
     handlers: BTreeMap<String, Arc<dyn Provider>>,
 }
@@ -100,15 +101,14 @@ impl Registry {
             "anthropic".into(),
             Arc::new(crate::providers::anthropic::AnthropicProvider::new()),
         );
-        handlers.insert(
-            "codex".into(),
-            Arc::new(crate::providers::codex::CodexProvider::new()),
-        );
+        let codex_provider = Arc::new(crate::providers::codex::CodexProvider::new());
+        handlers.insert("codex".into(), codex_provider.clone());
 
         Self {
             alias_provider,
             source_startup: None,
             dynamic_codex: true,
+            codex_provider: Some(codex_provider),
             models,
             handlers,
         }
@@ -133,6 +133,7 @@ impl Registry {
             alias_provider,
             source_startup: None,
             dynamic_codex: false,
+            codex_provider: None,
             models,
             handlers,
         }
@@ -170,6 +171,94 @@ impl Registry {
             .iter()
             .filter_map(|(name, provider)| Some((name.as_str(), provider.missing_login_hint()?)))
             .collect()
+    }
+
+    pub async fn discovery_models(&self) -> Vec<(String, String)> {
+        use crate::config::codex_auth::AuthSource;
+        use crate::providers::codex::translate::{model_allowlist::MODEL_ALIASES, model_api};
+
+        let Some(startup) = &self.source_startup else {
+            return self.all_supported_models();
+        };
+        if let Some(api) = startup.api_client() {
+            api.refresh_models().await;
+        }
+        let chat_models = if startup
+            .sources()
+            .order()
+            .sources()
+            .contains(&AuthSource::ChatGpt)
+            && let Some(provider) = &self.codex_provider
+            && provider
+                .current_credential_snapshot()
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            tokio::task::spawn_blocking(
+                crate::providers::codex::translate::model_allowlist::listed_models,
+            )
+            .await
+            .ok()
+        } else {
+            None
+        };
+        let catalog = startup.api_client().and_then(|api| api.catalog());
+        let api = startup.api_client().map(|_| catalog.as_deref());
+        let codex = model_api::source_model_union(
+            startup.sources().order().sources(),
+            chat_models.as_deref(),
+            api,
+        );
+        let mut out = Vec::new();
+        for provider in self.handlers.keys() {
+            let models = if provider == "codex" {
+                let mut models = codex.clone();
+                if self.alias_provider == AliasProvider::Codex {
+                    models.extend(
+                        ANTHROPIC_STYLE_ALIASES
+                            .iter()
+                            .filter(|alias| {
+                                let chat_available = chat_models.as_ref().is_some_and(|chat| {
+                                    MODEL_ALIASES
+                                        .iter()
+                                        .find(|(name, _)| name == *alias)
+                                        .is_some_and(|(_, targets)| {
+                                            targets
+                                                .iter()
+                                                .any(|target| chat.iter().any(|id| id == target))
+                                        })
+                                });
+                                chat_available
+                                    || api.is_some_and(|catalog| {
+                                        model_api::resolve_api_model(alias, catalog).is_some()
+                                    })
+                            })
+                            .map(|alias| (*alias).to_string()),
+                    );
+                    models.sort_unstable();
+                    models.dedup();
+                }
+                models
+            } else {
+                self.supported_models_for(provider)
+            };
+            out.extend(models.into_iter().map(|model| (model, provider.clone())));
+        }
+        out
+    }
+
+    pub fn translated_provider_for_model(
+        &self,
+        raw_model: &str,
+        session_affinity: Option<&AliasProvider>,
+    ) -> Option<Arc<dyn Provider>> {
+        self.provider_for_model(raw_model, session_affinity)
+            .or_else(|| {
+                self.resolve_api_model(raw_model)?;
+                self.handlers.get("codex").cloned()
+            })
     }
 
     pub fn all_supported_models(&self) -> Vec<(String, String)> {

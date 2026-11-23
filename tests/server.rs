@@ -1685,3 +1685,165 @@ async fn models_endpoint_tolerates_unknown_query_params() {
     let (status, _) = get_models(app, "/v1/models?limit=1000&after_id=x").await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn models_endpoint_uses_selected_api_catalog() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let upstream = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(|| async { axum::Json(json!({"data": [{"id": "gpt-99-sol"}]})) }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let registry = Registry::for_serve_with_input(
+        AliasProvider::Anthropic,
+        StartupInput {
+            config_dir: dir.path().to_owned(),
+            order: Some("api-key".into()),
+            key: Some("toy-key".into()),
+            base_url: Some(base.into()),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(registry.provider_for_model("gpt-99-sol", None).is_none());
+    assert_eq!(
+        registry
+            .translated_provider_for_model("gpt-99-sol", None)
+            .unwrap()
+            .name(),
+        "codex"
+    );
+    assert!(
+        registry
+            .translated_provider_for_model("gpt-98-sol", None)
+            .is_none()
+    );
+    let (_, value) = get_models(app(Arc::new(registry)), "/v1/models").await;
+    let ids: Vec<_> = value["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"gpt-99-sol"));
+    assert!(!ids.contains(&"gpt-5.5"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn models_endpoint_distinguishes_empty_unknown_and_excluded_catalogs() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    let upstream = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(move || {
+            let seen = seen.clone();
+            async move {
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    (StatusCode::OK, axum::Json(json!({"data": []})))
+                } else {
+                    (StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({})))
+                }
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    for (order, key, expected, requests) in [
+        ("api-key", Some("toy-key"), false, 1),
+        ("api-key", Some("toy-key"), true, 2),
+        ("chatgpt", Some("toy-key"), false, 2),
+        ("api-key", None, false, 2),
+    ] {
+        let registry = Registry::for_serve_with_input(
+            AliasProvider::Anthropic,
+            StartupInput {
+                config_dir: dir.path().to_owned(),
+                order: Some(order.into()),
+                key: key.map(Into::into),
+                base_url: Some(base.clone().into()),
+            },
+        )
+        .await
+        .unwrap();
+        if order == "chatgpt" || key.is_none() {
+            assert!(
+                registry
+                    .translated_provider_for_model("gpt-99-sol", None)
+                    .is_none()
+            );
+        }
+        let (_, value) = get_models(app(Arc::new(registry)), "/v1/models").await;
+        let found = value["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["id"] == "gpt-5.5");
+        assert_eq!(found, expected);
+        assert_eq!(count.load(Ordering::SeqCst), requests);
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn models_endpoint_codex_claude_aliases_require_a_usable_source() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let count = Arc::new(AtomicUsize::new(0));
+    let upstream = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(move || {
+            let count = count.clone();
+            async move {
+                let ids = if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    json!([])
+                } else {
+                    json!([{"id": "gpt-6-sol"}])
+                };
+                axum::Json(json!({"data": ids}))
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    for expected in [false, true] {
+        let registry = Registry::for_serve_with_input(
+            AliasProvider::Codex,
+            StartupInput {
+                config_dir: dir.path().to_owned(),
+                order: Some("api-key".into()),
+                key: Some("toy-key".into()),
+                base_url: Some(base.clone().into()),
+            },
+        )
+        .await
+        .unwrap();
+        let (_, value) = get_models(app(Arc::new(registry)), "/v1/models").await;
+        let data = value["data"].as_array().unwrap();
+        assert!(
+            data.iter()
+                .any(|v| v["id"] == "opus" && v["display_name"] == "opus (anthropic)")
+        );
+        assert_eq!(
+            data.iter()
+                .any(|v| v["id"] == "opus" && v["display_name"] == "opus (codex)"),
+            expected
+        );
+        assert!(
+            !data
+                .iter()
+                .any(|v| v["id"] == "sonnet" && v["display_name"] == "sonnet (codex)")
+        );
+    }
+    server.abort();
+}

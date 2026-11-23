@@ -217,7 +217,8 @@ async fn handler_models(
 ) -> Json<serde_json::Value> {
     let mut data: Vec<Value> = state
         .registry
-        .all_supported_models()
+        .discovery_models()
+        .await
         .into_iter()
         .map(|(model, provider)| {
             json!({
