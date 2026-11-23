@@ -227,12 +227,16 @@ async fn dispatch_request(
     let session_affinity = session_state
         .as_ref()
         .and_then(|state| state.affinity_provider.as_ref());
-    let api_only = !count_tokens
+    let selected_sources = !count_tokens
         && state.registry.source_startup().is_some_and(|startup| {
-            startup.sources().order().sources() == [crate::config::codex_auth::AuthSource::ApiKey]
+            startup
+                .sources()
+                .order()
+                .sources()
+                .contains(&crate::config::codex_auth::AuthSource::ApiKey)
         });
     let lookup = |model: &str, affinity| {
-        if api_only {
+        if selected_sources {
             state
                 .registry
                 .translated_provider_for_model(model, affinity)
@@ -248,7 +252,7 @@ async fn dispatch_request(
             count_tokens,
             configured_auto_review_model
                 .as_deref()
-                .or_else(|| (api_only && provider.name() == "codex").then_some("luna")),
+                .or_else(|| (selected_sources && provider.name() == "codex").then_some("luna")),
             provider.name(),
         )
     });
@@ -454,7 +458,7 @@ async fn dispatch_request(
 
     let response = if count_tokens {
         provider.handle_count_tokens(body, context).await
-    } else if api_only && provider.name() == "codex" {
+    } else if selected_sources && provider.name() == "codex" {
         crate::providers::codex::selected_messages::handle(
             &state.registry,
             &body,

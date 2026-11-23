@@ -1921,3 +1921,70 @@ async fn api_only_messages_selects_api_and_never_chatgpt_without_key() {
     assert!(valid.load(Ordering::SeqCst));
     server.abort();
 }
+
+#[tokio::test]
+async fn mixed_order_api_context_error_is_final() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let upstream = axum::Router::new()
+        .route("/v1/models", axum::routing::get(|| async { axum::Json(json!({"data":[{"id":"gpt-99-sol"}]})) }))
+        .route("/v1/responses", axum::routing::post({
+            let calls = calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    (StatusCode::BAD_REQUEST, axum::Json(json!({"error":{"code":"context_length_exceeded","message":"context length exceeded"}})))
+                }
+            }
+        }));
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let registry = Registry::for_serve_with_input(
+        AliasProvider::Anthropic,
+        StartupInput {
+            config_dir: dir.path().to_owned(),
+            order: Some("api-key,chatgpt".into()),
+            key: Some("toy-key".into()),
+            base_url: Some(base.into()),
+        },
+    )
+    .await
+    .unwrap();
+    let response = messages_response(app(Arc::new(registry)), "gpt-99-sol").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn missing_selected_credentials_give_order_appropriate_commands() {
+    use duolane::providers::codex::source_startup::StartupInput;
+    for (order, login) in [("api-key", false), ("chatgpt,api-key", true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::for_serve_with_input(
+            AliasProvider::Anthropic,
+            StartupInput {
+                config_dir: dir.path().to_owned(),
+                order: Some(order.into()),
+                key: None,
+                base_url: Some("http://127.0.0.1:1/v1".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let response = messages_response(app(Arc::new(registry)), "sol").await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("duolane codex auth key set"));
+        assert!(message.contains("duolane codex auth order"));
+        assert_eq!(message.contains("codex login"), login);
+    }
+}

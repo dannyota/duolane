@@ -51,6 +51,10 @@ impl Registry {
         Ok(registry)
     }
 
+    pub(crate) fn codex_provider(&self) -> Option<&Arc<crate::providers::codex::CodexProvider>> {
+        self.codex_provider.as_ref()
+    }
+
     pub fn source_startup(
         &self,
     ) -> Option<&Arc<crate::providers::codex::source_startup::SourceStartup>> {
