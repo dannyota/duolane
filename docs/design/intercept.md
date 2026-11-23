@@ -32,16 +32,18 @@ A [spike](#spike-results) confirmed the behavior this design depends on. The
   the proxy password gets 407.
 - At shutdown it stops accepting, gives open connections 5 seconds, then closes
   them, because tunnels and long polls would otherwise never end.
-- `duolane serve` raises its soft open-file limit to the hard limit, up to 8192,
-  because the default of 256 on macOS is below what the listener may hold. The
-  raise is best effort: it can fail, and the hard limit can be lower.
+- `duolane serve` raises its soft open-file limit to the hard limit, up to
+  16384, because the default of 256 on macOS is below what the listener may
+  hold. The raise is best effort: it can fail, and the hard limit can be lower.
 - The listener sizes its pools from the soft limit it ends up with, so that they
-  never promise more sockets than the process may open. A tunnel holds two
-  sockets. With a limit of 8192 or more, or no limit, the pools are 512
-  intercepted connections and 2048 tunnels. Below that, the intercepted pool is
-  one sixteenth of the limit and at least 16, and the tunnel pool is one quarter
-  of the limit and at least 64. The rest stays free for the main server and
-  upstream connections.
+  never promise more sockets than the process may open. It first sets aside 192
+  descriptors: 64 for connections that have not sent the password and 128 for
+  the main server. An intercepted connection and a tunnel each hold two sockets.
+  The intercepted pool is one eighth of the remainder, at most 512, and the
+  tunnel pool is one quarter of it, at most 2048. At least a quarter of the
+  remainder stays free for upstream connections that the pools do not count; at
+  a limit of 16384 the pools use 5184 descriptors. With no limit, the pools have
+  their largest sizes.
 
 ## Environment
 
