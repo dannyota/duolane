@@ -148,6 +148,7 @@ pub struct ActiveRequest {
     pub session_seq: Option<u64>,
     pub project: Option<String>,
     pub provider: Option<String>,
+    pub codex_source: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub endpoint: EndpointKind,
@@ -190,6 +191,7 @@ pub struct CompletedRequest {
     pub session_seq: Option<u64>,
     pub project: Option<String>,
     pub provider: Option<String>,
+    pub codex_source: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub endpoint: EndpointKind,
@@ -322,6 +324,14 @@ impl MonitorHandle {
     pub fn publish(&self, event: MonitorEvent) {
         if let Ok(mut store) = self.store.lock() {
             store.apply(event);
+        }
+    }
+
+    pub fn codex_source(&self, request_id: &str, source_label: impl Into<String>) {
+        if let Ok(mut store) = self.store.lock()
+            && let Some(request) = store.active.get_mut(request_id)
+        {
+            request.codex_source = Some(bounded_text(source_label));
         }
     }
 
@@ -775,6 +785,7 @@ mod tests {
             session_seq: None,
             project: None,
             provider: Some("codex".to_string()),
+            codex_source: None,
             model: Some("gpt-5.6-sol".to_string()),
             effort: None,
             endpoint: EndpointKind::Messages,

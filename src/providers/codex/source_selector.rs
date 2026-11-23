@@ -22,6 +22,50 @@ pub enum FallbackReason {
     Failed(FailureKind),
 }
 
+pub(super) fn source_label(source: AuthSource) -> &'static str {
+    match source {
+        AuthSource::ChatGpt => "chatgpt",
+        AuthSource::ApiKey => "api key",
+    }
+}
+
+pub(super) fn record_selection(
+    context: &RequestContext,
+    source: AuthSource,
+    fallback: Option<(AuthSource, FallbackReason)>,
+) {
+    if let Some(monitor) = &context.monitor {
+        let label = match fallback {
+            Some((previous, reason)) => {
+                let reason = match reason {
+                    FallbackReason::Failed(FailureKind::UsageLimit)
+                    | FallbackReason::Skipped(SkipReason::Marked(SkipMark::UsageLimit {
+                        ..
+                    })) => "usage limit",
+                    FallbackReason::Failed(FailureKind::RejectedCredential)
+                    | FallbackReason::Skipped(SkipReason::Marked(SkipMark::RejectedCredential)) => {
+                        "rejected credential"
+                    }
+                    FallbackReason::Failed(
+                        FailureKind::TransientExhausted | FailureKind::Final,
+                    )
+                    | FallbackReason::Skipped(SkipReason::StaleObservation) => "retries exhausted",
+                    FallbackReason::Skipped(SkipReason::MissingCredential) => "no credential",
+                    FallbackReason::Skipped(SkipReason::ModelUnavailable) => "model unavailable",
+                };
+                format!(
+                    "{} (from {}: {})",
+                    source_label(source),
+                    source_label(previous),
+                    reason
+                )
+            }
+            None => source_label(source).to_owned(),
+        };
+        monitor.codex_source(&context.req_id, label);
+    }
+}
+
 pub struct AttemptFailure<R> {
     pub failure: SourceFailure,
     pub response: Option<R>,
@@ -43,7 +87,10 @@ pub enum Selection<T, R, E> {
         reason: SkipReason,
         earliest_reset: Option<Instant>,
     },
-    ObservationError(E),
+    ObservationError {
+        source: AuthSource,
+        error: E,
+    },
 }
 
 pub async fn select<T, R, E, M, O, OF, Resolve, Attempt, AF>(
@@ -80,7 +127,7 @@ where
                             failure,
                             fallback: previous_fallback,
                         },
-                        None => Selection::ObservationError(err),
+                        None => Selection::ObservationError { source, error: err },
                     };
                 }
                 Ok(None) => {
@@ -126,6 +173,7 @@ where
         let Some((current, model)) = selected else {
             continue;
         };
+        record_selection(context, source, fallback);
         let task = SourceAttempt::new(source, context, gate.clone());
         match attempt(task, current, model).await {
             Ok(value) => {

@@ -1038,6 +1038,7 @@ async fn monitor_tracks_image_endpoint_without_session_affinity() {
     let state = monitor.snapshot();
     assert_eq!(state.recent.len(), 1);
     assert_eq!(state.recent[0].endpoint.label(), "images");
+    assert_eq!(state.recent[0].codex_source.as_deref(), Some("chatgpt"));
     assert_eq!(state.recent[0].status, RequestStatus::Failed);
     assert!(state.recent[0].session_seq.is_none());
     assert!(state.recent[0].traffic_capture_path.is_none());

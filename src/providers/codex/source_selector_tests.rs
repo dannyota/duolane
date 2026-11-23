@@ -34,9 +34,14 @@ async fn spent_source_switches_with_new_model_and_budget() {
     )
     .unwrap();
     let sources = CodexSources::new(order);
+    let monitor = crate::monitor::MonitorHandle::default();
+    monitor.request_started("req", None, None, crate::monitor::EndpointKind::Messages);
+    let mut request_context = context();
+    request_context.req_id = "req".into();
+    request_context.monitor = Some(monitor.clone());
     let result = select(
         &sources,
-        &context(),
+        &request_context,
         false,
         "terra",
         |source| async move { Ok::<_, ()>(Some(observed(source))) },
@@ -67,6 +72,12 @@ async fn spent_source_switches_with_new_model_and_budget() {
                     response: None::<()>,
                 })
             } else {
+                assert_eq!(
+                    attempt.context.monitor.as_ref().unwrap().snapshot().active[0]
+                        .codex_source
+                        .as_deref(),
+                    Some("api key (from chatgpt: usage limit)")
+                );
                 Ok(model)
             }
         },
@@ -462,6 +473,34 @@ async fn unavailable_model_takes_precedence_over_quota_mark() {
         Selection::Skipped {
             reason: super::source_selector::SkipReason::ModelUnavailable,
             earliest_reset: None,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn observation_error_identifies_source_without_exposing_error() {
+    let sources = CodexSources::new(
+        load_order(
+            std::path::Path::new("unused"),
+            Some(OsStr::new("chatgpt,api-key")),
+        )
+        .unwrap(),
+    );
+    let result = select(
+        &sources,
+        &context(),
+        false,
+        "model",
+        |_| async { Err::<Option<ObservedCredential>, _>("private error") },
+        |_, _| Some(()),
+        |_, _, _| async { Ok::<_, AttemptFailure<()>>(()) },
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Selection::ObservationError {
+            source: AuthSource::ChatGpt,
             ..
         }
     ));

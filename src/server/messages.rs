@@ -404,6 +404,9 @@ async fn dispatch_request(
             monitor.session_sequence_resolved(&req_id, current.seq);
         }
         monitor.provider_selected(&req_id, provider.name(), &normalized_model, effort);
+        if provider.name() == "codex" && (count_tokens || !selected_sources) {
+            monitor.codex_source(&req_id, "chatgpt");
+        }
     }
 
     let traffic = create_traffic_capture(TrafficCaptureOptions {

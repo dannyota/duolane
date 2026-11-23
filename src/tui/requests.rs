@@ -160,11 +160,23 @@ pub(super) fn render_active(
                     ActiveColumn::Session => {
                         text_cell(display_session_id(request.session_id.as_deref()))
                     }
-                    ActiveColumn::Provider => provider_cell(request.provider.as_deref()),
+                    ActiveColumn::Provider => provider_cell(
+                        request
+                            .codex_source
+                            .as_deref()
+                            .map(|source| source.split(" (from ").next().unwrap_or(source))
+                            .or(request.provider.as_deref()),
+                    ),
                     ActiveColumn::Model => model_cell(request.model.as_deref(), width),
-                    ActiveColumn::Target => {
-                        target_cell(request.provider.as_deref(), request.model.as_deref(), width)
-                    }
+                    ActiveColumn::Target => target_cell(
+                        request
+                            .codex_source
+                            .as_deref()
+                            .map(|source| source.split(" (from ").next().unwrap_or(source))
+                            .or(request.provider.as_deref()),
+                        request.model.as_deref(),
+                        width,
+                    ),
                     ActiveColumn::Effort => text_cell(request.effort.as_deref().unwrap_or("-")),
                     ActiveColumn::Endpoint => muted_cell(request.endpoint.label()),
                     ActiveColumn::Input => number_cell(token_value(request.input_tokens)),
@@ -332,11 +344,23 @@ pub(super) fn render_recent(
                     RecentColumn::Session => {
                         text_cell(display_session_id(request.session_id.as_deref()))
                     }
-                    RecentColumn::Provider => provider_cell(request.provider.as_deref()),
+                    RecentColumn::Provider => provider_cell(
+                        request
+                            .codex_source
+                            .as_deref()
+                            .map(|source| source.split(" (from ").next().unwrap_or(source))
+                            .or(request.provider.as_deref()),
+                    ),
                     RecentColumn::Model => model_cell(request.model.as_deref(), width),
-                    RecentColumn::Target => {
-                        target_cell(request.provider.as_deref(), request.model.as_deref(), width)
-                    }
+                    RecentColumn::Target => target_cell(
+                        request
+                            .codex_source
+                            .as_deref()
+                            .map(|source| source.split(" (from ").next().unwrap_or(source))
+                            .or(request.provider.as_deref()),
+                        request.model.as_deref(),
+                        width,
+                    ),
                     RecentColumn::Effort => text_cell(request.effort.as_deref().unwrap_or("-")),
                     RecentColumn::Endpoint => muted_cell(request.endpoint.label()),
                     RecentColumn::Latency => number_cell(format_duration(request.latency)),

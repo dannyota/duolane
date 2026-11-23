@@ -59,6 +59,7 @@ async fn dispatch_image_request(
     let session_id = native_session_id(&headers);
     if let Some(monitor) = state.monitor.as_ref() {
         monitor.request_started(&req_id, session_id.clone(), None, EndpointKind::Images);
+        monitor.codex_source(&req_id, "chatgpt");
     }
     let request_guard = RequestMonitorGuard::new(state.monitor.clone(), req_id.clone());
     if let Some(response) = native_source_error(&state.registry).await {

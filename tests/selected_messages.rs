@@ -97,6 +97,12 @@ async fn chatgpt_quota_falls_back_and_marks_source() {
         let _ = axum::body::to_bytes(response.into_body(), 65536)
             .await
             .unwrap();
+        let snapshot: duolane::monitor::snapshot::MonitorSnapshot = monitor.snapshot().into();
+        let value = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(
+            value["recent"][0]["codex_source"],
+            "api key (from chatgpt: usage limit)"
+        );
         assert!(
             monitor.snapshot().recent[0]
                 .model
@@ -198,8 +204,9 @@ async fn chatgpt_quota_falls_back_and_marks_source() {
             json!({"model":"sol","messages":[{"role":"user","content":"hello"}]}).to_string(),
         ))
         .unwrap();
+    let legacy_monitor = MonitorHandle::new(10);
     assert_eq!(
-        app(Arc::new(registry))
+        app_with_monitor(Arc::new(registry), Some(legacy_monitor.clone()))
             .oneshot(request)
             .await
             .unwrap()
@@ -208,6 +215,10 @@ async fn chatgpt_quota_falls_back_and_marks_source() {
     );
     assert_eq!(api_calls.load(Ordering::SeqCst), 4);
     assert_eq!(chat_calls.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        legacy_monitor.snapshot().recent[0].codex_source.as_deref(),
+        Some("chatgpt")
+    );
     unsafe {
         std::env::set_var("DUOLANE_CODEX_MODEL", "gpt-5.5");
     }
@@ -236,4 +247,41 @@ async fn chatgpt_quota_falls_back_and_marks_source() {
     assert_eq!(chat_calls.load(Ordering::SeqCst), 4);
     chat_server.abort();
     api_server.abort();
+}
+
+#[tokio::test]
+async fn missing_api_source_is_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Registry::for_serve_with_input(
+        AliasProvider::Anthropic,
+        StartupInput {
+            config_dir: dir.path().to_owned(),
+            order: Some("api-key".into()),
+            key: None,
+            base_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let monitor = MonitorHandle::new(10);
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"model":"sol","messages":[{"role":"user","content":"hello"}]}).to_string(),
+        ))
+        .unwrap();
+    let response = app_with_monitor(Arc::new(registry), Some(monitor.clone()))
+        .oneshot(request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let _ = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    assert_eq!(
+        monitor.snapshot().recent[0].codex_source.as_deref(),
+        Some("api key")
+    );
 }

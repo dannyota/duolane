@@ -109,6 +109,17 @@ pub(crate) async fn handle(
         },
     )
     .await;
+    match &result {
+        Selection::Success {
+            source, fallback, ..
+        }
+        | Selection::Failed {
+            source, fallback, ..
+        } => source_selector::record_selection(context, *source, *fallback),
+        Selection::Skipped { source, .. } | Selection::ObservationError { source, .. } => {
+            source_selector::record_selection(context, *source, None)
+        }
+    }
     match result {
         Selection::Success { value, .. } => value,
         Selection::Failed { failure, .. } => failure
@@ -142,7 +153,7 @@ pub(crate) async fn handle(
                 "OpenAI API key unavailable; run duolane codex auth key set; check duolane codex auth order"
             },
         ),
-        Selection::ObservationError(_) => json_error(
+        Selection::ObservationError { .. } => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "api_error",
             "Unable to observe Codex credentials",

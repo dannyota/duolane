@@ -98,6 +98,7 @@ impl MonitorSnapshot {
                 &mut request.session_id,
                 &mut request.project,
                 &mut request.provider,
+                &mut request.codex_source,
                 &mut request.model,
                 &mut request.effort,
                 &mut request.error,
@@ -109,6 +110,7 @@ impl MonitorSnapshot {
                 &mut request.session_id,
                 &mut request.project,
                 &mut request.provider,
+                &mut request.codex_source,
                 &mut request.model,
                 &mut request.effort,
                 &mut request.error,
@@ -144,6 +146,8 @@ pub struct ActiveSnapshot {
     pub session_seq: Option<u64>,
     pub project: Option<String>,
     pub provider: Option<String>,
+    #[serde(default)]
+    pub codex_source: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub endpoint: EndpointKind,
@@ -181,6 +185,7 @@ impl From<ActiveRequest> for ActiveSnapshot {
             session_seq: value.session_seq,
             project: value.project,
             provider: value.provider,
+            codex_source: value.codex_source,
             model: value.model,
             effort: value.effort,
             endpoint: value.endpoint,
@@ -207,6 +212,8 @@ pub struct CompletedSnapshot {
     pub session_seq: Option<u64>,
     pub project: Option<String>,
     pub provider: Option<String>,
+    #[serde(default)]
+    pub codex_source: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub endpoint: EndpointKind,
@@ -244,6 +251,7 @@ impl From<CompletedRequest> for CompletedSnapshot {
             session_seq: value.session_seq,
             project: value.project,
             provider: value.provider,
+            codex_source: value.codex_source,
             model: value.model,
             effort: value.effort,
             endpoint: value.endpoint,
@@ -326,6 +334,27 @@ impl SessionSnapshot {
 mod tests {
     use super::*;
     use crate::monitor::MonitorHandle;
+
+    #[test]
+    fn completed_source_round_trips_and_legacy_snapshot_defaults() {
+        let monitor = MonitorHandle::default();
+        monitor.request_started("done", None, None, EndpointKind::Messages);
+        monitor.codex_source("done", "api key (from chatgpt: usage limit)");
+        monitor.request_completed("done", 200, None, None);
+        let snapshot: MonitorSnapshot = monitor.snapshot().into();
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        let decoded: MonitorSnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            decoded.recent[0].codex_source.as_deref(),
+            Some("api key (from chatgpt: usage limit)")
+        );
+        value["recent"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("codex_source");
+        let legacy: MonitorSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.recent[0].codex_source, None);
+    }
 
     #[test]
     fn snapshot_round_trip_preserves_accounting_without_process_clocks() {

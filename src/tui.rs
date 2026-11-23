@@ -1118,6 +1118,38 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_shows_codex_sources_at_24_rows() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("done", None, None, EndpointKind::Messages);
+        monitor.provider_selected("done", "codex", "model", None);
+        monitor.codex_source("done", "api key (from chatgpt: usage limit)");
+        monitor.request_completed("done", 200, None, None);
+        monitor.request_started("active", None, None, EndpointKind::Messages);
+        monitor.provider_selected("active", "codex", "model", None);
+        monitor.codex_source("active", "chatgpt");
+        let state: MonitorSnapshot = monitor.snapshot().into();
+        let mut app = MonitorApp {
+            listen_url: "test".into(),
+            setup_text: String::new(),
+            show_setup: false,
+            show_help: false,
+            detail: Some(DetailView::Request(DetailSelection::Keyboard)),
+            focus: FocusPane::Recent,
+            selected: 0,
+            recent_selected: 0,
+            tick: 0,
+            phase: MonitorPhase::Running,
+            shutdown: None,
+            shutdown_complete: None,
+        };
+        let buffer = draw(140, 24, |frame| render(frame, &mut app, &state));
+        let text = buffer_text(&buffer);
+        assert!(text.contains("from chatgpt: usage limit"));
+        assert!(text.matches("chatgpt").count() >= 2);
+        assert!(text.matches("api key").count() >= 2);
+    }
+
+    #[test]
     fn mock_state_renders_representative_panes_at_wide_width() {
         let state: MonitorSnapshot = mock_state().into();
         let mut app = MonitorApp {

@@ -67,6 +67,17 @@ pub(crate) async fn handle(
         },
     )
     .await;
+    match &result {
+        Selection::Success {
+            source, fallback, ..
+        }
+        | Selection::Failed {
+            source, fallback, ..
+        } => source_selector::record_selection(context, *source, *fallback),
+        Selection::Skipped { source, .. } | Selection::ObservationError { source, .. } => {
+            source_selector::record_selection(context, *source, None)
+        }
+    }
     match result {
         Selection::Success { value, .. } => value,
         Selection::Failed { failure, .. } => failure.response.unwrap_or_else(|| {
@@ -122,7 +133,7 @@ pub(crate) async fn handle(
             response
         }
         Selection::Skipped { .. } => authentication_error(),
-        Selection::ObservationError(_) => ChatError::new(
+        Selection::ObservationError { .. } => ChatError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "api_error",
             "Unable to observe Codex credentials",

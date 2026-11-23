@@ -47,6 +47,7 @@ pub(super) async fn handler_transcription(
             EndpointKind::Transcriptions,
         );
         monitor.provider_selected(&req_id, "codex", "codex-transcribe", None);
+        monitor.codex_source(&req_id, "chatgpt");
     }
     let request_guard = RequestMonitorGuard::new(state.monitor.clone(), req_id.clone());
     if let Some(response) = native_source_error(&state.registry).await {

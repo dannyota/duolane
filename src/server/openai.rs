@@ -76,6 +76,7 @@ pub(super) async fn handler_responses(
     let session_id = native_session_id(&headers);
     if let Some(monitor) = state.monitor.as_ref() {
         monitor.request_started(&req_id, session_id.clone(), None, EndpointKind::Responses);
+        monitor.codex_source(&req_id, "chatgpt");
     }
     let request_guard = RequestMonitorGuard::new(state.monitor.clone(), req_id.clone());
     if let Some(response) = native_source_error(&state.registry).await {
@@ -437,6 +438,9 @@ pub(super) async fn handler_chat_completions(
             monitor.session_sequence_resolved(&req_id, current.seq);
         }
         monitor.provider_selected(&req_id, provider.name(), &normalized_model, effort.clone());
+        if provider.name() == "codex" {
+            monitor.codex_source(&req_id, "chatgpt");
+        }
     }
     let traffic = create_traffic_capture(TrafficCaptureOptions {
         req_id: req_id.clone(),
