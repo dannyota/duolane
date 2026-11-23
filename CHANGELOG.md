@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- An OpenAI API key can serve Codex models next to, or instead of, the ChatGPT
+  login. `duolane codex auth key set` stores the key, `duolane codex auth order`
+  chooses which source a request tries first, and `duolane codex auth status`
+  shows both. The key is never used until the order names `api-key`, so a key
+  alone does not turn API billing on. `OPENAI_API_KEY` is ignored; use
+  `DUOLANE_OPENAI_API_KEY` or the stored key.
+- With both sources in the order, `/v1/messages` moves to the next source when
+  the first has spent its limit, rejects its credential, or runs out of retries,
+  and only before any output reached the client. A request whose hosted web
+  search may already have run is never sent again.
+- The monitor shows the source of each Codex request, `chatgpt` or `api key`,
+  and why a request moved on.
+- `duolane claude` offers `[1m]` model names for Codex models that have a
+  1M-token context window, so Claude Code no longer warns that the model is not
+  recognized.
+
+### Changed
+
+- `/v1/chat/completions` uses the API key only when the order is `api-key`
+  alone. With both sources in the order it uses the ChatGPT login.
+- `/v1/responses`, images, and transcription need the ChatGPT login and answer
+  HTTP 400 when the order leaves `chatgpt` out.
+- `duolane claude` does not pass `DUOLANE_OPENAI_API_KEY` to Claude Code.
+
 ## 0.5.1
 
 ### Fixed
