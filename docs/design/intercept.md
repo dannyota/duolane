@@ -60,14 +60,14 @@ A [spike](#spike-results) confirmed the behavior this design depends on. The
 - `ANTHROPIC_BASE_URL` is removed from the environment.
 - The wrapper refuses to start when a proxy variable already names another
   proxy, or when `NO_PROXY` would bypass `api.anthropic.com`.
-- Programs that Claude Code starts inherit these variables. Their HTTPS traffic
-  is tunneled, and Node programs among them also trust the certificate. duolane
-  cannot prevent this: Claude Code takes its proxy only from the standard
-  variables and passes its environment to hooks, shell commands, and MCP
-  servers, as its
-  [network](https://code.claude.com/docs/en/network-config#proxy-configuration)
-  and [hooks](https://code.claude.com/docs/en/hooks#common-input-fields)
-  documentation said on 2026-11-23.
+- Programs that Claude Code starts inherit these variables unless Claude Code
+  filters them. Their HTTPS traffic is tunneled, and Node programs among them
+  also trust the certificate. The wrapper cannot guarantee filtering for every
+  such program: Claude Code takes its proxy only from the
+  [standard variables](https://code.claude.com/docs/en/network-config#proxy-configuration),
+  hooks receive its environment, and its
+  [subprocess scrub](https://code.claude.com/docs/en/env-vars#what-the-subprocess-environment-scrub-removes)
+  keeps the proxy variables, password included.
 
 For background agents that the wrapper cannot reach, `duolane intercept setup`
 writes the same variables to the `env` block of the user settings file instead.
@@ -271,9 +271,11 @@ files, so two of them never interleave.
     This risk is accepted. When the listener check of `duolane claude` fails
     after it began sending the password, it says the password was exposed and
     that `duolane intercept cleanup` replaces it.
-11. Programs that Claude Code starts read the proxy password from the inherited
-    `HTTPS_PROXY`. This risk is accepted: they run as the owner, who can already
-    read `proxy-password` and the Claude and Codex logins.
+11. A program that Claude Code starts and that receives the proxy password and
+    can reach the listener is authorized to use the Codex route, even when a
+    sandbox denies it the credential files. The Claude route still needs the
+    login that the client sends. This risk is accepted, because the wrapper
+    cannot keep the password from such programs.
 
 ## Live results
 
