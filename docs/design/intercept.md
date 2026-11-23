@@ -36,14 +36,15 @@ A [spike](#spike-results) confirmed the behavior this design depends on. The
   16384, because the default of 256 on macOS is below what the listener may
   hold. The raise is best effort: it can fail, and the hard limit can be lower.
 - The listener sizes its pools from the soft limit it ends up with, so that they
-  never promise more sockets than the process may open. It first sets aside 192
-  descriptors: 64 for connections that have not sent the password and 128 for
-  the main server. An intercepted connection and a tunnel each hold two sockets.
-  The intercepted pool is one eighth of the remainder, at most 512, and the
-  tunnel pool is one quarter of it, at most 2048. At least a quarter of the
-  remainder stays free for upstream connections that the pools do not count; at
-  a limit of 16384 the pools use 5184 descriptors. With no limit, the pools have
-  their largest sizes.
+  never promise more sockets than the process may open. An intercepted
+  connection and a tunnel each hold two sockets. The sizing subtracts 192 from
+  the limit, for the 64 connections that have not sent the password and 128 for
+  the main server; this is a deduction, not a guarantee. Of the remainder it
+  keeps three quarters free, up to 2880 descriptors, for upstream connections
+  that the pools do not count. 2880 is what a limit of 4096 left free when both
+  pools held 256. The intercepted pool gets one sixth of what is left, at most
+  512, and the tunnel pool one third, at most 2048. The pools reach their
+  largest sizes from a limit of 9216, and also when there is no limit.
 
 ## Environment
 

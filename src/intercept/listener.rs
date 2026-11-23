@@ -35,6 +35,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_UNAUTHENTICATED: usize = 64;
 const MAIN_SERVER_RESERVE: usize = 128;
+const MAX_FREE_DESCRIPTORS: u64 = 2880;
 const MAX_INTERCEPTED: usize = 512;
 const MAX_TUNNELS: usize = 2048;
 
@@ -43,9 +44,11 @@ fn pool_sizes(soft_limit: Option<u64>) -> (usize, usize) {
         None => (MAX_INTERCEPTED, MAX_TUNNELS),
         Some(limit) => {
             let rest = limit.saturating_sub((MAX_UNAUTHENTICATED + MAIN_SERVER_RESERVE) as u64);
+            let free = (u128::from(rest) * 3 / 4).min(u128::from(MAX_FREE_DESCRIPTORS)) as u64;
+            let budget = rest - free;
             (
-                (rest / 8).min(MAX_INTERCEPTED as u64) as usize,
-                (rest / 4).min(MAX_TUNNELS as u64) as usize,
+                (budget / 6).min(MAX_INTERCEPTED as u64) as usize,
+                (budget / 3).min(MAX_TUNNELS as u64) as usize,
             )
         }
     }
@@ -426,9 +429,10 @@ mod tests {
     #[test]
     fn pools_follow_soft_open_file_limit() {
         assert_eq!(pool_sizes(None), (512, 2048));
+        assert_eq!(pool_sizes(Some(u64::MAX)), (512, 2048));
         assert_eq!(pool_sizes(Some(16384)), (512, 2048));
-        assert_eq!(pool_sizes(Some(4096)), (488, 976));
-        assert_eq!(pool_sizes(Some(256)), (8, 16));
+        assert_eq!(pool_sizes(Some(4096)), (170, 341));
+        assert_eq!(pool_sizes(Some(256)), (2, 5));
         assert_eq!(pool_sizes(Some(128)), (0, 0));
     }
 }
