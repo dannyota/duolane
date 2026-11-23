@@ -1,5 +1,6 @@
 pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const ISSUER: &str = "https://auth.openai.com";
+pub const TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 pub const CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 pub const ORIGINATOR: &str = "duolane";
 pub const RESPONSES_LITE_ORIGINATOR: &str = "codex_cli_rs";
@@ -7,3 +8,13 @@ pub const REFRESH_MARGIN_MS: u64 = 5 * 60 * 1000;
 pub const OAUTH_PORT: u16 = 1455;
 pub const OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 pub const DEVICE_POLL_SAFETY_MARGIN_MS: u64 = 3000;
+
+#[cfg(test)]
+mod tests {
+    use super::{ISSUER, TOKEN_ENDPOINT};
+
+    #[test]
+    fn token_endpoint_matches_issuer() {
+        assert_eq!(TOKEN_ENDPOINT, format!("{ISSUER}/oauth/token"));
+    }
+}

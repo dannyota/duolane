@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex as AsyncMutex;
 
-use super::constants::{CLIENT_ID, ISSUER, REFRESH_MARGIN_MS};
+use super::constants::{CLIENT_ID, REFRESH_MARGIN_MS, TOKEN_ENDPOINT};
 use super::jwt::{TokenResponse, extract_account_id, validate_token_response};
 use super::token_store::{CodexTokenStore, StoredAuth};
 use crate::auth::AuthStorage;
@@ -72,15 +72,12 @@ pub struct CodexAuthManager<S: AuthStorage<StoredAuth>> {
     test_auth: Arc<Mutex<Option<StoredAuth>>>,
     refresh_lock: Arc<AsyncMutex<()>>,
     refresh_client: reqwest::Client,
+    #[cfg(test)]
     token_endpoint: String,
 }
 
 impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
     pub fn new(store: CodexTokenStore<S>) -> Self {
-        Self::new_with_token_endpoint(store, format!("{ISSUER}/oauth/token"))
-    }
-
-    fn new_with_token_endpoint(store: CodexTokenStore<S>, token_endpoint: String) -> Self {
         Self {
             store: Arc::new(store),
             #[cfg(test)]
@@ -92,8 +89,16 @@ impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("failed to create Codex OAuth refresh client"),
-            token_endpoint,
+            #[cfg(test)]
+            token_endpoint: TOKEN_ENDPOINT.to_owned(),
         }
+    }
+
+    #[cfg(test)]
+    fn new_with_token_endpoint(store: CodexTokenStore<S>, token_endpoint: String) -> Self {
+        let mut manager = Self::new(store);
+        manager.token_endpoint = token_endpoint;
+        manager
     }
 
     pub async fn current_credential_snapshot(
@@ -199,6 +204,7 @@ impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
 
         let exchange = exchange_refresh_token(
             self.refresh_client.clone(),
+            #[cfg(test)]
             self.token_endpoint.clone(),
             self.store.clone(),
             current,
@@ -238,7 +244,7 @@ async fn with_store<S: AuthStorage<StoredAuth> + 'static, T: Send + 'static>(
 
 async fn exchange_refresh_token<S: AuthStorage<StoredAuth> + 'static>(
     client: reqwest::Client,
-    token_endpoint: String,
+    #[cfg(test)] token_endpoint: String,
     store: Arc<CodexTokenStore<S>>,
     current: StoredAuth,
 ) -> Result<StoredAuth, anyhow::Error> {
@@ -252,17 +258,16 @@ async fn exchange_refresh_token<S: AuthStorage<StoredAuth> + 'static>(
         ("refresh_token", current.refresh.clone()),
     ];
 
-    let resp = client
-        .post(&token_endpoint)
-        .form(&form)
-        .send()
-        .await
-        .map_err(|e| {
-            classified(
-                anyhow::anyhow!("refresh network error: {e}"),
-                AuthFailure::Transient,
-            )
-        })?;
+    #[cfg(test)]
+    let request = client.post(&token_endpoint);
+    #[cfg(not(test))]
+    let request = client.post(TOKEN_ENDPOINT);
+    let resp = request.form(&form).send().await.map_err(|e| {
+        classified(
+            anyhow::anyhow!("refresh network error: {e}"),
+            AuthFailure::Transient,
+        )
+    })?;
 
     let status = resp.status().as_u16();
     if resp.status().is_client_error() {
