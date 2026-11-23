@@ -234,12 +234,26 @@ moved on also shows the source it left and why, for example
   `max_tokens`, and a move from an invalid `DUOLANE_OPENAI_API_KEY` to `chatgpt`
   with the order `api-key,chatgpt`.
 
+## Live results
+
+Checked on 2026-11-23 with the owner's key against `api.openai.com`, on a test
+proxy with its own config and state directories:
+
+- With the order `api-key`, `GET /v1/models` returned the account's catalog, and
+  one Messages request each for `sol`, `terra`, `luna`, and `astra` returned
+  HTTP 200 with duolane's Responses body unchanged.
+- A streamed Messages request completed, and `max_tokens: 16` ended with
+  `stop_reason: max_tokens`.
+- A hosted web search and a standalone search with `allowed_domains` each
+  returned search result blocks.
+- An invalid key gets HTTP 401 with `type: invalid_request_error` and
+  `code: invalid_api_key`. With the order `api-key,chatgpt` the request moved to
+  `chatgpt`, and the monitor showed
+  `chatgpt (from api key: rejected credential)`.
+
 ## Unverified behavior
 
-- The API's error codes and statuses for spent credit, a bad key, and rate
-  limiting.
-- That the API accepts duolane's Responses body unchanged, including
-  `prompt_cache_key`, `include`, reasoning summaries, and `text.verbosity`.
+- The API's error codes and statuses for spent credit and rate limiting.
 - End to end: `service_tier: "priority"`
   ([priority processing](https://developers.openai.com/api/docs/guides/priority-processing))
   and `filters.blocked_domains` for `web_search` are documented but not yet
