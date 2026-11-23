@@ -44,12 +44,32 @@ async fn serve_inner(
     config: ServerConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+    crate::upstream_url::check_upstream_urls()?;
+    let ip = config
+        .bind_address
+        .parse::<std::net::IpAddr>()
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "invalid proxy bind address {:?}: {err}",
+                config.bind_address
+            )
+        })?;
+    crate::inbound_auth::InboundPolicy::from_config(ip)?;
+    let registry = Arc::new(Registry::for_serve(crate::config::alias_provider()).await?);
+    serve_with_registry(config, registry, shutdown).await
+}
+
+pub async fn serve_with_registry(
+    config: ServerConfig,
+    registry: Arc<Registry>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
     let listener = bind_proxy_listener(&config.bind_address, config.port).await?;
     let intercept = match config.intercept_port {
         Some(port) => Some(InterceptListener::bind(port).await?),
         None => None,
     };
-    serve_listeners(listener, intercept, config.monitor, shutdown).await
+    serve_listeners_with_registry(listener, intercept, config.monitor, registry, shutdown).await
 }
 
 pub async fn bind_proxy_listener(bind_address: &str, port: u16) -> anyhow::Result<TcpListener> {
@@ -76,6 +96,20 @@ pub async fn serve_listeners(
     monitor: Option<MonitorHandle>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+    crate::upstream_url::check_upstream_urls()?;
+    let local_addr = listener.local_addr()?;
+    crate::inbound_auth::InboundPolicy::from_config(local_addr.ip())?;
+    let registry = Arc::new(Registry::for_serve(crate::config::alias_provider()).await?);
+    serve_listeners_with_registry(listener, intercept, monitor, registry, shutdown).await
+}
+
+pub async fn serve_listeners_with_registry(
+    listener: TcpListener,
+    intercept: Option<InterceptListener>,
+    monitor: Option<MonitorHandle>,
+    registry: Arc<Registry>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
     let local_addr = listener.local_addr()?;
     let policy = crate::inbound_auth::InboundPolicy::from_config(local_addr.ip())?;
     crate::upstream_url::check_upstream_urls()?;
@@ -97,7 +131,7 @@ pub async fn serve_listeners(
             ),
         ])),
     );
-    let app = app_with_monitor(Arc::new(Registry::with_default_alias()), monitor);
+    let app = app_with_monitor(registry, monitor);
     let guarded = crate::inbound_auth::guard(app.clone(), policy);
     let Some(intercept) = intercept else {
         serve_connections(listener, guarded, shutdown, HEADER_READ_TIMEOUT).await;

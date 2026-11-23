@@ -824,3 +824,113 @@ fn codex_api_auth_cli_rejects_positional_key_without_disclosure()
     assert!(!output.stderr.windows(secret.len()).any(|s| s == secret));
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn serve_rejects_invalid_order_before_binding() -> Result<(), Box<dyn std::error::Error>> {
+    let config = TempDir::new()?;
+    let occupied = TcpListener::bind("127.0.0.1:0")?;
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_duolane"))
+        .args([
+            "serve",
+            "--no-monitor",
+            "--port",
+            &occupied.local_addr()?.port().to_string(),
+        ])
+        .env("DUOLANE_CONFIG_DIR", config.path())
+        .env("DUOLANE_CODEX_AUTH_ORDER", "invalid")
+        .env("DUOLANE_OPENAI_API_KEY", "toy-key")
+        .env("DUOLANE_OPENAI_BASE_URL", "http://127.0.0.1:1/v1")
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("DUOLANE_CODEX_AUTH_ORDER"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_fetches_models_only_once_when_api_key_is_selected()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+    let upstream = TcpListener::bind("127.0.0.1:0")?;
+    upstream.set_nonblocking(true)?;
+    let base = format!("http://{}/v1", upstream.local_addr()?);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicBool::new(false));
+    let seen = calls.clone();
+    let stopped = done.clone();
+    let fixture = thread::spawn(move || {
+        while !stopped.load(Ordering::SeqCst) {
+            match upstream.accept() {
+                Ok((mut stream, _)) => {
+                    let mut request = [0; 4096];
+                    let _ = stream.read(&mut request);
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"data\":[]}");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10))
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        for (order, expected) in [(None, 0), (Some("api-key"), 1)] {
+            let config = TempDir::new()?;
+            let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_duolane"));
+            command.env_remove("DUOLANE_CODEX_AUTH_ORDER");
+            if let Some(order) = order {
+                command.env("DUOLANE_CODEX_AUTH_ORDER", order);
+            }
+            let child = command
+                .args(["serve", "--no-monitor", "--port", &port.to_string()])
+                .env("DUOLANE_CONFIG_DIR", config.path())
+                .env("CODEX_HOME", config.path())
+                .env("DUOLANE_OPENAI_API_KEY", "toy-key")
+                .env("DUOLANE_OPENAI_BASE_URL", &base)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+            let mut child = ChildGuard(child);
+            let mut stream = wait_for_service(&mut child, port)?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            stream.write_all(
+                b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            assert!(response.starts_with("HTTP/1.1 200 "));
+            assert_eq!(calls.load(Ordering::SeqCst), expected);
+            child.0.kill()?;
+            child.0.wait()?;
+            let mut stderr = String::new();
+            child
+                .0
+                .stderr
+                .take()
+                .unwrap()
+                .take(65536)
+                .read_to_string(&mut stderr)?;
+            assert_eq!(stderr.contains("codex login"), order.is_none());
+            let mut stdout = String::new();
+            child
+                .0
+                .stdout
+                .take()
+                .unwrap()
+                .take(65536)
+                .read_to_string(&mut stdout)?;
+            assert_eq!(stdout.contains("codex login"), order.is_none());
+        }
+        Ok(())
+    })();
+    done.store(true, Ordering::SeqCst);
+    fixture.join().unwrap();
+    result
+}

@@ -208,30 +208,61 @@ fn main() -> Result<()> {
                 duolane::intercept::check_proxy_environment(port)?;
                 duolane::intercept::raise_open_file_limit();
             }
-            let exposed = match bind_address.parse::<std::net::IpAddr>() {
-                Ok(ip) => !InboundPolicy::from_config(ip)?.is_loopback(),
-                Err(_) => false,
-            };
+            let ip = bind_address.parse::<std::net::IpAddr>().map_err(|err| {
+                anyhow::anyhow!("invalid proxy bind address {bind_address:?}: {err}")
+            })?;
+            let exposed = !InboundPolicy::from_config(ip)?.is_loopback();
             if exposed {
                 eprintln!("{PLAIN_HTTP_WARNING}");
             }
             if traffic_capture_enabled() {
                 eprintln!("{TRAFFIC_CAPTURE_WARNING}");
             }
-            let registry = Registry::with_default_alias();
+            duolane::upstream_url::check_upstream_urls()?;
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
+            let registry = std::sync::Arc::new(
+                runtime.block_on(Registry::for_serve(config::alias_provider()))?,
+            );
+            if let Some(startup) = registry.source_startup() {
+                if startup
+                    .sources()
+                    .order()
+                    .sources()
+                    .contains(&duolane::config::codex_auth::AuthSource::ChatGpt)
+                    && registry
+                        .provider("codex")
+                        .is_some_and(|provider| provider.missing_login_hint().is_some())
+                {
+                    eprintln!("ChatGPT login is unavailable. Run `codex login`.");
+                }
+                for warning in startup.warnings() {
+                    use duolane::providers::codex::source_startup::StartupWarning;
+                    eprintln!(
+                        "{}",
+                        match warning {
+                            StartupWarning::ApiKeyInactive =>
+                                "OpenAI API key is not selected by the Codex auth order.",
+                            StartupWarning::ApiKeyUnavailable =>
+                                "OpenAI API key is unavailable for the Codex auth order.",
+                        }
+                    );
+                }
+            }
             match select_serve_mode(std::io::stdout().is_terminal(), no_monitor) {
                 ServeMode::Plain => {
                     print_server_banner(&bind_address, effective_port, intercept_port, &registry);
                     runtime
-                        .block_on(run_service(ServerConfig {
-                            bind_address,
-                            port: effective_port,
-                            monitor: Some(MonitorHandle::default()),
-                            intercept_port,
-                        }))
+                        .block_on(run_service(
+                            ServerConfig {
+                                bind_address,
+                                port: effective_port,
+                                monitor: Some(MonitorHandle::default()),
+                                intercept_port,
+                            },
+                            registry.clone(),
+                        ))
                         .map_err(|err| anyhow::anyhow!(err))
                 }
                 ServeMode::Monitor => {
@@ -263,11 +294,13 @@ fn main() -> Result<()> {
                             .push_str("  traffic capture on: stores conversation content");
                     }
                     let server_monitor = monitor.clone();
+                    let server_registry = registry.clone();
                     let server_task = runtime.spawn(async move {
-                        let result = server::serve_listeners(
+                        let result = server::serve_listeners_with_registry(
                             listener,
                             intercept,
                             Some(server_monitor),
+                            server_registry,
                             async move {
                                 let _ = shutdown_rx.await;
                             },
@@ -353,10 +386,10 @@ fn main() -> Result<()> {
     }
 }
 
-async fn run_service(config: ServerConfig) -> Result<()> {
+async fn run_service(config: ServerConfig, registry: std::sync::Arc<Registry>) -> Result<()> {
     let mut signals = ServiceShutdownSignals::new()?;
     let (shutdown, stopped) = tokio::sync::oneshot::channel();
-    let server = server::serve_with_shutdown(config, async {
+    let server = server::serve_with_registry(config, registry, async {
         let _ = stopped.await;
     });
     tokio::pin!(server);
@@ -539,7 +572,15 @@ fn print_server_banner(
     if cfg.exists() {
         println!("Config: {}", cfg.display());
     }
-    print_models(registry);
+    if registry.source_startup().is_none_or(|startup| {
+        startup
+            .sources()
+            .order()
+            .sources()
+            .contains(&duolane::config::codex_auth::AuthSource::ChatGpt)
+    }) {
+        print_models(registry);
+    }
     println!();
     println!("Configure Claude Code:");
     println!("  export ANTHROPIC_BASE_URL=\"http://localhost:{port}\"");

@@ -33,7 +33,8 @@ mod transcription;
 
 use images::{handler_image_edit, handler_image_generation};
 pub use listener::{
-    ServerConfig, bind_proxy_listener, serve, serve_listener, serve_listeners, serve_with_shutdown,
+    ServerConfig, bind_proxy_listener, serve, serve_listener, serve_listeners,
+    serve_listeners_with_registry, serve_with_registry, serve_with_shutdown,
 };
 use messages::{handler_count_tokens, handler_messages};
 use openai::{handler_chat_completions, handler_responses};
