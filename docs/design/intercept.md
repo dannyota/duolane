@@ -32,8 +32,19 @@ A [spike](#spike-results) confirmed the behavior this design depends on. The
   the proxy password gets 407.
 - At shutdown it stops accepting, gives open connections 5 seconds, then closes
   them, because tunnels and long polls would otherwise never end.
-- `duolane serve` raises its soft open-file limit to the hard limit, up to 4096,
-  because the default of 256 on macOS is below what the listener may hold.
+- `duolane serve` raises its soft open-file limit to the hard limit, up to
+  16384, because the default of 256 on macOS is below what the listener may
+  hold. The raise is best effort: it can fail, and the hard limit can be lower.
+- The listener sizes its pools from the soft limit it ends up with, so that they
+  never promise more sockets than the process may open. An intercepted
+  connection and a tunnel each hold two sockets. The sizing subtracts 192 from
+  the limit, for the 64 connections that have not sent the password and 128 for
+  the main server; this is a deduction, not a guarantee. Of the remainder it
+  keeps three quarters free, up to 2880 descriptors, for upstream connections
+  that the pools do not count. 2880 is what a limit of 4096 left free when both
+  pools held 256. The intercepted pool gets one sixth of what is left, at most
+  512, and the tunnel pool one third, at most 2048. The pools reach their
+  largest sizes from a limit of 9216, and also when there is no limit.
 
 ## Environment
 
@@ -242,10 +253,12 @@ files, so two of them never interleave.
 8. Tunneled and relayed bytes are never logged or captured. Tunnels have no idle
    timeout.
 9. The listener holds at most 64 connections that have not yet sent the
-   password, 256 intercepted connections, and 256 tunnels. A connection counts
-   as intercepted or tunneled only after the password check, and gets 503 when
-   its pool is full. A connection that sends no complete `CONNECT` or TLS
-   handshake within 30 seconds is closed.
+   password, and up to 512 intercepted connections and 2048 tunnels as the
+   [listener](#listener) sizes them, because programs that Claude Code starts
+   send all their HTTPS traffic through tunnels. A connection counts as
+   intercepted or tunneled only after the password check, and gets 503 when its
+   pool is full. A connection that sends no complete `CONNECT` or TLS handshake
+   within 30 seconds is closed.
 10. A client sends the proxy password in `CONNECT`, before it can check the
     leaf, because the leaf arrives inside the tunnel. Another local user who
     takes the proxy port while `duolane serve` is down receives the password.

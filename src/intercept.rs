@@ -27,7 +27,7 @@ const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const TCP_KEEPALIVE_RETRIES: u32 = 4;
-const OPEN_FILE_TARGET: u64 = 4096;
+const OPEN_FILE_TARGET: u64 = 16384;
 const PROXY_VARIABLES: [&str; 4] = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"];
 
 pub const DEFAULT_PORT: u16 = 18766;
