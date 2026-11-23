@@ -327,10 +327,7 @@ impl CodexHttpClient {
             }
         })?;
         let auth = bind_account(account, auth)?;
-        budget.set_credential(super::sources::CredentialId::new(
-            crate::config::codex_auth::AuthSource::ChatGpt,
-            auth.refresh.as_bytes(),
-        ));
+        budget.set_credential(super::sources::CredentialId::for_chatgpt_auth(&auth));
         Ok(auth)
     }
 
@@ -349,10 +346,7 @@ impl CodexHttpClient {
                 auth_refresh_error(error)
             })?;
         let auth = bind_account(&account, auth)?;
-        budget.set_credential(super::sources::CredentialId::new(
-            crate::config::codex_auth::AuthSource::ChatGpt,
-            auth.refresh.as_bytes(),
-        ));
+        budget.set_credential(super::sources::CredentialId::for_chatgpt_auth(&auth));
         Ok(auth)
     }
 

@@ -1072,13 +1072,15 @@ mod tests {
 
     #[tokio::test]
     async fn tracked_websocket_handshake_failure_is_not_sent_with_credential() {
-        use super::super::sources::{CredentialId, ReplayGate, SourceAttempt};
-        let auth = super::super::client_test_support::http_test_auth();
-        let expected = CredentialId::new(
-            crate::config::codex_auth::AuthSource::ChatGpt,
-            auth.refresh.as_bytes(),
-        );
+        use super::super::sources::{ReplayGate, SourceAttempt};
         let client = authenticated_http_test_client("not-a-url".to_string());
+        let expected = client
+            .auth_manager()
+            .current_credential_snapshot()
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
         let attempt = SourceAttempt::new(
             crate::config::codex_auth::AuthSource::ChatGpt,
             &http_test_context(),
@@ -1218,13 +1220,7 @@ mod tests {
         let failure = attempt.failure(error);
         assert!(failure.kind == FailureKind::UsageLimit);
         assert!(failure.send == SendEvidence::OutcomeUnknown);
-        assert!(
-            failure.credential
-                == Some(CredentialId::new(
-                    crate::config::codex_auth::AuthSource::ChatGpt,
-                    http_test_auth().refresh.as_bytes()
-                ))
-        );
+        assert!(failure.credential == Some(CredentialId::for_chatgpt_auth(&http_test_auth())));
         assert!(gate.ambiguous_hosted());
         assert!(!gate.may_switch(failure.kind, failure.send));
         server.await.unwrap();
@@ -1887,10 +1883,7 @@ mod tests {
         assert!(failure.kind == FailureKind::UsageLimit);
         assert!(failure.send == SendEvidence::OutcomeUnknown);
         let auth = super::super::client_test_support::http_test_auth();
-        let expected = CredentialId::new(
-            crate::config::codex_auth::AuthSource::ChatGpt,
-            auth.refresh.as_bytes(),
-        );
+        let expected = CredentialId::for_chatgpt_auth(&auth);
         assert!(failure.credential == Some(expected));
         assert!(!gate.may_switch(failure.kind, failure.send));
         if hosted {
@@ -2117,9 +2110,8 @@ mod tests {
         assert!(failure.send == SendEvidence::DeniedBeforeExecution);
         assert!(
             failure.credential
-                == Some(super::super::sources::CredentialId::new(
-                    crate::config::codex_auth::AuthSource::ChatGpt,
-                    http_test_auth().refresh.as_bytes(),
+                == Some(super::super::sources::CredentialId::for_chatgpt_auth(
+                    &http_test_auth()
                 ))
         );
         assert!(gate.ambiguous_hosted());

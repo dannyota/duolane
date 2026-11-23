@@ -112,14 +112,18 @@ impl<S: AuthStorage<StoredAuth> + 'static> CodexAuthManager<S> {
             };
             #[cfg(not(test))]
             let auth = store.load_auth()?;
-            let Some(auth) = auth.filter(|auth| !auth.refresh.is_empty()) else {
+            let Some(auth) = auth.filter(|auth| {
+                !auth.refresh.is_empty()
+                    || (!auth.access.is_empty()
+                        && auth.expires > now_ms().saturating_add(REFRESH_MARGIN_MS))
+            }) else {
                 return Ok(None);
             };
             *sequence = sequence
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("Codex snapshot sequence exhausted"))?;
             Ok(Some(ObservedCredential {
-                id: CredentialId::new(AuthSource::ChatGpt, auth.refresh.as_bytes()),
+                id: CredentialId::for_chatgpt_auth(&auth),
                 observation: CredentialObservation(*sequence),
             }))
         })
@@ -374,6 +378,51 @@ mod tests {
 
     fn test_store() -> CodexTokenStore<InMemoryAuthStore<StoredAuth>> {
         CodexTokenStore::new(InMemoryAuthStore::new())
+    }
+
+    #[tokio::test]
+    async fn snapshot_observes_only_usable_access_only_credentials() {
+        let manager = CodexAuthManager::new(test_store());
+        let mut auth = StoredAuth {
+            access: "toy-access-one".into(),
+            refresh: String::new(),
+            expires: now_ms().saturating_add(REFRESH_MARGIN_MS + 60_000),
+            account_id: None,
+        };
+        manager.store.save_auth(auth.clone()).unwrap();
+        let first = manager
+            .current_credential_snapshot()
+            .await
+            .unwrap()
+            .unwrap();
+        auth.access = "toy-access-two".into();
+        manager.store.save_auth(auth.clone()).unwrap();
+        let second = manager
+            .current_credential_snapshot()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first.id != second.id);
+        assert!(first.id != CredentialId::new(AuthSource::ChatGpt, b"toy-access-one"));
+        auth.expires = now_ms();
+        manager.store.save_auth(auth.clone()).unwrap();
+        assert!(
+            manager
+                .current_credential_snapshot()
+                .await
+                .unwrap()
+                .is_none()
+        );
+        auth.expires = u64::MAX;
+        auth.access.clear();
+        manager.store.save_auth(auth).unwrap();
+        assert!(
+            manager
+                .current_credential_snapshot()
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

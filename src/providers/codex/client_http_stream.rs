@@ -796,10 +796,7 @@ mod tests {
         assert!(events.recv().await.expect("terminal event").is_ok());
         let failure = attempt.failure(CodexError::new(400, "later error".into()));
         assert!(failure.kind == FailureKind::Final);
-        let expected = CredentialId::new(
-            crate::config::codex_auth::AuthSource::ChatGpt,
-            http_test_auth().refresh.as_bytes(),
-        );
+        let expected = CredentialId::for_chatgpt_auth(&http_test_auth());
         assert!(failure.credential == Some(expected));
         server.await.unwrap();
     }

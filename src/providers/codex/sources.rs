@@ -29,11 +29,26 @@ pub struct CredentialId([u8; 32]);
 
 impl CredentialId {
     pub fn new(source: AuthSource, credential: &[u8]) -> Self {
+        Self::digest(
+            match source {
+                AuthSource::ChatGpt => b"duolane:chatgpt-refresh\0",
+                AuthSource::ApiKey => b"duolane:openai-api-key\0",
+            },
+            credential,
+        )
+    }
+
+    pub fn for_chatgpt_auth(auth: &super::auth::token_store::StoredAuth) -> Self {
+        if auth.refresh.is_empty() {
+            Self::digest(b"duolane:chatgpt-access-only\0", auth.access.as_bytes())
+        } else {
+            Self::new(AuthSource::ChatGpt, auth.refresh.as_bytes())
+        }
+    }
+
+    fn digest(domain: &[u8], credential: &[u8]) -> Self {
         let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-        digest.update(match source {
-            AuthSource::ChatGpt => b"duolane:chatgpt-refresh\0",
-            AuthSource::ApiKey => b"duolane:openai-api-key\0",
-        });
+        digest.update(domain);
         digest.update(credential);
         let mut value = [0; 32];
         value.copy_from_slice(digest.finish().as_ref());

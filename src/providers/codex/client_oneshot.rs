@@ -314,10 +314,7 @@ impl CodexHttpClient {
             }
         })?;
         ctx.recovery_budget
-            .set_credential(super::sources::CredentialId::new(
-                crate::config::codex_auth::AuthSource::ChatGpt,
-                auth.refresh.as_bytes(),
-            ));
+            .set_credential(super::sources::CredentialId::for_chatgpt_auth(&auth));
         let http_body = self
             .prepare_http_body(
                 body,
@@ -393,10 +390,7 @@ impl CodexHttpClient {
                         auth_refresh_error(error)
                     })?;
                 ctx.recovery_budget
-                    .set_credential(super::sources::CredentialId::new(
-                        crate::config::codex_auth::AuthSource::ChatGpt,
-                        auth.refresh.as_bytes(),
-                    ));
+                    .set_credential(super::sources::CredentialId::for_chatgpt_auth(&auth));
                 if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
                     return Err(CodexError::recovery_exhausted());
                 }
@@ -609,9 +603,8 @@ mod tests {
             assert!(failure.kind == FailureKind::UsageLimit);
             assert!(
                 failure.credential
-                    == Some(super::super::sources::CredentialId::new(
-                        AuthSource::ChatGpt,
-                        http_test_auth().refresh.as_bytes()
+                    == Some(super::super::sources::CredentialId::for_chatgpt_auth(
+                        &http_test_auth()
                     ))
             );
             assert_eq!(

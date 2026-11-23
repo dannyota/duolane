@@ -65,10 +65,7 @@ impl CodexHttpClient {
 
         if ctx.recovery_budget.is_tracked() {
             ctx.recovery_budget
-                .set_credential(super::sources::CredentialId::new(
-                    crate::config::codex_auth::AuthSource::ChatGpt,
-                    auth.refresh.as_bytes(),
-                ));
+                .set_credential(super::sources::CredentialId::for_chatgpt_auth(&auth));
         }
         let turn_id = continuation.and_then(super::continuation::ContinuationReservation::turn_id);
         if should_reset_websocket_pool(continuation)
