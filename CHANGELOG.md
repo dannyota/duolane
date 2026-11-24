@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.2
+
+### Fixed
+
+- `duolane serve --intercept` creates private configuration directories even
+  with `umask 0002`, so `duolane claude` no longer refuses a fresh install.
+  Permission errors name the directory and explain how to fix it. Existing
+  directories are not changed.
+
+### Changed
+
+- `claude-terra`, `claude-sol`, `claude-astra`, and `claude-luna` replace the
+  old `anthropic-` aliases and still route to Codex. Add `-fast` to a family
+  alias to request the priority tier on its latest model.
+
 ## 0.6.1
 
 ### Changed

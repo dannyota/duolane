@@ -17,6 +17,7 @@ const PASSWORD_BYTES: usize = 32;
 const PASSWORD_CHARS: usize = 43;
 
 pub(super) fn ensure_dir(dir: &Path) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| anyhow::anyhow!("cannot create {}: {error}", parent.display()))?;

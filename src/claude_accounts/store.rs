@@ -23,7 +23,8 @@ fn check_directory(file: &File, leaf: bool) -> Result<()> {
     ensure!(
         !mode.intersects(Mode::WGRP | Mode::WOTH)
             || (!leaf && mode.contains(Mode::SVTX) && (stat.st_uid == 0 || stat.st_uid == uid)),
-        "unsafe directory permissions"
+        "unsafe directory permissions (mode {:04o}); if this is your private directory, remove group/other write with `chmod go-w -- <directory>`, otherwise use a private config path",
+        stat.st_mode & 0o7777
     );
     check_acl(file)?;
     Ok(())
@@ -97,14 +98,22 @@ pub(crate) fn checked_dir(path: &Path, create: bool) -> Result<Option<File>> {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) fn checked_strict_dir(path: &Path, create: bool) -> Result<Option<File>> {
-    let dir = walk(path, create, false, true)?.0;
+    let (dir, canonical) = walk(path, create, false, true)?;
     if let Some(dir) = &dir {
         ensure!(
             fs::fstat(dir)?.st_mode & 0o7777 == 0o700,
-            "unsafe directory permissions"
+            "unsafe directory permissions for {:?} (mode {:04o}); if this is your private directory, use `chmod 700 -- <directory>`, otherwise use a private config path",
+            canonical,
+            fs::fstat(dir)?.st_mode & 0o7777
         );
     }
     Ok(dir)
+}
+
+pub(crate) fn checked_config_dir(path: &Path) -> Result<File> {
+    walk(path, true, true, false)?
+        .0
+        .context("missing config directory")
 }
 
 pub(crate) fn checked_canonical_dir(path: &Path, create: bool) -> Result<Option<PathBuf>> {
@@ -237,15 +246,17 @@ fn walk(
                 return Err(err.into());
             }
         };
-        check_directory(&child, false)?;
+        canonical.push(&name);
+        check_directory(&child, false)
+            .map_err(|err| anyhow::anyhow!("directory {:?}: {err:#}", canonical))?;
         if created {
             fs::fchmod(&child, Mode::RWXU)?;
         }
         stack.push(child);
-        canonical.push(name);
     }
     let dir = stack.pop().context("missing root")?;
-    check_directory(&dir, true)?;
+    check_directory(&dir, true)
+        .map_err(|err| anyhow::anyhow!("directory {:?}: {err:#}", canonical))?;
     let canonical = checked_path(&dir, canonical)?;
     Ok((Some(dir), canonical))
 }
