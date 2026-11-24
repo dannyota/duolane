@@ -24,8 +24,9 @@ Claude model IDs such as `claude-opus-5-5` normally route to the Claude login.
 Codex IDs and the aliases `terra`, `sol`, `astra`, and `luna` route to Codex.
 Each alias selects the latest listed, API-capable version in its family using
 the local Codex catalog, falling back to built-in models. Use a full model ID to
-pin a version. `anthropic-terra`, `anthropic-sol`, `anthropic-astra`, and
-`anthropic-luna` are equivalent aliases.
+pin a version. `claude-terra`, `claude-sol`, `claude-astra`, and `claude-luna`
+are equivalent aliases. Add `-fast` to an alias or to a full Codex model ID, as
+in `sol-fast`, to ask for the priority tier.
 
 Switch in Claude Code with `/model`. The duolane picker adds `[1m]` to models
 with documented 1M context. It does not set Claude Code's compaction policy.

@@ -31,8 +31,11 @@ other model.
 - Codex model ids come from a built-in list plus the API-capable entries in the
   Codex CLI's `models_cache.json`. Unlisted catalog entries are accepted when
   requested by exact id but are not advertised.
-- `terra`, `sol`, `astra`, and `luna`, and their `anthropic-` forms, select
-  Codex before any auto-review override. All eight names are advertised. The
+- `terra`, `sol`, `astra`, and `luna`, and their `claude-` forms such as
+  `claude-terra`, select Codex before the `claude-*` rule and before any
+  auto-review override. Each of the eight names also takes a
+  [tier suffix](codex.md#service-tiers), as in `sol-fast`. The eight names and
+  their `-fast` forms are advertised. The
   [Codex catalog](codex.md#model-catalog) determines their targets, without
   changing how explicit ids resolve.
 - A `[1m]` suffix on a model id is ignored.
@@ -53,7 +56,7 @@ other model.
   discovery, which `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` turns on
   ([gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol)).
   Claude Code adds only ids that contain `claude` or `anthropic`, so the Claude
-  aliases and the `anthropic-` Codex aliases can reach its `/model` picker.
+  aliases and the `claude-` Codex aliases can reach its `/model` picker.
   Discovery needs a gateway credential, so with a claude.ai login it does not
   run: Claude Code 2.1.328 logged `[gatewayDiscovery] skipped: no credential` on
   2026-11-19.

@@ -23,8 +23,8 @@ and the reasoning formats. [Security](security.md) owns credentials and limits.
   with one to three numeric version components. Missing components count as
   zero. Ties select the id that sorts first. If there is no candidate for that
   family, use its highest built-in version. Select once per request and hold the
-  selection across retries. Model overrides keep their existing precedence. Tier
-  suffixes are for exact ids, not family aliases.
+  selection across retries. Model overrides keep their existing precedence. A
+  [tier suffix](#service-tiers) on a family alias applies to the selected model.
 
 ## Lanes
 
@@ -50,8 +50,10 @@ owner, with `:0` appended to the window id. Agent ids are not sent upstream.
 
 ## Service tiers
 
-- The suffix `-fast` on an allowed exact Codex model id requests the priority
-  tier. `-ultrafast` exists only on a built-in list of models.
+- The suffix `-fast` on an allowed exact Codex model id or on a family alias
+  requests the priority tier. On an exact id, `-ultrafast` exists only on a
+  built-in list of models. A family alias always accepts `-ultrafast`, because
+  its target changes with the catalog. The Claude aliases take no tier suffix.
 - duolane narrows a requested tier to one the model offers, because the backend
   serves an unavailable tier at standard speed without an error. Ultrafast falls
   back to priority.
