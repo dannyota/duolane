@@ -171,7 +171,7 @@ fn intercept_rejects_existing_writable_config_with_remediation() {
         "{error}"
     );
     assert!(error.contains("0775"));
-    assert!(error.contains("chmod go-w -- <directory>"));
+    assert!(error.contains("chmod -- go-w <directory>"));
     assert_eq!(
         std::fs::metadata(&sandbox.config)
             .unwrap()
