@@ -48,7 +48,7 @@ fn write_catalog(dir: &TempDir, extra: &str) {
             "models":[entry(extra,true,"list",true), entry("gpt-6.2-sol",true,"list",false), entry("gpt-6.10.0-sol",true,"list",true), entry("gpt-6.10-sol",true,"list",false), entry("gpt-9-sol",true,"hide",false), entry("gpt-6.1-luna",true,"list",false), entry("gpt-6.2-luna",true,"list",true), entry("gpt-9-luna",true,"hide",true), entry("gpt-10-luna",false,"list",true), entry("gpt-test-hidden",true,"hide",false),
                 entry("gpt-test-denied",false,"list",true),
                 entry("gpt-5.4",true,"list",true), entry("gpt-6.1-terra",false,"hide",false),
-                entry("opus",true,"list",false), entry("luna",true,"list",true), entry("anthropic-luna",true,"list",true), entry("gpt-test-forged-fast",true,"list",true),
+                entry("opus",true,"list",false), entry("luna",true,"list",true), entry("claude-luna",true,"list",true), entry("anthropic-luna",true,"list",true), entry("gpt-test-forged-fast",true,"list",true),
                 {"slug":"gpt-test-incomplete"}]
         }))
         .unwrap(),
@@ -74,6 +74,7 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         "gpt-test-denied",
         "gpt-test-incomplete",
         "gpt-test-forged-fast",
+        "anthropic-luna",
     ] {
         assert!(!listing.contains(absent), "{absent}");
     }
@@ -147,10 +148,10 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         "sol",
         "astra",
         "luna",
-        "anthropic-luna",
-        "anthropic-terra",
-        "anthropic-sol",
-        "anthropic-astra",
+        "claude-luna",
+        "claude-terra",
+        "claude-sol",
+        "claude-astra",
     ] {
         assert_eq!(
             listing["data"]
@@ -163,27 +164,32 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
             "{alias}"
         );
     }
-    for alias in ["luna", "anthropic-luna"] {
-        for suffix in ["fast", "ultrafast"] {
-            let variant = format!("{alias}-{suffix}");
-            assert!(
-                !listing["data"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|entry| entry["id"] == variant)
-            );
-        }
+    for alias in ["luna", "claude-luna"] {
+        let variant = format!("{alias}-ultrafast");
+        assert!(
+            !listing["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == variant)
+        );
     }
     assert!(listing.to_string().contains("gpt-test-future-fast"));
     assert!(!listing.to_string().contains("gpt-test-hidden"));
 
     for (requested, expected, lite, tier) in [
+        ("luna-fast", "gpt-6.2-luna", true, Some("priority")),
+        (
+            "claude-luna-ultrafast",
+            "gpt-6.2-luna",
+            true,
+            Some("priority"),
+        ),
         ("luna", "gpt-6.2-luna", true, None),
-        ("anthropic-luna", "gpt-6.2-luna", true, None),
+        ("claude-luna", "gpt-6.2-luna", true, None),
         ("sol", "gpt-6.10-sol", false, None),
-        ("anthropic-sol", "gpt-6.10-sol", false, None),
-        ("anthropic-sol[1m]", "gpt-6.10-sol", false, None),
+        ("claude-sol", "gpt-6.10-sol", false, None),
+        ("claude-sol[1m]", "gpt-6.10-sol", false, None),
         (
             "gpt-test-future-fast",
             "gpt-test-future",
@@ -266,7 +272,7 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         assert_eq!(body["service_tier"], "priority");
         assert!(headers.contains_key("x-openai-internal-codex-responses-lite"));
         assert!(body.get("client_metadata").is_some());
-        request["model"] = json!("anthropic-sol");
+        request["model"] = json!("claude-sol-fast[1m]");
         let response = client
             .post(format!("{url}{route}"))
             .json(&request)
@@ -279,6 +285,21 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
             .unwrap()
             .unwrap();
         assert_eq!(body["model"], "gpt-6.10-sol");
+        assert_eq!(body["service_tier"], "priority");
+        request["model"] = json!("claude-luna-ultrafast");
+        let response = client
+            .post(format!("{url}{route}"))
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let (_, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body["model"], "gpt-6.2-luna");
+        assert_eq!(body["service_tier"], "priority");
     }
     for full_lane in [false, true] {
         std::fs::write(
@@ -323,10 +344,9 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         "gpt-test-future-ultrafast",
         "gpt-test-future-fast-fast",
         "gpt-5.4[1m]",
-        "luna-fast",
-        "luna-ultrafast",
-        "anthropic-luna-fast",
-        "anthropic-luna-ultrafast",
+        "luna-fast-fast",
+        "anthropic-luna",
+        "opus-fast",
     ] {
         let response = client
             .post(format!("{url}/v1/responses"))
@@ -399,6 +419,40 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         .unwrap();
     assert_eq!(body["model"], "gpt-6.1-sol");
     assert!(!headers.contains_key("x-openai-internal-codex-responses-lite"));
+    for model in catalog["models"].as_array_mut().unwrap() {
+        if model["slug"] == "gpt-6.2-luna" {
+            model["visibility"] = json!("hide");
+        }
+        if model["slug"] == "gpt-6.1-luna" {
+            model["use_responses_lite"] = json!(true);
+        }
+    }
+    std::fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    for (route, request) in [
+        (
+            "/v1/responses",
+            json!({"model":"claude-luna-ultrafast","input":"synthetic","tools":[{"type":"web_search"}]}),
+        ),
+        (
+            "/v1/messages",
+            json!({"model":"claude-luna-ultrafast","max_tokens":64,"messages":[{"role":"user","content":"synthetic"}],"tools":[{"type":"web_search_20250305","name":"web_search"}]}),
+        ),
+    ] {
+        let response = client
+            .post(format!("{url}{route}"))
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let (_, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body["model"], "gpt-6.1-sol");
+        assert_eq!(body["service_tier"], "ultrafast");
+    }
     std::fs::remove_file(dir.path().join("models_cache.json")).unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await;
     let response = client

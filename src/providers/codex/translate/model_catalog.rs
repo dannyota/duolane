@@ -76,6 +76,9 @@ pub fn valid_slug(slug: &str) -> bool {
         && !slug.ends_with("-fast")
         && !slug.ends_with("-ultrafast")
         && !super::model_allowlist::is_family_alias(slug)
+        && !slug
+            .strip_prefix("anthropic-")
+            .is_some_and(|family| super::model_allowlist::FAMILY_ALIASES.contains(&family))
         && !crate::registry::is_anthropic_alias(slug)
 }
 
@@ -219,13 +222,19 @@ mod tests {
             "terra",
             "sol",
             "astra",
+            "claude-terra",
+            "claude-sol",
+            "claude-astra",
+            "claude-luna",
             "anthropic-terra",
             "anthropic-sol",
             "anthropic-astra",
+            "anthropic-luna",
         ] {
             assert!(!valid_slug(alias));
         }
         assert!(valid_slug("gpt-7.2-codex"));
+        assert!(valid_slug("anthropic-other"));
     }
 
     #[test]
