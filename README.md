@@ -49,13 +49,15 @@ Code proxy settings. For gateway mode or background agents, see
 
 ## Everyday commands
 
-| Command                       | Purpose                                                 |
-| ----------------------------- | ------------------------------------------------------- |
-| `duolane models`              | Discover model IDs and aliases                          |
-| `duolane monitor`             | Attach a dashboard to the running proxy                 |
-| `duolane agents setup`        | Install opt-in Claude Code subagents for Codex families |
-| `duolane accounts use [name]` | Pick which Claude login the next `duolane claude` uses  |
-| `duolane --help`              | Discover commands and options                           |
+| Command                          | Purpose                                                 |
+| -------------------------------- | ------------------------------------------------------- |
+| `duolane models`                 | Discover model IDs and aliases                          |
+| `duolane monitor`                | Attach a dashboard to the running proxy                 |
+| `duolane agents setup`           | Install opt-in Claude Code subagents for Codex families |
+| `duolane accounts list`          | Show Claude profiles and which one is selected          |
+| `duolane accounts use [name]`    | Pick which Claude login the next `duolane claude` uses  |
+| `duolane accounts remove <name>` | Sign out of a named Claude profile and delete it        |
+| `duolane --help`                 | Discover commands and options                           |
 
 ## Documentation
 
