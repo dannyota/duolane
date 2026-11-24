@@ -518,11 +518,16 @@ fn private_replace_mode(dir: &File, name: &str, contents: &[u8], exact: bool) ->
 }
 
 pub(crate) fn try_lock(dir: &File) -> Result<File> {
+    lock(dir, ".duolane-lock", false)
+}
+
+pub(super) fn lock(dir: &File, name: &str, blocking: bool) -> Result<File> {
+    check_name(name)?;
     let flags =
         OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY;
     let file = match fs::openat(
         dir,
-        ".duolane-lock",
+        name,
         flags | OFlags::CREATE | OFlags::EXCL,
         Mode::RUSR | Mode::WUSR,
     ) {
@@ -531,12 +536,17 @@ pub(crate) fn try_lock(dir: &File) -> Result<File> {
             fs::fchmod(&file, Mode::RUSR | Mode::WUSR)?;
             file
         }
-        Err(Errno::EXIST) => File::from(fs::openat(dir, ".duolane-lock", flags, Mode::empty())?),
+        Err(Errno::EXIST) => File::from(fs::openat(dir, name, flags, Mode::empty())?),
         Err(err) => return Err(err.into()),
     };
     check_private(&file)?;
     loop {
-        match fs::flock(&file, fs::FlockOperation::NonBlockingLockExclusive) {
+        let operation = if blocking {
+            fs::FlockOperation::LockExclusive
+        } else {
+            fs::FlockOperation::NonBlockingLockExclusive
+        };
+        match fs::flock(&file, operation) {
             Ok(()) => return Ok(file),
             Err(Errno::INTR) => continue,
             Err(Errno::WOULDBLOCK) => bail!("private store lock is busy"),

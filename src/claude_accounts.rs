@@ -1,11 +1,15 @@
 #[cfg(unix)]
+mod picker;
+#[cfg(unix)]
+mod roster;
+#[cfg(unix)]
 pub(crate) mod store;
 #[cfg(unix)]
 mod transcripts;
 
 #[cfg(unix)]
 mod unix {
-    use super::{store, transcripts};
+    use super::{picker, roster, store, transcripts};
     use crate::paths;
     use anyhow::{Context, Result, bail, ensure};
     use std::ffi::OsString;
@@ -107,10 +111,14 @@ mod unix {
         Ok(Some((path, dir)))
     }
     fn profile(name: &str, create: bool) -> Result<Option<Profile>> {
+        ensure!(valid_name(name), "invalid profile name");
+        let Some(parent) = selector_dir(create)? else {
+            return Ok(None);
+        };
+        let lock = store::lock(&parent, &format!(".profile-{name}.lock"), false)?;
         let Some((path, dir)) = profile_dir(name, create)? else {
             return Ok(None);
         };
-        let lock = store::try_lock(&dir)?;
         if !create && store::private_read(&dir, ".duolane-ready", 64)?.is_none() {
             return Ok(None);
         }
@@ -129,25 +137,40 @@ mod unix {
         store::checked_dir(&root.join("claude-accounts"), create)
     }
 
+    const AUTH_OVERRIDES: [&str; 7] = [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "ANTHROPIC_PROFILE",
+    ];
+    const AUTH_OVERRIDE_PAIR: [&str; 2] =
+        ["ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID"];
+
     fn reject_auth_overrides() -> Result<()> {
-        let vars = [
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "CLAUDE_CODE_USE_BEDROCK",
-            "CLAUDE_CODE_USE_VERTEX",
-            "CLAUDE_CODE_USE_FOUNDRY",
-            "ANTHROPIC_PROFILE",
-        ];
         let nonempty = |name| std::env::var_os(name).is_some_and(|v| !v.is_empty());
-        for name in vars {
+        for name in AUTH_OVERRIDES {
             ensure!(!nonempty(name), "authentication override set: {name}");
         }
         ensure!(
-            !(nonempty("ANTHROPIC_FEDERATION_RULE_ID") && nonempty("ANTHROPIC_ORGANIZATION_ID")),
+            !AUTH_OVERRIDE_PAIR.into_iter().all(nonempty),
             "authentication overrides set: ANTHROPIC_FEDERATION_RULE_ID and ANTHROPIC_ORGANIZATION_ID"
         );
         Ok(())
+    }
+
+    pub(super) fn claude_command(config: Option<&Path>) -> Command {
+        let mut command = Command::new("claude");
+        command.env_remove("DUOLANE_OPENAI_API_KEY");
+        for name in AUTH_OVERRIDES.into_iter().chain(AUTH_OVERRIDE_PAIR) {
+            command.env_remove(name);
+        }
+        if let Some(config) = config {
+            command.env("CLAUDE_CONFIG_DIR", config);
+        }
+        command
     }
 
     fn inherit_login_lock(command: &mut Command, lock: &File) -> Result<()> {
@@ -161,11 +184,11 @@ mod unix {
         Ok(())
     }
 
-    pub fn login(name: Option<String>) -> Result<()> {
+    pub fn login(name: Option<String>) -> Result<String> {
         reject_auth_overrides()?;
         let name = match name {
             Some(name) => name,
-            None => input("Profile name: ")?,
+            None => input("Profile name (lowercase letters, digits, - or _): ")?,
         };
         let profile = profile(&name, true)?.context("profile unavailable")?;
         let mut command = Command::new("claude");
@@ -193,7 +216,148 @@ mod unix {
             Ok(())
         })();
         let unlock = rustix::fs::flock(&profile._lock, rustix::fs::FlockOperation::Unlock);
-        result.and(unlock.map_err(Into::into))
+        result.and(unlock.map_err(Into::into))?;
+        Ok(name)
+    }
+
+    fn registered() -> Result<Vec<(String, PathBuf)>> {
+        let mut profiles = Vec::new();
+        let Some(root) = config_root(false)? else {
+            return Ok(profiles);
+        };
+        let dir = root.join("claude-accounts");
+        if store::checked_dir(&dir, false)?.is_none() {
+            return Ok(profiles);
+        }
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if !valid_name(&name) {
+                continue;
+            }
+            let ready = (|| -> Result<Option<PathBuf>> {
+                let Some((path, profile_dir)) = profile_dir(&name, false)? else {
+                    return Ok(None);
+                };
+                Ok(store::private_read(&profile_dir, ".duolane-ready", 64)?.map(|_| path))
+            })();
+            match ready {
+                Ok(Some(path)) => profiles.push((name, path)),
+                Ok(None) => {}
+                Err(_) => eprintln!("warning: skipping unsafe profile {name}"),
+            }
+        }
+        profiles.sort();
+        Ok(profiles)
+    }
+
+    fn color() -> bool {
+        std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
+    }
+
+    fn current_selection() -> Result<String> {
+        Ok(read_selection()?.unwrap_or_else(|| "default".into()))
+    }
+
+    pub fn announce(name: &str) -> Result<()> {
+        let entries = roster::entries(&registered()?)?;
+        let (summary, twin) = roster::describe(&entries, name);
+        match summary {
+            Some(summary) => println!("Signed in to {name} as {summary}."),
+            None => println!("Signed in to {name}."),
+        }
+        if let Some(twin) = twin {
+            eprintln!(
+                "warning: {name} is the same account as {twin}. To add another account, sign out of claude.ai in the browser or open the sign-in link in a private window, then run `duolane accounts login {name}` again."
+            );
+        } else if current_selection().ok().as_deref() != Some(name) {
+            println!("Run `duolane accounts use {name}` to select it.");
+        }
+        Ok(())
+    }
+
+    pub fn list() -> Result<()> {
+        let selected = current_selection()?;
+        let entries = roster::entries(&registered()?)?;
+        let table = roster::table(&entries, &selected, jiff::Timestamp::now(), color());
+        println!("{}", table.header);
+        for row in table.rows {
+            println!("{row}");
+        }
+        println!("\n ● selected for the next duolane claude launch");
+        if std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|v| !v.is_empty()) {
+            println!(" CLAUDE_CONFIG_DIR is set, so duolane claude ignores the selection");
+        }
+        Ok(())
+    }
+
+    pub fn remove(name: String, yes: bool) -> Result<()> {
+        ensure!(valid_name(&name), "invalid profile name");
+        let selector = selector_dir(false)?.context("unknown profile")?;
+        let lock = store::lock(&selector, &format!(".profile-{name}.lock"), false)?;
+        let Some((path, dir)) = profile_dir(&name, false)? else {
+            bail!("unknown profile");
+        };
+        read_selection()?;
+        if !yes {
+            ensure!(
+                std::io::stdin().is_terminal(),
+                "removal requires terminal confirmation or --yes"
+            );
+            eprint!(
+                "Sign out and delete profile {name:?}? Project folders shared from the default profile stay in place. Type yes to confirm: "
+            );
+            std::io::stderr().flush()?;
+            let mut response = String::new();
+            std::io::stdin().lock().take(65).read_line(&mut response)?;
+            if response != "yes\n" && response != "yes\r\n" {
+                println!("Kept {name}.");
+                return Ok(());
+            }
+        }
+        let mut command = claude_command(Some(&path));
+        command.args(["auth", "logout"]);
+        inherit_login_lock(&mut command, &lock)?;
+        let result = (|| -> Result<()> {
+            let status = command.status()?;
+            drop(command);
+            ensure!(status.success(), "Claude logout failed; profile kept");
+            let selector_lock = store::lock(&selector, ".selector.lock", true)?;
+            let selected = read_selection()?;
+            let current = store::checked_dir(&path, false)?.context("profile missing")?;
+            let a = dir.metadata()?;
+            let b = current.metadata()?;
+            ensure!(
+                a.dev() == b.dev() && a.ino() == b.ino(),
+                "profile changed during removal"
+            );
+            if selected.as_deref() == Some(name.as_str()) {
+                store::private_replace(&selector, ".selected", b"default\n")?;
+            }
+            std::fs::remove_dir_all(&path)?;
+            drop(selector_lock);
+            Ok(())
+        })();
+        let unlock = rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock);
+        result.and(unlock.map_err(Into::into))?;
+        println!("Removed {name}.");
+        Ok(())
+    }
+
+    fn choose(profiles: &[(String, PathBuf)], selected: &str) -> Result<Option<String>> {
+        let entries = roster::entries(profiles)?;
+        let table = roster::table(&entries, selected, jiff::Timestamp::now(), false);
+        let start = entries
+            .iter()
+            .position(|entry| entry.name == selected)
+            .unwrap_or(0);
+        println!(
+            "Selection applies to the next launch. Named profiles may share approved project history."
+        );
+        let choice = picker::interactive(&table.header, &table.rows, start, color())?;
+        Ok(choice.and_then(|index| entries.get(index).map(|entry| entry.name.clone())))
     }
 
     pub fn select(name: Option<String>) -> Result<()> {
@@ -203,36 +367,20 @@ mod unix {
                 "invalid profile name"
             );
         }
-        let mut names = Vec::new();
-        if let Some(root) = config_root(false)? {
-            let dir = root.join("claude-accounts");
-            if store::checked_dir(&dir, false)?.is_some() {
-                for entry in std::fs::read_dir(dir)? {
-                    let entry = entry?;
-                    let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                        continue;
-                    };
-                    if !valid_name(&name) {
-                        continue;
-                    }
-                    let ready = (|| -> Result<bool> {
-                        let Some((_, profile_dir)) = profile_dir(&name, false)? else {
-                            return Ok(false);
-                        };
-                        Ok(store::private_read(&profile_dir, ".duolane-ready", 64)?.is_some())
-                    })();
-                    match ready {
-                        Ok(true) => names.push(name),
-                        Ok(false) => {}
-                        Err(_) => eprintln!("warning: skipping unsafe profile {name}"),
-                    }
-                }
-            }
-        }
-        names.sort();
+        let profiles = registered()?;
+        let mut names: Vec<String> = profiles.iter().map(|(name, _)| name.clone()).collect();
         names.insert(0, "default".into());
+        let interactive = std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && picker::fits(names.len());
         let name = if let Some(name) = name {
             ensure!(names.contains(&name), "unknown profile");
+            name
+        } else if interactive {
+            let Some(name) = choose(&profiles, &current_selection()?)? else {
+                println!("Selection unchanged.");
+                return Ok(());
+            };
             name
         } else {
             println!(
@@ -250,9 +398,17 @@ mod unix {
                 .context("invalid choice")?
                 .clone()
         };
-        read_selection()?;
+        let _profile = if name == "default" {
+            None
+        } else {
+            Some(profile(&name, false)?.context("unknown profile")?)
+        };
         let dir = selector_dir(true)?.context("selector unavailable")?;
-        store::private_replace(&dir, ".selected", format!("{name}\n").as_bytes())
+        let _selector_lock = store::lock(&dir, ".selector.lock", true)?;
+        read_selection()?;
+        store::private_replace(&dir, ".selected", format!("{name}\n").as_bytes())?;
+        println!("The next duolane claude launch uses {name}.");
+        Ok(())
     }
     fn recheck_cwd(expected: &Path) -> Result<()> {
         ensure!(
@@ -346,9 +502,15 @@ mod unix {
         if name == "default" {
             return Ok(None);
         }
-        Ok(Some(
-            profile(&name, false)?.context("selected profile is not registered")?,
-        ))
+        resolve_named_selection(&name).map(Some)
+    }
+    fn resolve_named_selection(name: &str) -> Result<Profile> {
+        let profile = profile(name, false)?.context("selected profile is not registered")?;
+        ensure!(
+            read_selection()?.as_deref() == Some(name),
+            "selection changed during launch; retry"
+        );
+        Ok(profile)
     }
     #[cfg(test)]
     mod tests {
@@ -360,9 +522,11 @@ mod unix {
 }
 
 #[cfg(unix)]
+use unix::claude_command;
+#[cfg(unix)]
 pub(crate) use unix::{Profile, prepare_launch};
 #[cfg(unix)]
-pub use unix::{login, select};
+pub use unix::{announce, list, login, remove, select};
 
 #[cfg(not(unix))]
 pub(crate) struct Profile;
@@ -384,7 +548,19 @@ pub(crate) fn prepare_launch(_: &[std::ffi::OsString]) -> anyhow::Result<Option<
 }
 
 #[cfg(not(unix))]
-pub fn login(_: Option<String>) -> anyhow::Result<()> {
+pub fn login(_: Option<String>) -> anyhow::Result<String> {
+    anyhow::bail!("Claude accounts are unavailable on this platform")
+}
+#[cfg(not(unix))]
+pub fn announce(_: &str) -> anyhow::Result<()> {
+    anyhow::bail!("Claude accounts are unavailable on this platform")
+}
+#[cfg(not(unix))]
+pub fn list() -> anyhow::Result<()> {
+    anyhow::bail!("Claude accounts are unavailable on this platform")
+}
+#[cfg(not(unix))]
+pub fn remove(_: String, _: bool) -> anyhow::Result<()> {
     anyhow::bail!("Claude accounts are unavailable on this platform")
 }
 #[cfg(not(unix))]

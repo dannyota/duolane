@@ -322,6 +322,8 @@ fn claude_accounts_help() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("login") && help.contains("use") && !help.contains("run"));
+    assert!(help.contains("Show each profile's account, plan, and login"));
+    assert!(help.contains("Sign out of a named Claude profile and delete it"));
     for (command, description) in [
         ("login", "Sign in to a named Claude profile"),
         (
@@ -494,7 +496,7 @@ fn claude_accounts_login_registers_only_success() {
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(config.join("claude-accounts/backup/.duolane-lock"))
+        .open(config.join("claude-accounts/.profile-backup.lock"))
         .unwrap();
     rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
     assert!(!run("backup", "0").status.success());
@@ -617,13 +619,16 @@ fn claude_accounts_selects_default_and_named() {
     assert_eq!(std::fs::read(&selector).unwrap(), b"backup\n");
     assert!(!run(&["accounts", "use"], "unknown\n").status.success());
     assert_eq!(std::fs::read(&selector).unwrap(), b"backup\n");
+    assert!(run(&["accounts", "login"], "other\n").status.success());
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(config.join("claude-accounts/backup/.duolane-lock"))
+        .open(config.join("claude-accounts/.profile-backup.lock"))
         .unwrap();
     rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
-    assert!(run(&["accounts", "use"], "1\n").status.success());
+    assert!(!run(&["accounts", "use", "backup"], "").status.success());
+    assert!(run(&["accounts", "use", "other"], "").status.success());
+    assert!(run(&["accounts", "use", "default"], "").status.success());
     drop(lock);
     assert_eq!(std::fs::read(&selector).unwrap(), b"default\n");
     std::fs::write(&selector, b"stale\n").unwrap();
