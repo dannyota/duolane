@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.0
+
+### Added
+
+- Press `2` to open Accounts in the monitor and `1` to return to Overview. The
+  local Unix monitor can select a Claude profile for the next `duolane claude`
+  launch without changing running sessions. The attached monitor remains
+  read-only.
+- Accounts shows the last usable ChatGPT subscription report observed while
+  streaming a Codex Messages response, with usage, reset times, and report age.
+  Unverified quota, including Claude profiles without attributed reports, shows
+  as `Unknown`.
+
 ## 0.7.0
 
 ### Added
