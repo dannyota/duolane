@@ -4,9 +4,9 @@
 
 ### Added
 
-- `duolane accounts list` shows each Claude profile's account, plan, and login
-  time, marks the selected profile, and notes duplicate accounts.
-  `accounts login` also reports the account that signed in.
+- `duolane accounts list` shows each Claude profile's account, plan, and time
+  until its login expires. It marks the selected profile and notes duplicate
+  accounts. `accounts login` also reports the account that signed in.
 - `duolane accounts use` shows an arrow-key picker on a terminal when no name is
   supplied.
 - `duolane accounts remove <name>` signs out and deletes a named profile after
