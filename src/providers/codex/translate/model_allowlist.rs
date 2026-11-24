@@ -306,10 +306,7 @@ fn resolve_with_model_override(model: &str, override_model: Option<&str>) -> Res
         _ => requested,
     };
 
-    resolved.service_tier = resolved
-        .service_tier
-        .or(requested_tier)
-        .map(|tier| service_tier_for_model(&resolved.model, tier));
+    resolved.service_tier = resolved.service_tier.or(requested_tier);
     resolved
 }
 
@@ -588,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn family_tier_suffixes_narrow_to_selected_model() {
+    fn family_tier_suffixes_preserve_requested_tier() {
         for (model, target, tier) in [
             ("sol-fast", "gpt-6.1-sol", ServiceTier::Priority),
             (
@@ -596,7 +593,7 @@ mod tests {
                 "gpt-6-astra",
                 ServiceTier::Ultrafast,
             ),
-            ("luna-ultrafast", "gpt-6-luna", ServiceTier::Priority),
+            ("luna-ultrafast", "gpt-6-luna", ServiceTier::Ultrafast),
         ] {
             let resolved = resolve_with_model_override(model, None);
             assert_eq!(resolved.model, target);
@@ -710,7 +707,7 @@ mod tests {
                 "gpt-6-astra-ultrafast",
                 "luna",
                 "gpt-6-luna",
-                ServiceTier::Priority,
+                ServiceTier::Ultrafast,
             ),
             (
                 "gpt-6-sol-fast",
@@ -776,7 +773,7 @@ mod tests {
                 "gpt-6-astra-ultrafast",
                 Some("gpt-6-sol"),
                 "gpt-6-sol",
-                Some(ServiceTier::Priority),
+                Some(ServiceTier::Ultrafast),
             ),
             ("opus", Some("gpt-6-astra"), "gpt-6-astra", None),
         ];

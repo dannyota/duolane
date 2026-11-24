@@ -4,6 +4,7 @@ use serde_json::{Map, Value, json};
 use crate::providers::codex::translate::{
     model_allowlist::{
         ResolvedModel, allowed_models_display, family_alias_with_tier, resolve_model_request,
+        service_tier_for_model,
     },
     request::{Effort, ServiceTier, resolve_effort_override, to_codex_effort},
 };
@@ -154,6 +155,8 @@ fn translate_with_source(
     if let Some(tier) = resolved.service_tier {
         let tier = if api_resolved.is_some() && tier == ServiceTier::Ultrafast {
             ServiceTier::Priority
+        } else if api_resolved.is_none() {
+            service_tier_for_model(&resolved.model, tier)
         } else {
             tier
         };
