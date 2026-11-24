@@ -110,6 +110,12 @@ impl CodexHttpClient {
         websocket_sent: Arc<std::sync::atomic::AtomicBool>,
         mut ready: Option<super::websocket::ReadyWebSocket>,
     ) {
+        let quota = ctx.monitor.as_ref().and_then(|monitor| {
+            let account = super::translate::reasoning_signature::ReasoningAccount::new(
+                auth.account_id.as_deref(),
+            );
+            monitor.bind_codex_quota(&ctx.req_id, &account)
+        });
         let mut auth_refresh_attempted = false;
         let mut continuation_retry_available = continuation
             .as_ref()
@@ -259,6 +265,9 @@ impl CodexHttpClient {
                 let Some(item) = item else {
                     return;
                 };
+                if let (Some(quota), Ok(payload)) = (&quota, &item) {
+                    quota.observe(payload);
+                }
                 socket_id_publisher.publish(stream.socket_id());
 
                 hosted_tool_executed |= item
