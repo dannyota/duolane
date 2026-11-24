@@ -36,7 +36,7 @@ fn parse_tier(normalized: &str) -> Option<(&str, Option<ServiceTier>)> {
     } else {
         (normalized, None)
     };
-    if service_tier.is_some() && !valid_id(base) {
+    if service_tier.is_some() && !valid_id(base) && !is_family_alias(base) {
         return None;
     }
     Some((base, service_tier))
@@ -48,7 +48,7 @@ pub fn resolve_api_model(requested: &str, catalog: Option<&[String]>) -> Option<
     let fallback: Vec<String> = ALLOWED_MODELS.iter().map(|id| (*id).to_string()).collect();
     let candidates = catalog.unwrap_or(&fallback);
     let model = if is_family_alias(base) {
-        let family = base.strip_prefix("anthropic-").unwrap_or(base);
+        let family = base.strip_prefix("claude-").unwrap_or(base);
         let mut models: Vec<_> = candidates
             .iter()
             .filter(|id| valid_id(id))
@@ -112,7 +112,9 @@ pub fn source_model_union(
         for family in FAMILY_ALIASES {
             if resolve_api_model(family, Some(catalog)).is_some() {
                 ids.insert((*family).to_string());
-                ids.insert(format!("anthropic-{family}"));
+                ids.insert(format!("claude-{family}"));
+                ids.insert(format!("{family}-fast"));
+                ids.insert(format!("claude-{family}-fast"));
             }
         }
     }
@@ -202,11 +204,16 @@ mod tests {
     }
 
     #[test]
-    fn tier_suffixes_apply_only_to_exact_ids() {
+    fn tier_suffixes_apply_to_family_aliases_and_exact_ids() {
         let catalog = vec!["gpt-6-astra".to_string(), "gpt-99-sol".to_string()];
+        for alias in ["sol-fast", "claude-sol-ultrafast"] {
+            let resolved = resolve_api_model(alias, Some(&catalog)).unwrap();
+            assert_eq!(resolved.model, "gpt-99-sol");
+            assert_eq!(resolved.service_tier, Some(ServiceTier::Priority));
+        }
         for alias in [
-            "sol-fast",
-            "anthropic-sol-ultrafast",
+            "sol-fast-fast",
+            "anthropic-sol",
             "opus-fast",
             "claude-opus-5-ultrafast",
         ] {
@@ -221,8 +228,10 @@ mod tests {
         let ids = source_model_union(&[AuthSource::ApiKey], None, Some(Some(&catalog)));
         assert!(ids.contains(&"sol".to_string()));
         assert!(ids.contains(&"gpt-99-sol-fast".to_string()));
-        assert!(!ids.contains(&"sol-fast".to_string()));
-        assert!(!ids.contains(&"anthropic-sol-ultrafast".to_string()));
+        assert!(ids.contains(&"sol-fast".to_string()));
+        assert!(ids.contains(&"claude-sol-fast".to_string()));
+        assert!(!ids.contains(&"claude-sol-ultrafast".to_string()));
+        assert!(!ids.contains(&"anthropic-sol".to_string()));
     }
 
     #[test]

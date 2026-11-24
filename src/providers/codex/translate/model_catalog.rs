@@ -219,9 +219,9 @@ mod tests {
             "terra",
             "sol",
             "astra",
-            "anthropic-terra",
-            "anthropic-sol",
-            "anthropic-astra",
+            "claude-terra",
+            "claude-sol",
+            "claude-astra",
         ] {
             assert!(!valid_slug(alias));
         }

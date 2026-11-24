@@ -48,7 +48,7 @@ fn write_catalog(dir: &TempDir, extra: &str) {
             "models":[entry(extra,true,"list",true), entry("gpt-6.2-sol",true,"list",false), entry("gpt-6.10.0-sol",true,"list",true), entry("gpt-6.10-sol",true,"list",false), entry("gpt-9-sol",true,"hide",false), entry("gpt-6.1-luna",true,"list",false), entry("gpt-6.2-luna",true,"list",true), entry("gpt-9-luna",true,"hide",true), entry("gpt-10-luna",false,"list",true), entry("gpt-test-hidden",true,"hide",false),
                 entry("gpt-test-denied",false,"list",true),
                 entry("gpt-5.4",true,"list",true), entry("gpt-6.1-terra",false,"hide",false),
-                entry("opus",true,"list",false), entry("luna",true,"list",true), entry("anthropic-luna",true,"list",true), entry("gpt-test-forged-fast",true,"list",true),
+                entry("opus",true,"list",false), entry("luna",true,"list",true), entry("claude-luna",true,"list",true), entry("gpt-test-forged-fast",true,"list",true),
                 {"slug":"gpt-test-incomplete"}]
         }))
         .unwrap(),
@@ -147,10 +147,10 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         "sol",
         "astra",
         "luna",
-        "anthropic-luna",
-        "anthropic-terra",
-        "anthropic-sol",
-        "anthropic-astra",
+        "claude-luna",
+        "claude-terra",
+        "claude-sol",
+        "claude-astra",
     ] {
         assert_eq!(
             listing["data"]
@@ -163,27 +163,32 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
             "{alias}"
         );
     }
-    for alias in ["luna", "anthropic-luna"] {
-        for suffix in ["fast", "ultrafast"] {
-            let variant = format!("{alias}-{suffix}");
-            assert!(
-                !listing["data"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|entry| entry["id"] == variant)
-            );
-        }
+    for alias in ["luna", "claude-luna"] {
+        let variant = format!("{alias}-ultrafast");
+        assert!(
+            !listing["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == variant)
+        );
     }
     assert!(listing.to_string().contains("gpt-test-future-fast"));
     assert!(!listing.to_string().contains("gpt-test-hidden"));
 
     for (requested, expected, lite, tier) in [
+        ("luna-fast", "gpt-6.2-luna", true, Some("priority")),
+        (
+            "claude-luna-ultrafast",
+            "gpt-6.2-luna",
+            true,
+            Some("priority"),
+        ),
         ("luna", "gpt-6.2-luna", true, None),
-        ("anthropic-luna", "gpt-6.2-luna", true, None),
+        ("claude-luna", "gpt-6.2-luna", true, None),
         ("sol", "gpt-6.10-sol", false, None),
-        ("anthropic-sol", "gpt-6.10-sol", false, None),
-        ("anthropic-sol[1m]", "gpt-6.10-sol", false, None),
+        ("claude-sol", "gpt-6.10-sol", false, None),
+        ("claude-sol[1m]", "gpt-6.10-sol", false, None),
         (
             "gpt-test-future-fast",
             "gpt-test-future",
@@ -266,7 +271,7 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         assert_eq!(body["service_tier"], "priority");
         assert!(headers.contains_key("x-openai-internal-codex-responses-lite"));
         assert!(body.get("client_metadata").is_some());
-        request["model"] = json!("anthropic-sol");
+        request["model"] = json!("claude-sol-fast[1m]");
         let response = client
             .post(format!("{url}{route}"))
             .json(&request)
@@ -279,6 +284,7 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
             .unwrap()
             .unwrap();
         assert_eq!(body["model"], "gpt-6.10-sol");
+        assert_eq!(body["service_tier"], "priority");
     }
     for full_lane in [false, true] {
         std::fs::write(
@@ -323,10 +329,9 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         "gpt-test-future-ultrafast",
         "gpt-test-future-fast-fast",
         "gpt-5.4[1m]",
-        "luna-fast",
-        "luna-ultrafast",
-        "anthropic-luna-fast",
-        "anthropic-luna-ultrafast",
+        "luna-fast-fast",
+        "anthropic-luna",
+        "opus-fast",
     ] {
         let response = client
             .post(format!("{url}/v1/responses"))

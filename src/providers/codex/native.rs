@@ -20,8 +20,8 @@ use crate::traffic::{
 
 use super::client::{CODEX_ACCOUNT_CHANGED_DETAIL, CodexError, CodexHttpClient};
 use super::translate::model_allowlist::{
-    ResolvedModel, alias_target, allowed_models_display, full_lane_web_search_model,
-    resolve_family, resolve_tier_model_alias, service_tier_for_model,
+    ResolvedModel, alias_target, allowed_models_display, family_alias_with_tier,
+    full_lane_web_search_model, resolve_tier_model_alias, service_tier_for_model,
 };
 use super::translate::request::ServiceTier;
 
@@ -146,8 +146,12 @@ pub(crate) fn prepare_native_request(
 }
 
 fn resolve_native_model(requested: &str) -> ResolvedModel {
-    if let Some(resolved) = resolve_family(&normalize_incoming_model(requested)) {
-        return resolved;
+    let normalized = normalize_incoming_model(requested);
+    if family_alias_with_tier(&normalized).is_some() {
+        return super::translate::model_allowlist::resolve_model_request_with_config_override(
+            &normalized,
+            false,
+        );
     }
     let mut resolved = resolve_tier_model_alias(requested);
     if let Some(model) = alias_target(&resolved.model) {

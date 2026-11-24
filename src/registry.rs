@@ -307,6 +307,22 @@ impl Registry {
     ) -> Option<Arc<dyn Provider>> {
         let normalized = normalize_incoming_model(raw_model);
         let _ = session_affinity;
+        use crate::providers::codex::translate::model_allowlist as family;
+        let mut base = normalized.as_str();
+        let mut suffixes = 0;
+        while let Some(stripped) = base
+            .strip_suffix("-ultrafast")
+            .or_else(|| base.strip_suffix("-fast"))
+        {
+            base = stripped;
+            suffixes += 1;
+        }
+        if suffixes > 1 && base.starts_with("claude-") && family::is_family_alias(base) {
+            return None;
+        }
+        if self.dynamic_codex && family::family_alias_with_tier(&normalized).is_some() {
+            return self.handlers.get("codex").cloned();
+        }
         if is_anthropic_alias(&normalized) || normalized.starts_with("claude-") {
             return self.handlers.get(self.alias_provider.as_str()).cloned();
         }
@@ -556,6 +572,37 @@ mod tests {
                 "{model}"
             );
         }
+    }
+
+    #[test]
+    fn family_aliases_route_before_claude_prefix() {
+        for provider in [AliasProvider::Anthropic, AliasProvider::Codex] {
+            let registry = Registry::new(provider);
+            for model in ["claude-sol", "claude-sol-fast[1m]"] {
+                assert_eq!(
+                    registry.provider_for_model(model, None).unwrap().name(),
+                    "codex"
+                );
+            }
+            assert!(registry.provider_for_model("anthropic-sol", None).is_none());
+        }
+        let registry = Registry::new(AliasProvider::Anthropic);
+        for model in ["claude-sol-fast-fast", "claude-sol-ultrafast-fast[1m]"] {
+            assert!(registry.provider_for_model(model, None).is_none());
+        }
+        for model in ["claude-opus-5-ultrafast", "claude-future-fast-fast"] {
+            assert_eq!(
+                registry.provider_for_model(model, None).unwrap().name(),
+                "anthropic"
+            );
+        }
+        assert_eq!(
+            registry
+                .provider_for_model("claude-opus-5-5", None)
+                .unwrap()
+                .name(),
+            "anthropic"
+        );
     }
 
     #[test]

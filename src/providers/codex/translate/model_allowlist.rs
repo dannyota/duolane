@@ -48,7 +48,7 @@ pub const MODEL_ALIASES: &[(&str, &[&str])] = &[
 pub const FAMILY_ALIASES: &[&str] = &["terra", "sol", "astra", "luna"];
 
 pub fn is_family_alias(model: &str) -> bool {
-    FAMILY_ALIASES.contains(&model.strip_prefix("anthropic-").unwrap_or(model))
+    FAMILY_ALIASES.contains(&model.strip_prefix("claude-").unwrap_or(model))
 }
 
 pub(in crate::providers::codex) fn version(id: &str, family: &str) -> Option<[String; 3]> {
@@ -86,7 +86,7 @@ pub(in crate::providers::codex) fn resolve_family(model: &str) -> Option<Resolve
 }
 
 pub(crate) fn resolve_family_in(model: &str, catalog: &[CatalogModel]) -> Option<ResolvedModel> {
-    let family = model.strip_prefix("anthropic-").unwrap_or(model);
+    let family = model.strip_prefix("claude-").unwrap_or(model);
     let mut candidates: Vec<_> = catalog
         .iter()
         .filter(|entry| entry.listed && entry.supported_in_api)
@@ -194,7 +194,7 @@ pub fn listed_catalog_models() -> Vec<String> {
 }
 
 pub fn allowed_models_display() -> String {
-    allowed_models().join(", ")
+    listed_models().join(", ")
 }
 
 pub fn listed_models() -> Vec<String> {
@@ -207,7 +207,9 @@ pub fn listed_models() -> Vec<String> {
         .collect();
     for family in FAMILY_ALIASES {
         models.push((*family).to_string());
-        models.push(format!("anthropic-{family}"));
+        models.push(format!("claude-{family}"));
+        models.push(format!("{family}-fast"));
+        models.push(format!("claude-{family}-fast"));
     }
     models.sort_unstable();
     models
@@ -227,12 +229,11 @@ pub(crate) fn split_tier_suffix_with(
     is_allowed: impl FnOnce(&str) -> bool,
 ) -> Option<(&str, ServiceTier)> {
     if let Some(base) = model.strip_suffix(ULTRAFAST_SUFFIX) {
-        return ULTRAFAST_MODELS
-            .contains(&base)
+        return (is_family_alias(base) || ULTRAFAST_MODELS.contains(&base))
             .then_some((base, ServiceTier::Ultrafast));
     }
     let base = model.strip_suffix(FAST_SUFFIX)?;
-    is_allowed(base).then_some((base, ServiceTier::Priority))
+    (is_family_alias(base) || is_allowed(base)).then_some((base, ServiceTier::Priority))
 }
 
 pub fn tier_model_variants(model: &str) -> Vec<String> {
@@ -277,12 +278,31 @@ pub fn resolve_model_request_with_config_override(
     resolve_with_model_override(model, override_model.as_deref())
 }
 
+pub fn family_alias_with_tier(model: &str) -> Option<(&str, Option<ServiceTier>)> {
+    if is_family_alias(model) {
+        Some((model, None))
+    } else {
+        split_tier_suffix(model)
+            .filter(|(base, _)| is_family_alias(base))
+            .map(|(base, tier)| (base, Some(tier)))
+    }
+}
+
+fn resolve_family_with_tier(model: &str) -> Option<ResolvedModel> {
+    let (base, tier) = family_alias_with_tier(model)?;
+    let mut resolved = resolve_family(base)?;
+    resolved.service_tier = tier;
+    Some(resolved)
+}
+
 fn resolve_with_model_override(model: &str, override_model: Option<&str>) -> ResolvedModel {
-    let requested = resolve_family(model)
+    let requested = resolve_family_with_tier(model)
         .unwrap_or_else(|| resolve_tier_model_alias(alias_target(model).unwrap_or(model)));
     let requested_tier = requested.service_tier.clone();
     let mut resolved = match override_model {
-        Some(val) if !val.is_empty() => resolve_tier_model_alias(val),
+        Some(val) if !val.is_empty() => {
+            resolve_family_with_tier(val).unwrap_or_else(|| resolve_tier_model_alias(val))
+        }
         _ => requested,
     };
 
@@ -407,7 +427,7 @@ mod tests {
         assert!(!is_allowed_model(id));
         for lite in [true, false] {
             let resolved = resolve_family_in(
-                "anthropic-sol",
+                "claude-sol",
                 &[CatalogModel {
                     slug: id.to_string(),
                     use_responses_lite: lite,
@@ -568,6 +588,26 @@ mod tests {
     }
 
     #[test]
+    fn family_tier_suffixes_narrow_to_selected_model() {
+        for (model, target, tier) in [
+            ("sol-fast", "gpt-6.1-sol", ServiceTier::Priority),
+            (
+                "claude-astra-ultrafast",
+                "gpt-6-astra",
+                ServiceTier::Ultrafast,
+            ),
+            ("luna-ultrafast", "gpt-6-luna", ServiceTier::Priority),
+        ] {
+            let resolved = resolve_with_model_override(model, None);
+            assert_eq!(resolved.model, target);
+            assert_eq!(resolved.service_tier, Some(tier));
+        }
+        for model in ["sol-fast-fast", "opus-fast", "anthropic-sol"] {
+            assert!(!is_valid_model_for_codex(model));
+        }
+    }
+
+    #[test]
     fn fast_suffix_adds_priority() {
         let r = resolve_model_request("gpt-5.6-sol-fast");
         assert_eq!(r.model, "gpt-5.6-sol");
@@ -655,6 +695,34 @@ mod tests {
             ["gpt-6-astra-fast", "gpt-6-astra-ultrafast"]
         );
         assert_eq!(tier_model_variants("gpt-6-sol"), ["gpt-6-sol-fast"]);
+    }
+
+    #[test]
+    fn family_override_resolves_and_preserves_tier_precedence() {
+        for (requested, configured, expected_model, expected_tier) in [
+            (
+                "gpt-6-astra-ultrafast",
+                "claude-sol-fast",
+                "gpt-6.1-sol",
+                ServiceTier::Priority,
+            ),
+            (
+                "gpt-6-astra-ultrafast",
+                "luna",
+                "gpt-6-luna",
+                ServiceTier::Priority,
+            ),
+            (
+                "gpt-6-sol-fast",
+                "astra-ultrafast",
+                "gpt-6-astra",
+                ServiceTier::Ultrafast,
+            ),
+        ] {
+            let result = resolve_with_model_override(requested, Some(configured));
+            assert_eq!(result.model, expected_model);
+            assert_eq!(result.service_tier, Some(expected_tier));
+        }
     }
 
     #[test]

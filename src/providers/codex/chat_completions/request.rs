@@ -3,7 +3,7 @@ use serde_json::{Map, Value, json};
 
 use crate::providers::codex::translate::{
     model_allowlist::{
-        ResolvedModel, allowed_models_display, is_family_alias, resolve_model_request,
+        ResolvedModel, allowed_models_display, family_alias_with_tier, resolve_model_request,
     },
     request::{Effort, ServiceTier, resolve_effort_override, to_codex_effort},
 };
@@ -79,7 +79,7 @@ fn translate_with_source(
                 Some("model_not_supported"),
             )
         })?;
-        let full_lane = is_family_alias(&normalized) && config::codex_full_lane();
+        let full_lane = family_alias_with_tier(&normalized).is_some() && config::codex_full_lane();
         let lite = resolved.uses_responses_lite(full_lane);
         (resolved, lite)
     };
