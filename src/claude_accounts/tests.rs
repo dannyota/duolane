@@ -1,6 +1,41 @@
 use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::process::Command;
+
+#[test]
+#[ignore]
+fn claude_accounts_selector_compare_probe() {
+    unsafe {
+        std::env::set_var("DUOLANE_CONFIG_DIR", std::env::var_os("TEST_CONFIG").unwrap());
+    }
+    select(Some("backup".into())).unwrap();
+    let roster = monitor_roster().unwrap();
+    assert_eq!(roster.names, ["default", "backup"]);
+    assert_eq!(roster.selected, "backup");
+    assert!(!roster.overridden);
+    assert!(save_selection("default", Some("default")).is_err());
+    assert_eq!(current_selection().unwrap(), "backup");
+    save_selection("default", Some("backup")).unwrap();
+    assert_eq!(current_selection().unwrap(), "default");
+}
+
+#[test]
+fn claude_accounts_selector_compare_preserves_external_choice() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    let profile = store::checked_dir(&config.join("claude-accounts/backup"), true)
+        .unwrap()
+        .unwrap();
+    store::private_replace(&profile, ".duolane-ready", b"ready\n").unwrap();
+    assert!(Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .env("HOME", root.path())
+        .env("TEST_CONFIG", &config)
+        .args(["--exact", "--ignored", "claude_accounts::unix::tests::claude_accounts_selector_compare_probe"])
+        .status()
+        .unwrap()
+        .success());
+}
 #[test]
 fn claude_accounts_cwd_changes_are_refused() {
     assert!(

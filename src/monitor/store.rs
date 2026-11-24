@@ -16,6 +16,7 @@ enum CompletionIssue {
 
 #[derive(Debug)]
 pub(super) struct MonitorStore {
+    pub(super) quota: super::quota::QuotaState,
     pub(super) started_at: SystemTime,
     pub(super) started_instant: Instant,
     pub(super) last_session_prune_instant: Instant,
@@ -507,6 +508,7 @@ impl MonitorStore {
             now,
         );
         MonitorState {
+            codex_quota: self.quota.snapshot.clone(),
             started_at: self.started_at,
             uptime: self.started_instant.elapsed(),
             sessions,

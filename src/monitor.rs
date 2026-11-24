@@ -6,12 +6,15 @@ use std::{
 };
 
 mod mock;
+mod quota;
 pub mod remote;
 mod sessions;
 pub mod snapshot;
 mod store;
 
 pub use mock::{MockMonitor, mock_state};
+pub(crate) use quota::CodexQuotaObserver;
+pub use quota::{CodexQuotaSnapshot, CodexQuotaWindow};
 use sessions::{session_summaries, session_token_bucket};
 use store::{MonitorStore, SessionUsage};
 
@@ -251,6 +254,7 @@ impl Throughput {
 
 #[derive(Debug, Clone)]
 pub struct MonitorState {
+    pub codex_quota: Option<CodexQuotaSnapshot>,
     pub started_at: SystemTime,
     pub uptime: Duration,
     pub sessions: Vec<SessionSummary>,
@@ -317,6 +321,7 @@ impl MonitorHandle {
                 session_usage: HashMap::new(),
                 session_output_buckets: HashMap::new(),
                 recent_limit,
+                quota: quota::QuotaState::default(),
             })),
         }
     }
@@ -339,6 +344,7 @@ impl MonitorHandle {
         match self.store.lock() {
             Ok(mut store) => store.snapshot(),
             Err(_) => MonitorState {
+                codex_quota: None,
                 started_at: SystemTime::now(),
                 uptime: Duration::ZERO,
                 sessions: Vec::new(),
@@ -531,6 +537,58 @@ pub fn throughput(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_binding_rejects_stale_accounts_and_invalid_values() {
+        use crate::providers::codex::translate::reasoning_signature::ReasoningAccount;
+        let monitor = MonitorHandle::new(10);
+        let a = ReasoningAccount::new(Some("account-a"));
+        let b = ReasoningAccount::new(Some("account-b"));
+        monitor.request_started("old", None, None, EndpointKind::Messages);
+        let old = monitor.bind_codex_quota("old", &a).unwrap();
+        let event = serde_json::json!({"type":"codex.rate_limits", "rate_limits": {
+            "primary":{"used_percent":25,"window_minutes":300,"reset_at":2000000000_u64},
+            "secondary":{"used_percent":60,"window_minutes":10080,"reset_at":2000001000_u64}
+        }});
+        old.observe(&event);
+        let quota = monitor.snapshot().codex_quota.unwrap();
+        assert_eq!(quota.primary.unwrap().used_percent, Some(25.0));
+        assert_eq!(quota.secondary.unwrap().window_minutes, Some(10080));
+        monitor.request_started("new", None, None, EndpointKind::Messages);
+        let current = monitor.bind_codex_quota("new", &b).unwrap();
+        assert!(monitor.snapshot().codex_quota.is_none());
+        assert!(monitor.bind_codex_quota("old", &a).is_none());
+        old.observe(&event);
+        assert!(monitor.snapshot().codex_quota.is_none());
+        current.observe(
+            &serde_json::json!({"type":"codex.rate_limits", "rate_limits": {
+                "primary":{"used_percent":101,"window_minutes":0,"reset_at":0}
+            }}),
+        );
+        assert!(monitor.snapshot().codex_quota.is_none());
+        current.observe(&event);
+        assert!(monitor.snapshot().codex_quota.is_some());
+        monitor.request_started("count", None, None, EndpointKind::CountTokens);
+        assert!(monitor.bind_codex_quota("count", &a).is_none());
+        assert!(monitor.snapshot().codex_quota.is_some());
+        monitor.request_started("unbound", None, None, EndpointKind::Messages);
+        assert!(
+            monitor
+                .bind_codex_quota("unbound", &ReasoningAccount::default())
+                .is_none()
+        );
+        current.observe(&event);
+        assert!(monitor.snapshot().codex_quota.is_none());
+    }
+
+    #[test]
+    fn older_snapshot_without_quota_deserializes() {
+        let snapshot: snapshot::MonitorSnapshot = MonitorHandle::default().snapshot().into();
+        let json = serde_json::to_value(snapshot).unwrap();
+        assert!(json.get("codex_quota").is_none());
+        let restored: snapshot::MonitorSnapshot = serde_json::from_value(json).unwrap();
+        assert!(restored.codex_quota.is_none());
+    }
 
     #[test]
     fn started_requests_appear_active() {

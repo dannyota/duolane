@@ -43,6 +43,12 @@ impl CodexHttpClient {
         } else {
             self.auth_for(&body.reasoning_account).await?
         };
+        let quota = ctx.monitor.as_ref().and_then(|monitor| {
+            let account = super::translate::reasoning_signature::ReasoningAccount::new(
+                auth.account_id.as_deref(),
+            );
+            monitor.bind_codex_quota(&ctx.req_id, &account)
+        });
         let http_body = http_body
             .get_or_try_init(|| {
                 self.prepare_http_body(body, ctx.traffic.is_some(), "Failed to serialize request")
@@ -118,6 +124,7 @@ impl CodexHttpClient {
                 tracked,
             },
             ctx.clone(),
+            quota,
         ))
     }
     pub(super) async fn stream_codex_http_events_for_owner_tracked(
@@ -175,6 +182,7 @@ impl CodexHttpClient {
             } else {
                 self.auth_for(&body.reasoning_account).await?
             };
+            let quota = super::client_live::quota_for_auth(ctx, &auth);
             if super::client_live::should_reset_websocket_pool(continuation)
                 && let Some(owner) = super::client_live::websocket_pool_owner(continuation)
             {
@@ -198,7 +206,7 @@ impl CodexHttpClient {
             )
             .await
             {
-                Ok(ready) => prepared = Some((auth, ready)),
+                Ok(ready) => prepared = Some((auth, ready, quota)),
                 Err(error)
                     if error.detail.as_deref()
                         == Some(super::websocket::WEBSOCKET_CONTINUATION_SOCKET_MISSING_DETAIL) =>
@@ -269,6 +277,7 @@ impl CodexHttpClient {
         self: &Arc<Self>,
         state: HttpEventStreamState,
         ctx: RequestContext,
+        quota: Option<crate::monitor::CodexQuotaObserver>,
     ) -> CodexHttpEventReceiver {
         let HttpEventStreamState {
             mut resp,
@@ -286,12 +295,10 @@ impl CodexHttpClient {
         let req_id = ctx.req_id.clone();
         let traffic = ctx.traffic.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
-
         tokio::spawn(async move {
             let log = create_logger("codex");
             let mut semantic_output_forwarded = false;
             let mut hosted_tool_executed = false;
-
             if tx
                 .send(Ok(serde_json::json!({
                     "type": "keepalive",
@@ -302,7 +309,6 @@ impl CodexHttpClient {
             {
                 return;
             }
-
             'attempts: loop {
                 let mut decoder = HttpSseDecoder::default();
                 let mut body_bytes = 0_u64;
@@ -310,7 +316,6 @@ impl CodexHttpClient {
                 let mut event_count = 0_u64;
                 let mut pending_events = Vec::new();
                 let mut tool_state = HttpToolState::default();
-
                 let mut retry_error = 'read_attempt: loop {
                     let chunk = tokio::select! {
                         _ = tx.closed() => {
@@ -331,7 +336,6 @@ impl CodexHttpClient {
                             resp.chunk(),
                         ) => chunk
                     };
-
                     let chunk = match chunk {
                         Ok(Ok(Some(chunk))) => chunk,
                         Ok(Ok(None)) => {
@@ -474,6 +478,9 @@ impl CodexHttpClient {
                         let Some(mut payload) = event.payload else {
                             continue;
                         };
+                        if let Some(quota) = &quota {
+                            quota.observe(&payload);
+                        }
                         event_count = event_count.saturating_add(1);
                         if let Some(traffic) = traffic.as_deref() {
                             write_codex_http_sse_event_capture(
@@ -707,6 +714,47 @@ mod tests {
         stream.write_all(body).await.unwrap();
         stream.write_all(b"\r\n").await.unwrap();
         stream.flush().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_http_startup_clears_previous_account_quota() {
+        use super::super::translate::reasoning_signature::ReasoningAccount;
+        use crate::monitor::{EndpointKind, MonitorHandle};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut socket).await;
+            let body = br#"{"error":{"type":"usage_limit_reached","message":"limit"}}"#;
+            let headers = format!(
+                "HTTP/1.1 429 Too Many Requests\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            socket.write_all(body).await.unwrap();
+        });
+        let monitor = MonitorHandle::default();
+        monitor.request_started("old", None, None, EndpointKind::Messages);
+        let observer = monitor
+            .bind_codex_quota("old", &ReasoningAccount::new(Some("old")))
+            .unwrap();
+        observer.observe(&serde_json::json!({"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":25}}}));
+        assert!(monitor.snapshot().codex_quota.is_some());
+        let mut ctx = http_test_context();
+        monitor.request_started(&ctx.req_id, None, None, EndpointKind::Messages);
+        ctx.monitor = Some(monitor.clone());
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let error = client
+            .stream_codex_http_events(&buffered_test_request(), &ctx, &Default::default())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.status, 429);
+        assert!(monitor.snapshot().codex_quota.is_none());
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -1170,6 +1218,10 @@ mod tests {
                 .unwrap();
             write_http_chunk(
                 &mut stream,
+                b"data: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":25,\"window_minutes\":300}}}\n\n",
+            ).await;
+            write_http_chunk(
+                &mut stream,
                 b"data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hello\"}\n\n",
             )
             .await;
@@ -1183,12 +1235,17 @@ mod tests {
 
         let client = Arc::new(http_test_client(format!("http://{addr}/responses"), 1_000));
         client.auth_manager().set_test_auth(http_test_auth());
+        let monitor = crate::monitor::MonitorHandle::default();
+        let mut ctx = http_test_context();
+        monitor.request_started(
+            &ctx.req_id,
+            None,
+            None,
+            crate::monitor::EndpointKind::Messages,
+        );
+        ctx.monitor = Some(monitor.clone());
         let mut events = client
-            .stream_codex_http_events(
-                &buffered_test_request(),
-                &http_test_context(),
-                &Default::default(),
-            )
+            .stream_codex_http_events(&buffered_test_request(), &ctx, &Default::default())
             .await
             .unwrap();
 
@@ -1196,6 +1253,18 @@ mod tests {
         assert_eq!(
             synthetic.get("type").and_then(|value| value.as_str()),
             Some("keepalive")
+        );
+        let quota_event = events.recv().await.unwrap().unwrap();
+        assert_eq!(quota_event["type"], "codex.rate_limits");
+        assert_eq!(
+            monitor
+                .snapshot()
+                .codex_quota
+                .unwrap()
+                .primary
+                .unwrap()
+                .used_percent,
+            Some(25.0)
         );
         let first_upstream = tokio::time::timeout(Duration::from_millis(200), events.recv())
             .await

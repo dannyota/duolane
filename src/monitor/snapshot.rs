@@ -71,6 +71,8 @@ impl SnapshotUpdate {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MonitorSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_quota: Option<super::CodexQuotaSnapshot>,
     pub started_at: SystemTime,
     #[serde(default = "default_snapshot_at")]
     pub snapshot_at: SystemTime,
@@ -129,6 +131,7 @@ fn terminal_fields<const N: usize>(fields: [&mut Option<String>; N]) {
 impl From<MonitorState> for MonitorSnapshot {
     fn from(state: MonitorState) -> Self {
         Self {
+            codex_quota: state.codex_quota,
             started_at: state.started_at,
             snapshot_at: SystemTime::now(),
             uptime: state.uptime,
