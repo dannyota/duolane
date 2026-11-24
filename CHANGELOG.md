@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.1
+
+### Changed
+
+- In intercept mode the proxy holds up to 2048 tunnels and 512 intercepted
+  connections, up from 256 each, because programs that Claude Code starts send
+  their HTTPS traffic through it. `duolane serve` raises its open-file limit up
+  to 16384 and sizes both pools from the limit it gets, so a low limit gives
+  smaller pools.
+
 ## 0.6.0
 
 ### Added
