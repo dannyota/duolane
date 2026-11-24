@@ -1,4 +1,6 @@
+mod accounts;
 mod cells;
+mod chrome;
 mod detail;
 mod layout;
 mod mouse;
@@ -9,6 +11,7 @@ mod requests;
 mod sessions;
 
 use cells::format_duration;
+use chrome::{render_footer, render_header};
 use detail::{render_request_detail, render_session_detail};
 use mouse::{MouseTarget, MouseTargets, VisibleRows};
 use overlay::{
@@ -102,6 +105,7 @@ pub fn run_attached_monitor(
     run_monitor_loop(
         snapshot,
         UiSession {
+            local_accounts: false,
             listen_url,
             setup_text,
             shutdown: None,
@@ -115,6 +119,7 @@ pub fn run_mock_monitor(port: u16, registry: &Registry) -> Result<(), anyhow::Er
     run_monitor_loop(
         move || SnapshotUpdate::Live(monitor.snapshot().into()),
         UiSession {
+            local_accounts: false,
             listen_url: "mock://tui-demo".to_string(),
             setup_text: mock_setup_text(port, registry),
             shutdown: None,
@@ -125,6 +130,7 @@ pub fn run_mock_monitor(port: u16, registry: &Registry) -> Result<(), anyhow::Er
 }
 
 struct UiSession {
+    local_accounts: bool,
     listen_url: String,
     setup_text: String,
     shutdown: Option<oneshot::Sender<()>>,
@@ -134,6 +140,7 @@ struct UiSession {
 impl From<MonitorUiConfig<'_>> for UiSession {
     fn from(config: MonitorUiConfig<'_>) -> Self {
         Self {
+            local_accounts: true,
             setup_text: setup_text(config.port, config.registry),
             listen_url: config.listen_url,
             shutdown: config.shutdown,
@@ -148,6 +155,8 @@ fn run_monitor_loop(
 ) -> Result<MonitorExit, anyhow::Error> {
     let (_guard, mut terminal) = setup_terminal()?;
     let mut app = MonitorApp {
+        accounts: accounts::Accounts::new(config.local_accounts),
+        accounts_open: false,
         listen_url: config.listen_url,
         setup_text: config.setup_text,
         show_setup: false,
@@ -235,6 +244,47 @@ fn run_monitor_events(
                     KeyCode::Char('q') => app.request_shutdown_confirmation(),
                     KeyCode::Char('?') => app.show_help = !app.show_help,
                     KeyCode::Char('b') => app.show_setup = !app.show_setup,
+                    KeyCode::Char('1') => {
+                        app.accounts_open = false;
+                        app.accounts.cancel();
+                    }
+                    KeyCode::Char('2') => {
+                        app.accounts_open = true;
+                        app.accounts.enter();
+                    }
+                    KeyCode::Char('r')
+                        if app.accounts_open && !app.show_help && !app.show_setup =>
+                    {
+                        app.accounts.enter()
+                    }
+                    KeyCode::Esc
+                        if app.accounts_open
+                            && app.accounts.confirming()
+                            && !app.show_help
+                            && !app.show_setup =>
+                    {
+                        app.accounts.cancel()
+                    }
+                    KeyCode::Enter if app.accounts_open && !app.show_help && !app.show_setup => {
+                        app.accounts.confirm()
+                    }
+                    KeyCode::Down
+                        if app.accounts_open
+                            && !app.accounts.confirming()
+                            && !app.show_help
+                            && !app.show_setup =>
+                    {
+                        app.accounts.down()
+                    }
+                    KeyCode::Up
+                        if app.accounts_open
+                            && !app.accounts.confirming()
+                            && !app.show_help
+                            && !app.show_setup =>
+                    {
+                        app.accounts.up()
+                    }
+                    _ if app.accounts_open && !matches!(key.code, KeyCode::Esc) => {}
                     KeyCode::Tab => app.focus = app.focus.next(),
                     KeyCode::Down => app.move_down(state.sessions.len(), state.recent.len(), true),
                     KeyCode::Char('j') => {
@@ -326,6 +376,8 @@ enum MonitorPhase {
 }
 
 struct MonitorApp {
+    accounts: accounts::Accounts,
+    accounts_open: bool,
     listen_url: String,
     setup_text: String,
     show_setup: bool,
@@ -347,6 +399,10 @@ impl MonitorApp {
             || self.show_setup
             || self.phase != MonitorPhase::Running
         {
+            return;
+        }
+        if self.accounts_open {
+            self.accounts.click(mouse.column, mouse.row);
             return;
         }
         match targets.hit(mouse.column, mouse.row) {
@@ -523,6 +579,28 @@ fn render(
         .split(area);
 
     render_header(frame, root[0], app, terminal_state);
+    if app.accounts_open {
+        let body = Rect::new(
+            area.x,
+            root[1].y,
+            area.width,
+            root[5].y.saturating_sub(root[1].y),
+        );
+        app.accounts.render(frame, body, state);
+        render_footer(frame, root[5], app);
+        if app.show_setup {
+            render_setup_overlay(frame, area, &app.setup_text);
+        }
+        if app.show_help {
+            render_help_overlay(frame, area, app.is_attached());
+        }
+        match app.phase {
+            MonitorPhase::Running => {}
+            MonitorPhase::ConfirmingShutdown => render_shutdown_confirmation(frame, area),
+            MonitorPhase::ShuttingDown => render_shutdown_overlay(frame, area, app.tick),
+        }
+        return MouseTargets::default();
+    }
     let sessions = match &app.detail {
         Some(DetailView::Session(detail)) => {
             let index = detail.index(
@@ -578,79 +656,6 @@ fn render(
     }
 }
 
-fn render_header(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    app: &MonitorApp,
-    state: &MonitorSnapshot,
-) {
-    let text = Line::from(vec![
-        Span::styled(
-            " duolane",
-            Style::default()
-                .fg(BG)
-                .bg(TEAL)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  ", Style::default().fg(BG).bg(TEAL)),
-        Span::styled(&app.listen_url, Style::default().fg(BG).bg(TEAL)),
-        Span::styled("  uptime ", Style::default().fg(BG).bg(TEAL)),
-        Span::styled(
-            format_duration(state.uptime),
-            Style::default()
-                .fg(BG)
-                .bg(TEAL)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  sessions ", Style::default().fg(BG).bg(TEAL)),
-        Span::styled(
-            state.sessions.len().to_string(),
-            Style::default()
-                .fg(BG)
-                .bg(TEAL)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  active ", Style::default().fg(BG).bg(TEAL)),
-        Span::styled(
-            state.active.len().to_string(),
-            Style::default()
-                .fg(BG)
-                .bg(TEAL)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(text).style(Style::default().bg(TEAL)), area);
-}
-
-fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
-    let spans = vec![
-        Span::raw(" "),
-        Span::styled("q", Style::default().fg(TEAL)),
-        Span::styled(
-            if app.is_attached() {
-                " detach  "
-            } else {
-                " quit  "
-            },
-            Style::default().fg(DIM),
-        ),
-        Span::styled("?", Style::default().fg(TEAL)),
-        Span::styled(" help  ", Style::default().fg(DIM)),
-        Span::styled("b", Style::default().fg(TEAL)),
-        Span::styled(" setup  ", Style::default().fg(DIM)),
-        Span::styled("arrows/j/k", Style::default().fg(TEAL)),
-        Span::styled(" navigate  ", Style::default().fg(DIM)),
-        Span::styled("Tab", Style::default().fg(TEAL)),
-        Span::styled(" pane  ", Style::default().fg(DIM)),
-        Span::styled("Enter/click", Style::default().fg(TEAL)),
-        Span::styled(" open", Style::default().fg(DIM)),
-    ];
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(BG)),
-        area,
-    );
-}
-
 fn mock_setup_text(port: u16, registry: &Registry) -> String {
     format!(
         "Mock mode uses deterministic simulated monitor traffic.\nNo proxy server is listening.\nRun `duolane serve` to start the proxy.\n\n{}",
@@ -680,6 +685,15 @@ pub fn setup_text(port: u16, registry: &Registry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accounts_read_only_modes_never_expose_local_names() {
+        let mut accounts = accounts::Accounts::new(false);
+        accounts.enter();
+        assert!(accounts.names().is_empty());
+        accounts.confirm();
+        assert!(!accounts.confirming());
+    }
     use crate::monitor::snapshot::MonitorSnapshot;
     use crate::monitor::{EndpointKind, MonitorHandle, mock_state};
     use crate::tui::layout::{ColumnSpec, LayoutTier, MODEL_WIDE_WIDTH, PROVIDER_WIDTH};
@@ -1129,6 +1143,8 @@ mod tests {
         monitor.codex_source("active", "chatgpt");
         let state: MonitorSnapshot = monitor.snapshot().into();
         let mut app = MonitorApp {
+            accounts: accounts::Accounts::new(false),
+            accounts_open: false,
             listen_url: "test".into(),
             setup_text: String::new(),
             show_setup: false,
@@ -1153,6 +1169,8 @@ mod tests {
     fn mock_state_renders_representative_panes_at_wide_width() {
         let state: MonitorSnapshot = mock_state().into();
         let mut app = MonitorApp {
+            accounts: accounts::Accounts::new(false),
+            accounts_open: false,
             listen_url: "mock://tui-demo".to_string(),
             setup_text: String::new(),
             show_setup: false,
@@ -1186,6 +1204,8 @@ mod tests {
         monitor.request_failed("req", Some(502), "upstream\u{1b}[2J\u{9b}31m closed");
         let state: MonitorSnapshot = monitor.snapshot().into();
         let mut app = MonitorApp {
+            accounts: accounts::Accounts::new(false),
+            accounts_open: false,
             listen_url: "http://127.0.0.1:3000".to_string(),
             setup_text: String::new(),
             show_setup: false,
@@ -1218,6 +1238,8 @@ mod tests {
     fn shutdown_confirmation_can_be_cancelled_before_signalling_server() {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let mut app = MonitorApp {
+            accounts: accounts::Accounts::new(false),
+            accounts_open: false,
             listen_url: "http://127.0.0.1:3000".to_string(),
             setup_text: String::new(),
             show_setup: false,
@@ -1264,6 +1286,8 @@ mod tests {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let (_shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel();
         let mut app = MonitorApp {
+            accounts: accounts::Accounts::new(false),
+            accounts_open: false,
             listen_url: "http://127.0.0.1:3000".to_string(),
             setup_text: String::new(),
             show_setup: false,
@@ -1294,6 +1318,8 @@ mod tests {
     fn shutdown_completion_accepts_notification_and_sender_drop() {
         let (complete_tx, complete_rx) = mpsc::channel();
         let app = MonitorApp {
+            accounts: accounts::Accounts::new(false),
+            accounts_open: false,
             listen_url: String::new(),
             setup_text: String::new(),
             show_setup: false,
@@ -1322,6 +1348,8 @@ mod tests {
     #[test]
     fn header_renders_configured_listen_url() {
         let app = MonitorApp {
+            accounts: accounts::Accounts::new(false),
+            accounts_open: false,
             listen_url: "http://[::]:18765".to_string(),
             setup_text: String::new(),
             show_setup: false,
@@ -1337,16 +1365,19 @@ mod tests {
         };
         let state: MonitorSnapshot = MonitorHandle::default().snapshot().into();
 
-        let header = draw(100, 1, |frame| {
+        let header = draw(80, 1, |frame| {
             render_header(frame, frame.area(), &app, &state)
         });
 
         assert!(buffer_text(&header).contains("http://[::]:18765"));
+        assert!(buffer_text(&header).contains("active"));
     }
 
     #[test]
     fn clamp_selection_caps_to_available_sessions() {
         let mut app = MonitorApp {
+            accounts: accounts::Accounts::new(false),
+            accounts_open: false,
             listen_url: "http://127.0.0.1:3000".to_string(),
             setup_text: String::new(),
             show_setup: false,
@@ -1373,6 +1404,8 @@ mod tests {
     #[test]
     fn arrow_navigation_moves_between_focus_panes_at_edges() {
         let mut app = MonitorApp {
+            accounts: accounts::Accounts::new(false),
+            accounts_open: false,
             listen_url: "http://127.0.0.1:3000".to_string(),
             setup_text: String::new(),
             show_setup: false,
@@ -1399,6 +1432,8 @@ mod tests {
     #[test]
     fn vim_navigation_stays_within_focused_pane() {
         let mut app = MonitorApp {
+            accounts: accounts::Accounts::new(false),
+            accounts_open: false,
             listen_url: "http://127.0.0.1:3000".to_string(),
             setup_text: String::new(),
             show_setup: false,

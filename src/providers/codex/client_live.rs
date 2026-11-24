@@ -9,6 +9,18 @@ use super::auth::token_store::StoredAuth;
 use super::client::*;
 use super::translate::request::ResponsesRequest;
 
+pub(super) fn quota_for_auth(
+    ctx: &RequestContext,
+    auth: &StoredAuth,
+) -> Option<crate::monitor::CodexQuotaObserver> {
+    ctx.monitor.as_ref().and_then(|monitor| {
+        let account = super::translate::reasoning_signature::ReasoningAccount::new(
+            auth.account_id.as_deref(),
+        );
+        monitor.bind_codex_quota(&ctx.req_id, &account)
+    })
+}
+
 impl CodexHttpClient {
     pub async fn stream_codex_websocket_events(
         self: &Arc<Self>,
@@ -50,17 +62,25 @@ impl CodexHttpClient {
         ctx: &RequestContext,
         continuation: Option<&super::continuation::ContinuationReservation>,
         websocket_sent: Arc<std::sync::atomic::AtomicBool>,
-        prepared: Option<(StoredAuth, super::websocket::ReadyWebSocket)>,
+        prepared: Option<(
+            StoredAuth,
+            super::websocket::ReadyWebSocket,
+            Option<crate::monitor::CodexQuotaObserver>,
+        )>,
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
         ctx.recovery_budget.begin_websocket();
-        let (auth, ready) = match prepared {
-            Some((auth, ready)) => (auth, Some(ready)),
-            None if ctx.recovery_budget.is_tracked() => (
-                self.auth_for_buffered_http(&body.reasoning_account, &ctx.recovery_budget)
-                    .await?,
-                None,
-            ),
-            None => (self.auth_for(&body.reasoning_account).await?, None),
+        let (auth, ready, quota) = match prepared {
+            Some((auth, ready, quota)) => (auth, Some(ready), quota),
+            None => {
+                let auth = if ctx.recovery_budget.is_tracked() {
+                    self.auth_for_buffered_http(&body.reasoning_account, &ctx.recovery_budget)
+                        .await?
+                } else {
+                    self.auth_for(&body.reasoning_account).await?
+                };
+                let quota = quota_for_auth(ctx, &auth);
+                (auth, None, quota)
+            }
         };
 
         if ctx.recovery_budget.is_tracked() {
@@ -91,6 +111,7 @@ impl CodexHttpClient {
                     socket_id_publisher,
                     websocket_sent,
                     ready,
+                    quota,
                 )
                 .await;
         });
@@ -109,13 +130,8 @@ impl CodexHttpClient {
         socket_id_publisher: super::websocket::CodexWebSocketSocketIdPublisher,
         websocket_sent: Arc<std::sync::atomic::AtomicBool>,
         mut ready: Option<super::websocket::ReadyWebSocket>,
+        quota: Option<crate::monitor::CodexQuotaObserver>,
     ) {
-        let quota = ctx.monitor.as_ref().and_then(|monitor| {
-            let account = super::translate::reasoning_signature::ReasoningAccount::new(
-                auth.account_id.as_deref(),
-            );
-            monitor.bind_codex_quota(&ctx.req_id, &account)
-        });
         let mut auth_refresh_attempted = false;
         let mut continuation_retry_available = continuation
             .as_ref()
@@ -536,6 +552,33 @@ mod tests {
 
     use super::super::client_test_support::*;
     use super::*;
+
+    #[tokio::test]
+    async fn websocket_binds_quota_before_event_task_runs() {
+        use super::super::translate::reasoning_signature::ReasoningAccount;
+        use crate::monitor::{EndpointKind, MonitorHandle};
+
+        let monitor = MonitorHandle::default();
+        monitor.request_started("old", None, None, EndpointKind::Messages);
+        let old = monitor
+            .bind_codex_quota("old", &ReasoningAccount::new(Some("old")))
+            .unwrap();
+        let event = serde_json::json!({"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":25}}});
+        old.observe(&event);
+        let mut ctx = http_test_context();
+        monitor.request_started(&ctx.req_id, None, None, EndpointKind::Messages);
+        ctx.monitor = Some(monitor.clone());
+        let client = Arc::new(authenticated_http_test_client(
+            "http://127.0.0.1:1/responses".into(),
+        ));
+        let stream = client
+            .stream_codex_websocket_events_for_owner(&buffered_test_request(), &ctx, None)
+            .await
+            .unwrap();
+        old.observe(&event);
+        assert!(monitor.snapshot().codex_quota.is_none());
+        drop(stream);
+    }
 
     #[tokio::test]
     async fn live_nested_missing_response_retries_once_without_stale_previous_id() {

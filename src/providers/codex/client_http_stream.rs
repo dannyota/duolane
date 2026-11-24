@@ -182,6 +182,7 @@ impl CodexHttpClient {
             } else {
                 self.auth_for(&body.reasoning_account).await?
             };
+            let quota = super::client_live::quota_for_auth(ctx, &auth);
             if super::client_live::should_reset_websocket_pool(continuation)
                 && let Some(owner) = super::client_live::websocket_pool_owner(continuation)
             {
@@ -205,7 +206,7 @@ impl CodexHttpClient {
             )
             .await
             {
-                Ok(ready) => prepared = Some((auth, ready)),
+                Ok(ready) => prepared = Some((auth, ready, quota)),
                 Err(error)
                     if error.detail.as_deref()
                         == Some(super::websocket::WEBSOCKET_CONTINUATION_SOCKET_MISSING_DETAIL) =>
@@ -335,7 +336,6 @@ impl CodexHttpClient {
                             resp.chunk(),
                         ) => chunk
                     };
-
                     let chunk = match chunk {
                         Ok(Ok(Some(chunk))) => chunk,
                         Ok(Ok(None)) => {

@@ -39,6 +39,17 @@ with documented 1M context. It does not set Claude Code's compaction policy.
 `/model <codex model>` also becomes the default for new sessions; pick a Claude
 model before you run Claude Code without duolane.
 
+## Monitor accounts
+
+Press `2` in the monitor to open Accounts and `1` to return to Overview.
+Accounts shows the last reported ChatGPT subscription limits, their reset times,
+and when the report was received. An unverified quota is `Unknown`.
+
+In the local Unix monitor, select a Claude profile with the arrow keys or a
+click, then press Enter to review and confirm the next-launch choice. Press `r`
+to reload the local profile list without contacting providers. An attached
+monitor stays read-only and does not show local profile names.
+
 ## Claude Code agents
 
 Run `duolane agents setup` to create `terra.md`, `sol.md`, `astra.md`, and

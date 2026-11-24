@@ -6,6 +6,8 @@ use ratatui::buffer::Buffer;
 
 fn app() -> MonitorApp {
     MonitorApp {
+        accounts: accounts::Accounts::new(false),
+        accounts_open: false,
         listen_url: String::new(),
         setup_text: String::new(),
         show_setup: false,

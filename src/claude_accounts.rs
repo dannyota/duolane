@@ -221,6 +221,10 @@ mod unix {
     }
 
     fn registered() -> Result<Vec<(String, PathBuf)>> {
+        registered_with_warnings(true)
+    }
+
+    fn registered_with_warnings(warn: bool) -> Result<Vec<(String, PathBuf)>> {
         let mut profiles = Vec::new();
         let Some(root) = config_root(false)? else {
             return Ok(profiles);
@@ -246,11 +250,32 @@ mod unix {
             match ready {
                 Ok(Some(path)) => profiles.push((name, path)),
                 Ok(None) => {}
-                Err(_) => eprintln!("warning: skipping unsafe profile {name}"),
+                Err(_) if warn => eprintln!("warning: skipping unsafe profile {name}"),
+                Err(_) => {}
             }
         }
         profiles.sort();
         Ok(profiles)
+    }
+
+    pub(crate) struct MonitorRoster {
+        pub names: Vec<String>,
+        pub selected: String,
+        pub overridden: bool,
+    }
+
+    pub(crate) fn monitor_roster() -> Result<MonitorRoster> {
+        let mut names = vec!["default".to_owned()];
+        names.extend(
+            registered_with_warnings(false)?
+                .into_iter()
+                .map(|(name, _)| name),
+        );
+        Ok(MonitorRoster {
+            names,
+            selected: current_selection()?,
+            overridden: std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|v| !v.is_empty()),
+        })
     }
 
     fn color() -> bool {
@@ -398,16 +423,28 @@ mod unix {
                 .context("invalid choice")?
                 .clone()
         };
+        save_selection(&name, None)?;
+        println!("The next duolane claude launch uses {name}.");
+        Ok(())
+    }
+
+    pub(crate) fn save_selection(name: &str, expected: Option<&str>) -> Result<()> {
         let _profile = if name == "default" {
             None
         } else {
-            Some(profile(&name, false)?.context("unknown profile")?)
+            Some(profile(name, false)?.context("unknown profile")?)
         };
         let dir = selector_dir(true)?.context("selector unavailable")?;
-        let _selector_lock = store::lock(&dir, ".selector.lock", true)?;
-        read_selection()?;
+        let _selector_lock = store::lock(&dir, ".selector.lock", expected.is_none())?;
+        let current = current_selection()?;
+        if let Some(expected) = expected {
+            ensure!(current == expected, "selection changed; reload and retry");
+            ensure!(
+                !std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|value| !value.is_empty()),
+                "CLAUDE_CONFIG_DIR overrides selection"
+            );
+        }
         store::private_replace(&dir, ".selected", format!("{name}\n").as_bytes())?;
-        println!("The next duolane claude launch uses {name}.");
         Ok(())
     }
     fn recheck_cwd(expected: &Path) -> Result<()> {
@@ -524,7 +561,7 @@ mod unix {
 #[cfg(unix)]
 use unix::claude_command;
 #[cfg(unix)]
-pub(crate) use unix::{Profile, prepare_launch};
+pub(crate) use unix::{Profile, monitor_roster, prepare_launch, save_selection};
 #[cfg(unix)]
 pub use unix::{announce, list, login, remove, select};
 
