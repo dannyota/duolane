@@ -74,8 +74,9 @@ there.
 
 To delete a profile, run `duolane accounts remove <name>`. It asks for
 confirmation, signs the profile out with `claude auth logout`, deletes its
-directory, and returns the selection to `default` if that profile was selected.
-Shared history folders stay in place. Close any Claude Code session that uses
-the profile first. The
+directory, and returns the selection to `default` if that profile is still
+selected. Shared history folders stay in place. Close any Claude Code session
+that uses the profile first. The effect of logout on another profile signed in
+to the same account has not been verified. The
 [account selection design](https://github.com/dannyota/duolane/blob/HEAD/docs/design/claude-accounts.md)
 describes the checks and limits.

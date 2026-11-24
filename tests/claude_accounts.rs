@@ -14,15 +14,30 @@ case "$*" in
 "auth login --claudeai") exit 0 ;;
 "auth logout")
     [ "$LOGOUT_FAIL" = 1 ] && exit 1
+    if [ -n "$WAIT_DIR" ]; then
+        : >"$WAIT_DIR/started"
+        while [ ! -e "$WAIT_DIR/release" ]; do /bin/sleep 0.05; done
+    fi
     printf '%s' "$CLAUDE_CONFIG_DIR" >"$LOGOUT_FILE"
     ;;
 "auth status --json")
+    if [ -n "$STATUS_READY" ]; then
+        printf '%s' "$$" >"$STATUS_READY"
+        exec /bin/sleep 3
+    fi
+    if [ "$STATUS_HANG" = 1 ]; then
+        printf '{"loggedIn":true,"email":"late@example.com"}'
+        exec 1>&-
+        /bin/sleep 20
+        exit 0
+    fi
     [ -n "$ANTHROPIC_API_KEY" ] && exit 3
     case "$CLAUDE_CONFIG_DIR" in
     */backup) printf '{"loggedIn":true,"email":"second@example.com","orgId":"org-2","subscriptionType":"max","loginExpiresAt":"2999-01-01T00:00:00Z"}' ;;
     */copy | "") printf '{"loggedIn":true,"email":"First@example.com","orgId":"org-1","subscriptionType":"team"}' ;;
     */evil) printf '{"loggedIn":true,"email":"evil\\u001b[31m@example.com","subscriptionType":"pro"}' ;;
     */big) /usr/bin/yes | /usr/bin/head -c 70000 ;;
+    */badexit) printf '{"loggedIn":true,"email":"bad@example.com"}'; exit 2 ;;
     *)
         printf '{"loggedIn":false}'
         exit 1
@@ -124,6 +139,79 @@ fn claude_accounts_list_shows_accounts_selection_and_duplicates() {
 }
 
 #[test]
+fn claude_accounts_status_interrupt_cleans_up_child() {
+    use std::time::{Duration, Instant};
+    for signal in [rustix::process::Signal::HUP, rustix::process::Signal::TERM] {
+        let sandbox = Sandbox::new();
+        let ready = sandbox.root.path().join("status-ready");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_duolane"))
+            .env_clear()
+            .env("HOME", sandbox.root.path())
+            .env("PATH", sandbox.root.path().join("bin"))
+            .env("DUOLANE_CONFIG_DIR", sandbox.config())
+            .env("DUOLANE_STATE_DIR", sandbox.root.path().join("state"))
+            .env("STATUS_READY", &ready)
+            .args(["accounts", "list"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid = std::fs::read_to_string(&ready).ok();
+        let sent = if pid.is_some() && child.try_wait().unwrap().is_none() {
+            rustix::process::kill_process(
+                rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+                signal,
+            )
+            .is_ok()
+        } else {
+            false
+        };
+        let status = child.wait().unwrap();
+        let alive = |pid: &str| {
+            Command::new("/bin/kill")
+                .args(["-0", pid])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        let cleaned = pid.as_deref().is_some_and(|pid| !alive(pid));
+        if let Some(pid) = &pid {
+            let deadline = Instant::now() + Duration::from_secs(4);
+            while alive(pid) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        assert!(sent && !status.success() && cleaned);
+    }
+}
+
+#[test]
+fn claude_accounts_status_rejects_timeout_after_json() {
+    let sandbox = Sandbox::new();
+    let started = std::time::Instant::now();
+    let output = sandbox.run(&["accounts", "list"], &[("STATUS_HANG", "1")]);
+    assert!(output.status.success());
+    assert!(started.elapsed() < std::time::Duration::from_secs(15));
+    assert!(row(&text(&output.stdout), "default").contains("unknown"));
+}
+
+#[test]
+fn claude_accounts_status_rejects_unexpected_exit() {
+    let sandbox = Sandbox::new();
+    sandbox.login("badexit");
+    let output = sandbox.run(&["accounts", "list"], &[]);
+    assert!(output.status.success());
+    assert!(row(&text(&output.stdout), "badexit").contains("unknown"));
+}
+
+#[test]
 fn claude_accounts_login_reports_account_and_duplicate() {
     let sandbox = Sandbox::new();
     let backup = sandbox.login("backup");
@@ -132,6 +220,57 @@ fn claude_accounts_login_reports_account_and_duplicate() {
     let copy = sandbox.login("copy");
     assert!(text(&copy.stdout).contains("First@example.com"));
     assert!(text(&copy.stderr).contains("same account as default"));
+}
+
+#[test]
+fn claude_accounts_remove_preserves_concurrent_selection() {
+    let sandbox = Sandbox::new();
+    sandbox.login("backup");
+    sandbox.login("copy");
+    assert!(
+        sandbox
+            .run(&["accounts", "use", "backup"], &[])
+            .status
+            .success()
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_duolane"))
+        .env_clear()
+        .env("HOME", sandbox.root.path())
+        .env("PATH", sandbox.root.path().join("bin"))
+        .env("DUOLANE_CONFIG_DIR", sandbox.config())
+        .env("DUOLANE_STATE_DIR", sandbox.root.path().join("state"))
+        .env("LOGOUT_FILE", sandbox.logout_file())
+        .env("WAIT_DIR", sandbox.root.path())
+        .args(["accounts", "remove", "backup", "--yes"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !sandbox.root.path().join("started").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let started = sandbox.root.path().join("started").exists();
+    let stable_lock = sandbox
+        .config()
+        .join("claude-accounts/.profile-backup.lock")
+        .is_file();
+    let busy = !sandbox
+        .run(&["accounts", "login", "backup"], &[])
+        .status
+        .success();
+    let selected = sandbox
+        .run(&["accounts", "use", "copy"], &[])
+        .status
+        .success();
+    std::fs::write(sandbox.root.path().join("release"), b"").unwrap();
+    let removed = child.wait().unwrap().success();
+    assert!(started && stable_lock && busy && selected && removed);
+    assert_eq!(
+        std::fs::read(sandbox.config().join("claude-accounts/.selected")).unwrap(),
+        b"copy\n"
+    );
 }
 
 #[test]

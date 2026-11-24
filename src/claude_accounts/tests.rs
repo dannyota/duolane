@@ -131,8 +131,8 @@ fn claude_accounts_login_unlocks_after_descendant_survives() {
         let status = child.wait().unwrap();
         let pid = std::fs::read_to_string(&pid_file).unwrap();
         let path = config.join("claude-accounts/backup");
-        let dir = File::open(&path).unwrap();
-        let unlocked = store::try_lock(&dir).is_ok();
+        let dir = File::open(config.join("claude-accounts")).unwrap();
+        let unlocked = store::lock(&dir, ".profile-backup.lock", false).is_ok();
         let alive = Command::new("/bin/kill")
             .args(["-0", &pid])
             .status()
@@ -241,6 +241,10 @@ fn claude_accounts_resolve_probe() {
         std::env::set_var("DUOLANE_STATE_DIR", std::env::var_os("TEST_STATE").unwrap());
     }
     let expected = std::env::var("EXPECTED").unwrap();
+    if expected == "changed" {
+        assert!(resolve_named_selection("backup").is_err());
+        return;
+    }
     let result = selected_profile();
     match expected.as_str() {
         "none" => assert!(matches!(result, Ok(None))),
@@ -287,6 +291,9 @@ fn claude_accounts_resolution_precedence_and_lock() {
     let selector = store::checked_dir(&selector_dir, false).unwrap().unwrap();
     store::private_replace(&selector, ".selected", b"backup\n").unwrap();
     run(&alias, "some", false);
+    store::private_replace(&selector, ".selected", b"default\n").unwrap();
+    run(&config, "changed", false);
+    store::private_replace(&selector, ".selected", b"backup\n").unwrap();
     run(&config, "some", false);
     #[cfg(target_os = "macos")]
     {
@@ -300,7 +307,7 @@ fn claude_accounts_resolution_precedence_and_lock() {
     run(&config, "error", false);
     store::private_replace(&selector, ".selected", b"backup\n").unwrap();
     run(&other, "none", false);
-    let lock = store::try_lock(&dir).unwrap();
+    let lock = store::lock(&selector, ".profile-backup.lock", false).unwrap();
     run(&config, "error", false);
     drop(lock);
     store::private_replace(&selector, ".selected", &[b'x'; 65]).unwrap();

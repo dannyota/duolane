@@ -1,14 +1,86 @@
 use crossterm::style::Stylize;
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 const STATUS_LIMIT: u64 = 64 * 1024;
 const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 const FIELD_CHARS: usize = 64;
 const PARALLEL_QUERIES: usize = 8;
+
+static CANCELLED: AtomicBool = AtomicBool::new(false);
+static SIGNAL_LOCK: Mutex<()> = Mutex::new(());
+
+extern "C" fn cancel_signal(_: libc::c_int) {
+    CANCELLED.store(true, Ordering::Relaxed);
+}
+
+struct Signals {
+    _lock: MutexGuard<'static, ()>,
+    interrupt: libc::sigaction,
+    terminate: libc::sigaction,
+    hangup: libc::sigaction,
+    active: bool,
+}
+
+impl Signals {
+    fn install() -> anyhow::Result<Self> {
+        let lock = SIGNAL_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("signal lock poisoned"))?;
+        CANCELLED.store(false, Ordering::Relaxed);
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = cancel_signal as *const () as usize;
+            libc::sigemptyset(&mut action.sa_mask);
+            let mut interrupt = std::mem::zeroed();
+            let mut terminate = std::mem::zeroed();
+            let mut hangup = std::mem::zeroed();
+            if libc::sigaction(libc::SIGINT, &action, &mut interrupt) != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            if libc::sigaction(libc::SIGTERM, &action, &mut terminate) != 0 {
+                let error = std::io::Error::last_os_error();
+                libc::sigaction(libc::SIGINT, &interrupt, std::ptr::null_mut());
+                return Err(error.into());
+            }
+            if libc::sigaction(libc::SIGHUP, &action, &mut hangup) != 0 {
+                let error = std::io::Error::last_os_error();
+                libc::sigaction(libc::SIGTERM, &terminate, std::ptr::null_mut());
+                libc::sigaction(libc::SIGINT, &interrupt, std::ptr::null_mut());
+                return Err(error.into());
+            }
+            Ok(Self {
+                _lock: lock,
+                interrupt,
+                terminate,
+                hangup,
+                active: true,
+            })
+        }
+    }
+
+    fn restore(&mut self) {
+        if self.active {
+            unsafe {
+                libc::sigaction(libc::SIGINT, &self.interrupt, std::ptr::null_mut());
+                libc::sigaction(libc::SIGTERM, &self.terminate, std::ptr::null_mut());
+                libc::sigaction(libc::SIGHUP, &self.hangup, std::ptr::null_mut());
+            }
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for Signals {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Account {
@@ -52,8 +124,8 @@ fn parse(bytes: &[u8]) -> Option<Account> {
         value
             .get(name)
             .and_then(|field| field.as_str())
-            .map(clean)
             .filter(|text| !text.is_empty())
+            .map(str::to_owned)
     };
     Some(Account {
         signed_in: value.get("loggedIn")?.as_bool()?,
@@ -68,33 +140,66 @@ fn parse(bytes: &[u8]) -> Option<Account> {
 }
 
 fn query(config: Option<&Path>) -> Option<Account> {
+    if CANCELLED.load(Ordering::Relaxed) {
+        return None;
+    }
     let mut child = super::claude_command(config)
         .args(["auth", "status", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
         .ok()?;
     let deadline = Instant::now() + STATUS_TIMEOUT;
-    let (sender, receiver) = mpsc::channel();
-    if let Some(stdout) = child.stdout.take() {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let read = stdout.take(STATUS_LIMIT + 1).read_to_end(&mut bytes);
-            let _ = sender.send(read.ok().map(|_| bytes));
-        });
+    let mut reaped = false;
+    let result = (|| {
+        let mut stdout = child.stdout.take()?;
+        rustix::fs::fcntl_setfl(&stdout, rustix::fs::OFlags::NONBLOCK).ok()?;
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            if CANCELLED.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                return None;
+            }
+            match stdout.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    bytes.extend_from_slice(&buffer[..n]);
+                    if bytes.len() as u64 > STATUS_LIMIT {
+                        return None;
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return None,
+            }
+        }
+        loop {
+            if CANCELLED.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                return None;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    reaped = true;
+                    let account = parse(&bytes)?;
+                    return (status.code() == Some(if account.signed_in { 0 } else { 1 }))
+                        .then_some(account);
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                Err(_) => return None,
+            }
+        }
+    })();
+    if !reaped {
+        if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+        let _ = child.wait();
     }
-    let bytes = receiver
-        .recv_timeout(STATUS_TIMEOUT)
-        .ok()
-        .flatten()
-        .filter(|bytes| bytes.len() as u64 <= STATUS_LIMIT);
-    while bytes.is_some() && Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    parse(&bytes?)
+    result
 }
 
 fn identity(account: &Account) -> Option<(String, Option<&str>)> {
@@ -118,7 +223,8 @@ fn mark_duplicates(entries: &mut [Entry]) {
     }
 }
 
-pub(super) fn entries(profiles: &[(String, PathBuf)]) -> Vec<Entry> {
+pub(super) fn entries(profiles: &[(String, PathBuf)]) -> anyhow::Result<Vec<Entry>> {
+    let mut signals = Signals::install()?;
     let mut targets: Vec<(String, Option<&Path>)> = vec![("default".into(), None)];
     targets.extend(
         profiles
@@ -127,6 +233,9 @@ pub(super) fn entries(profiles: &[(String, PathBuf)]) -> Vec<Entry> {
     );
     let mut entries = Vec::with_capacity(targets.len());
     for chunk in targets.chunks(PARALLEL_QUERIES) {
+        if CANCELLED.load(Ordering::Relaxed) {
+            break;
+        }
         let accounts: Vec<Option<Account>> = std::thread::scope(|scope| {
             let handles: Vec<_> = chunk
                 .iter()
@@ -145,8 +254,13 @@ pub(super) fn entries(profiles: &[(String, PathBuf)]) -> Vec<Entry> {
             });
         }
     }
+    signals.restore();
+    anyhow::ensure!(
+        !CANCELLED.load(Ordering::Relaxed),
+        "account status interrupted"
+    );
     mark_duplicates(&mut entries);
-    entries
+    Ok(entries)
 }
 
 fn remaining(expires: jiff::Timestamp, now: jiff::Timestamp) -> String {
@@ -174,8 +288,13 @@ pub(super) fn table(entries: &[Entry], selected: &str, now: jiff::Timestamp, col
                     ("not signed in".into(), String::new(), String::new())
                 }
                 Some(account) => (
-                    account.email.clone().unwrap_or_else(|| "signed in".into()),
-                    account.plan.clone().unwrap_or_default(),
+                    account
+                        .email
+                        .as_deref()
+                        .map(clean)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "signed in".into()),
+                    account.plan.as_deref().map(clean).unwrap_or_default(),
                     account
                         .expires
                         .map(|expires| remaining(expires, now))
@@ -266,10 +385,15 @@ pub(super) fn describe(entries: &[Entry], name: &str) -> (Option<String>, Option
     let Some(account) = entry.account.as_ref().filter(|account| account.signed_in) else {
         return (None, None);
     };
-    let summary = account.email.as_ref().map(|email| match &account.plan {
-        Some(plan) => format!("{email} ({plan})"),
-        None => email.clone(),
-    });
+    let summary = account
+        .email
+        .as_deref()
+        .map(clean)
+        .filter(|email| !email.is_empty())
+        .map(|email| match &account.plan {
+            Some(plan) => format!("{email} ({})", clean(plan)),
+            None => email,
+        });
     let key = identity(account);
     let twin = key.as_ref().and_then(|key| {
         entries
@@ -327,6 +451,16 @@ mod tests {
             describe(&entries, "default"),
             (Some("a@example.com".into()), Some("copy".into()))
         );
+    }
+
+    #[test]
+    fn claude_accounts_roster_distinguishes_long_emails() {
+        let prefix = "a".repeat(64);
+        let first = format!(r#"{{"loggedIn":true,"email":"{prefix}1"}}"#);
+        let second = format!(r#"{{"loggedIn":true,"email":"{prefix}2"}}"#);
+        let mut entries = vec![entry("one", &first), entry("two", &second)];
+        mark_duplicates(&mut entries);
+        assert!(entries[1].same_as.is_none());
     }
 
     #[test]

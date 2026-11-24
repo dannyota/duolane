@@ -111,10 +111,14 @@ mod unix {
         Ok(Some((path, dir)))
     }
     fn profile(name: &str, create: bool) -> Result<Option<Profile>> {
+        ensure!(valid_name(name), "invalid profile name");
+        let Some(parent) = selector_dir(create)? else {
+            return Ok(None);
+        };
+        let lock = store::lock(&parent, &format!(".profile-{name}.lock"), false)?;
         let Some((path, dir)) = profile_dir(name, create)? else {
             return Ok(None);
         };
-        let lock = store::try_lock(&dir)?;
         if !create && store::private_read(&dir, ".duolane-ready", 64)?.is_none() {
             return Ok(None);
         }
@@ -258,7 +262,7 @@ mod unix {
     }
 
     pub fn announce(name: &str) -> Result<()> {
-        let entries = roster::entries(&registered()?);
+        let entries = roster::entries(&registered()?)?;
         let (summary, twin) = roster::describe(&entries, name);
         match summary {
             Some(summary) => println!("Signed in to {name} as {summary}."),
@@ -276,7 +280,7 @@ mod unix {
 
     pub fn list() -> Result<()> {
         let selected = current_selection()?;
-        let entries = roster::entries(&registered()?);
+        let entries = roster::entries(&registered()?)?;
         let table = roster::table(&entries, &selected, jiff::Timestamp::now(), color());
         println!("{}", table.header);
         for row in table.rows {
@@ -290,11 +294,13 @@ mod unix {
     }
 
     pub fn remove(name: String, yes: bool) -> Result<()> {
+        ensure!(valid_name(&name), "invalid profile name");
+        let selector = selector_dir(false)?.context("unknown profile")?;
+        let lock = store::lock(&selector, &format!(".profile-{name}.lock"), false)?;
         let Some((path, dir)) = profile_dir(&name, false)? else {
             bail!("unknown profile");
         };
-        let lock = store::try_lock(&dir)?;
-        let selected = read_selection()?;
+        read_selection()?;
         if !yes {
             ensure!(
                 std::io::stdin().is_terminal(),
@@ -311,29 +317,37 @@ mod unix {
                 return Ok(());
             }
         }
-        let status = claude_command(Some(&path))
-            .args(["auth", "logout"])
-            .status()?;
-        ensure!(status.success(), "Claude logout failed; profile kept");
-        let current = store::checked_dir(&path, false)?.context("profile missing")?;
-        let a = dir.metadata()?;
-        let b = current.metadata()?;
-        ensure!(
-            a.dev() == b.dev() && a.ino() == b.ino(),
-            "profile changed during removal"
-        );
-        if selected.as_deref() == Some(name.as_str()) {
-            let selector = selector_dir(false)?.context("selector unavailable")?;
-            store::private_replace(&selector, ".selected", b"default\n")?;
-        }
-        std::fs::remove_dir_all(&path)?;
-        drop(lock);
+        let mut command = claude_command(Some(&path));
+        command.args(["auth", "logout"]);
+        inherit_login_lock(&mut command, &lock)?;
+        let result = (|| -> Result<()> {
+            let status = command.status()?;
+            drop(command);
+            ensure!(status.success(), "Claude logout failed; profile kept");
+            let selector_lock = store::lock(&selector, ".selector.lock", true)?;
+            let selected = read_selection()?;
+            let current = store::checked_dir(&path, false)?.context("profile missing")?;
+            let a = dir.metadata()?;
+            let b = current.metadata()?;
+            ensure!(
+                a.dev() == b.dev() && a.ino() == b.ino(),
+                "profile changed during removal"
+            );
+            if selected.as_deref() == Some(name.as_str()) {
+                store::private_replace(&selector, ".selected", b"default\n")?;
+            }
+            std::fs::remove_dir_all(&path)?;
+            drop(selector_lock);
+            Ok(())
+        })();
+        let unlock = rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock);
+        result.and(unlock.map_err(Into::into))?;
         println!("Removed {name}.");
         Ok(())
     }
 
     fn choose(profiles: &[(String, PathBuf)], selected: &str) -> Result<Option<String>> {
-        let entries = roster::entries(profiles);
+        let entries = roster::entries(profiles)?;
         let table = roster::table(&entries, selected, jiff::Timestamp::now(), false);
         let start = entries
             .iter()
@@ -384,8 +398,14 @@ mod unix {
                 .context("invalid choice")?
                 .clone()
         };
-        read_selection()?;
+        let _profile = if name == "default" {
+            None
+        } else {
+            Some(profile(&name, false)?.context("unknown profile")?)
+        };
         let dir = selector_dir(true)?.context("selector unavailable")?;
+        let _selector_lock = store::lock(&dir, ".selector.lock", true)?;
+        read_selection()?;
         store::private_replace(&dir, ".selected", format!("{name}\n").as_bytes())?;
         println!("The next duolane claude launch uses {name}.");
         Ok(())
@@ -482,9 +502,15 @@ mod unix {
         if name == "default" {
             return Ok(None);
         }
-        Ok(Some(
-            profile(&name, false)?.context("selected profile is not registered")?,
-        ))
+        resolve_named_selection(&name).map(Some)
+    }
+    fn resolve_named_selection(name: &str) -> Result<Profile> {
+        let profile = profile(name, false)?.context("selected profile is not registered")?;
+        ensure!(
+            read_selection()?.as_deref() == Some(name),
+            "selection changed during launch; retry"
+        );
+        Ok(profile)
     }
     #[cfg(test)]
     mod tests {

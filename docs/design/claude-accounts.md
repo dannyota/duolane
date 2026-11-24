@@ -11,14 +11,11 @@ switches a running process or falls back on a quota error. Codex is unchanged.
   `<duolane config>/claude-accounts/<name>`. A name is 1–32 lowercase ASCII
   letters, digits, hyphens, or underscores, starts with a letter or digit, and
   is not `default`. Reusing a name signs in to that profile again. A new profile
-  is selectable only after the login command succeeds. Concurrent managed logins
-  for one profile are refused. The lock is released when the login command
-  returns, even if it left a background process; if duolane itself is killed,
-  the lock lasts until the login command and its children exit. Close any Claude
-  Code process using that profile before logging in again. After a successful
-  login it prints the account that signed in and warns when another profile
-  holds the same account, because the browser signs in whichever claude.ai
-  account is already open.
+  is selectable only after the login command succeeds. Close any Claude Code
+  process using that profile before logging in again. After a successful login
+  it prints the account that signed in and warns when another profile holds the
+  same account, because the browser signs in whichever claude.ai account is
+  already open.
 - `duolane accounts use [name]` accepts `default` or a registered profile name,
   or offers them in a menu. On a terminal the menu shows each profile's account
   and moves with the arrow keys; Esc leaves the selection unchanged. Without a
@@ -34,15 +31,24 @@ switches a running process or falls back on a quota error. Codex is unchanged.
 - `duolane accounts remove <name>` signs a named profile out with
   `claude auth logout`, then deletes its directory. It asks for confirmation on
   a terminal unless `--yes` is given, and refuses `default`. If logout fails,
-  the profile stays. A removed profile that was selected resets the selection to
-  `default`. Deleting removes the profile's links to shared project folders,
-  never the folders they point to. Close any Claude Code process using the
-  profile first.
+  the profile stays. If the profile is still selected after logout, removal
+  resets the selection to `default`. Deleting removes the profile's links to
+  shared project folders, never the folders they point to. Close any Claude Code
+  process using the profile first.
 - `duolane claude` still uses the intercept wrapper. If a named account is
   selected, it sets `CLAUDE_CONFIG_DIR` for that child only and considers the
   selected profile's `settings.json` for the model picker. Plain `claude`
   ignores the selection. An explicitly set `CLAUDE_CONFIG_DIR` takes precedence
   and bypasses account selection.
+
+Managed login, selection, launch preparation, and removal take a per-profile
+lock outside the profile directory. Login and logout inherit the lock. If
+duolane is killed, the lock lasts until the child and any descendants still
+holding it exit. On normal completion duolane releases it once the operation is
+complete. Removal and `use` serialize changes to the selector, so removing one
+profile does not undo a choice of another profile made during logout. Launch
+preparation rechecks the selected name after taking its profile lock. A changed
+selection stops the launch instead of opening a different login.
 
 With no selection, or with `default`, startup creates no profile or transcript
 links. Removing the duolane config directory removes the profiles and the
@@ -80,13 +86,17 @@ as signed in or unknown.
   variables, so they describe the stored login, not the shell's override. They
   also run without `DUOLANE_OPENAI_API_KEY`, as the login and launch children
   do.
-- Each status run has a 10 second limit and a 64 KiB output limit. A run that
-  exceeds either, or prints anything else, shows the profile as unknown and
-  never fails the command.
+- Each status run has a 10 second limit and a 64 KiB output limit. The child
+  must exit within the deadline with the expected status code for its JSON. A
+  failed check shows the profile as unknown. On interruption, duolane stops the
+  active status process groups and waits for the children before returning an
+  error. The Unix roster uses the locked `libc` version to restore the previous
+  signal handlers when collection finishes.
 - Displayed fields drop control and bidirectional formatting characters and keep
   at most 64 characters, so status text cannot rewrite the terminal.
-- Two profiles are the same account when their email, compared without case, and
-  organization both match.
+- Two signed-in profiles are the same account when their full email, compared
+  without case, and organization both match. Display truncation does not affect
+  that comparison.
 
 ## One transcript per session
 

@@ -496,7 +496,7 @@ fn claude_accounts_login_registers_only_success() {
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(config.join("claude-accounts/backup/.duolane-lock"))
+        .open(config.join("claude-accounts/.profile-backup.lock"))
         .unwrap();
     rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
     assert!(!run("backup", "0").status.success());
@@ -619,13 +619,16 @@ fn claude_accounts_selects_default_and_named() {
     assert_eq!(std::fs::read(&selector).unwrap(), b"backup\n");
     assert!(!run(&["accounts", "use"], "unknown\n").status.success());
     assert_eq!(std::fs::read(&selector).unwrap(), b"backup\n");
+    assert!(run(&["accounts", "login"], "other\n").status.success());
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(config.join("claude-accounts/backup/.duolane-lock"))
+        .open(config.join("claude-accounts/.profile-backup.lock"))
         .unwrap();
     rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
-    assert!(run(&["accounts", "use"], "1\n").status.success());
+    assert!(!run(&["accounts", "use", "backup"], "").status.success());
+    assert!(run(&["accounts", "use", "other"], "").status.success());
+    assert!(run(&["accounts", "use", "default"], "").status.success());
     drop(lock);
     assert_eq!(std::fs::read(&selector).unwrap(), b"default\n");
     std::fs::write(&selector, b"stale\n").unwrap();
