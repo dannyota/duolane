@@ -10,6 +10,21 @@
 | A tool call cannot continue after a backend switch | Finish or restart the pending step before switching providers.                                                                                                                         |
 | The intercept certificate is expired               | Stop the proxy, run `duolane intercept renew`, then restart the proxy and Claude Code.                                                                                                 |
 
+## Unsafe directory permissions
+
+On Unix, `duolane serve --intercept` and `duolane claude` reject config paths
+that other users can write to, except safe sticky parents such as `/tmp`.
+Version 0.6.1 could create its own config directory with mode `0775` under
+`umask 0002`.
+
+Remove group and other write permissions from the reported directory only if you
+own it and it is meant to be private: `chmod -- go-w <directory>`. If the error
+requires mode `0700`, use `chmod -- 700 <directory>` instead. If the directory
+is shared, set `DUOLANE_CONFIG_DIR` to a private location with safe parents and
+use that same setting for the server and launcher. Do not change permissions
+recursively. On Linux, `namei -l` shows each component's permissions if an older
+release does not name the rejected path.
+
 See [Connections](Connections.md) for mode setup and
 [Configuration](Configuration.md) for paths and ports. Attach the monitor with
 `duolane monitor`; logs live in duolane's state directory.

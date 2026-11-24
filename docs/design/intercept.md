@@ -204,9 +204,12 @@ only by the owner:
 | `proxy-password` | Random proxy password                         |
 | `manifest.json`  | Each file and setting duolane created, hashed |
 
-On Unix, `duolane serve` and the `duolane intercept` commands hold an exclusive
-lock on the duolane config directory while they create, renew, or delete these
-files, so two of them never interleave.
+On Unix, `duolane serve` and the `duolane intercept` commands open the config
+root with the same directory checks as account selection. They create missing
+directories with mode `0700`, not the shell's default permissions. They report
+the path and mode of a directory with unsafe permissions without changing it.
+They hold an exclusive lock on the checked config directory while they create,
+renew, or delete the intercept files.
 
 ## Setup and cleanup
 

@@ -22,10 +22,7 @@ pub(super) fn acquire(dir: &Path, wait: Duration) -> anyhow::Result<Lock> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent)
-        .map_err(|error| anyhow::anyhow!("cannot create {}: {error}", parent.display()))?;
-    let file = std::fs::File::open(parent)
-        .map_err(|error| anyhow::anyhow!("cannot open {}: {error}", parent.display()))?;
+    let file = crate::claude_accounts::store::checked_config_dir(parent)?;
     let deadline = std::time::Instant::now() + wait;
     loop {
         match flock(&file, FlockOperation::NonBlockingLockExclusive) {

@@ -102,6 +102,86 @@ impl Sandbox {
     }
 }
 
+#[test]
+fn intercept_config_permissions_under_shared_umask() {
+    let sandbox = Sandbox::new(None);
+    let port = free_port();
+    let mut command = sandbox.command(port);
+    command.args(["serve", "--intercept", "--no-monitor", "--port", "0"]);
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        command.pre_exec(|| {
+            rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o002));
+            Ok(())
+        });
+    }
+    struct Server(std::process::Child);
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut server = Server(command.spawn().unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if sandbox.intercept().join("ca.pem").exists()
+            && std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+        {
+            break;
+        }
+        assert!(
+            server.0.try_wait().unwrap().is_none(),
+            "server exited before bootstrap"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "server bootstrap timed out"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(
+        std::fs::metadata(&sandbox.config)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    let mut wrapper = sandbox.command(port);
+    let result = wrapper
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .args(["claude", "-p", "hi"])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", text(&result.stderr));
+}
+
+#[test]
+fn intercept_rejects_existing_writable_config_with_remediation() {
+    let sandbox = Sandbox::new(None);
+    std::fs::create_dir(&sandbox.config).unwrap();
+    std::fs::set_permissions(&sandbox.config, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let result = sandbox.run(&["intercept", "setup"]);
+    let error = text(&result.stderr);
+    assert!(!result.status.success());
+    assert!(
+        error.contains(&format!("{:?}", sandbox.config.canonicalize().unwrap())),
+        "{error}"
+    );
+    assert!(error.contains("0775"));
+    assert!(error.contains("chmod -- go-w <directory>"));
+    assert_eq!(
+        std::fs::metadata(&sandbox.config)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o775
+    );
+}
+
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }

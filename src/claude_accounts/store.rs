@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Component, Path, PathBuf};
 
-fn check_directory(file: &File, leaf: bool) -> Result<()> {
+fn check_directory(file: &File, leaf: bool, strict_hint: bool) -> Result<()> {
     let stat = fs::fstat(file)?;
     ensure!(
         FileType::from_raw_mode(stat.st_mode) == FileType::Directory,
@@ -23,7 +23,13 @@ fn check_directory(file: &File, leaf: bool) -> Result<()> {
     ensure!(
         !mode.intersects(Mode::WGRP | Mode::WOTH)
             || (!leaf && mode.contains(Mode::SVTX) && (stat.st_uid == 0 || stat.st_uid == uid)),
-        "unsafe directory permissions"
+        "unsafe directory permissions (mode {:04o}); if this is your private directory, use `{}`, otherwise use a private config path",
+        stat.st_mode & 0o7777,
+        if strict_hint {
+            "chmod -- 700 <directory>"
+        } else {
+            "chmod -- go-w <directory>"
+        }
     );
     check_acl(file)?;
     Ok(())
@@ -97,14 +103,22 @@ pub(crate) fn checked_dir(path: &Path, create: bool) -> Result<Option<File>> {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) fn checked_strict_dir(path: &Path, create: bool) -> Result<Option<File>> {
-    let dir = walk(path, create, false, true)?.0;
+    let (dir, canonical) = walk(path, create, false, true)?;
     if let Some(dir) = &dir {
         ensure!(
             fs::fstat(dir)?.st_mode & 0o7777 == 0o700,
-            "unsafe directory permissions"
+            "unsafe directory permissions for {:?} (mode {:04o}); if this is your private directory, use `chmod -- 700 <directory>`, otherwise use a private config path",
+            canonical,
+            fs::fstat(dir)?.st_mode & 0o7777
         );
     }
     Ok(dir)
+}
+
+pub(crate) fn checked_config_dir(path: &Path) -> Result<File> {
+    walk(path, true, true, false)?
+        .0
+        .context("missing config directory")
 }
 
 pub(crate) fn checked_canonical_dir(path: &Path, create: bool) -> Result<Option<PathBuf>> {
@@ -154,7 +168,7 @@ fn walk(
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )?);
-    check_directory(&root, false)?;
+    check_directory(&root, false, false)?;
     let mut stack = vec![root];
     let mut canonical = PathBuf::from("/");
     let mut links = 0;
@@ -237,15 +251,17 @@ fn walk(
                 return Err(err.into());
             }
         };
-        check_directory(&child, false)?;
+        canonical.push(&name);
+        check_directory(&child, false, strict && queue.is_empty())
+            .map_err(|err| anyhow::anyhow!("directory {:?}: {err:#}", canonical))?;
         if created {
             fs::fchmod(&child, Mode::RWXU)?;
         }
         stack.push(child);
-        canonical.push(name);
     }
     let dir = stack.pop().context("missing root")?;
-    check_directory(&dir, true)?;
+    check_directory(&dir, true, strict)
+        .map_err(|err| anyhow::anyhow!("directory {:?}: {err:#}", canonical))?;
     let canonical = checked_path(&dir, canonical)?;
     Ok((Some(dir), canonical))
 }
@@ -265,7 +281,7 @@ fn cleanup_new_directory(dir: &File, name: &std::ffi::OsStr, stat: &fs::Stat) ->
 
 pub(super) fn checked_child(dir: &File, name: &str, create: bool) -> Result<Option<File>> {
     check_name(name)?;
-    check_directory(dir, true)?;
+    check_directory(dir, true, false)?;
     let created = if create {
         match fs::mkdirat(dir, name, Mode::RWXU) {
             Ok(()) => Some(fs::statat(dir, name, fs::AtFlags::SYMLINK_NOFOLLOW)?),
@@ -290,7 +306,7 @@ pub(super) fn checked_child(dir: &File, name: &str, create: bool) -> Result<Opti
             return Err(err.into());
         }
     };
-    check_directory(&child, true)?;
+    check_directory(&child, true, false)?;
     Ok(Some(child))
 }
 
@@ -723,6 +739,21 @@ mod tests {
             std::fs::Permissions::from_mode(0o700),
         )
         .unwrap();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn strict_writable_leaf_suggests_exact_private_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap().join("private");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let error = checked_strict_dir(&path, false).unwrap_err().to_string();
+        assert!(error.contains("chmod -- 700 <directory>"), "{error}");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o775
+        );
     }
 
     #[test]
