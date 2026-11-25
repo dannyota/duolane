@@ -567,11 +567,23 @@ impl WebSocketConnectGate {
             let id = state.next_id;
             state.next_id = state.next_id.wrapping_add(1);
             state.waiting.push_back((id, request_id.to_owned()));
+            state.queue.push_back(id);
             self.queued.fetch_add(1, Ordering::Relaxed);
             ConnectWaiter { gate: self, id }
         };
-        let permit = self.handshakes.acquire().await.unwrap();
-        self.last_start.lock().unwrap().queue.push_back(waiter.id);
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.last_start.lock().unwrap().queue.front() == Some(&waiter.id) {
+                break;
+            }
+            tokio::select! { _ = &mut notified => {}, _ = tokio::time::sleep_until(queue_deadline) => return Err(()) }
+        }
+        let permit = tokio::time::timeout_at(queue_deadline, self.handshakes.acquire())
+            .await
+            .map_err(|_| ())?
+            .map_err(|_| ())?;
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
@@ -770,6 +782,14 @@ mod tests {
         });
         tokio::task::yield_now().await;
         assert_eq!(gate.queued_request_ids(), vec!["first", "second"]);
+        let (queue, waiting) = {
+            let state = gate.last_start.lock().unwrap();
+            (
+                state.queue.iter().copied().collect::<Vec<_>>(),
+                state.waiting.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(queue, waiting);
         first.abort();
         let _ = first.await;
         assert_eq!(gate.queued_request_ids(), vec!["second"]);
@@ -1618,6 +1638,7 @@ mod tests {
             &headers,
             Some(&continuation),
             Arc::default(),
+            None,
         );
 
         request_seen_rx.await.unwrap();

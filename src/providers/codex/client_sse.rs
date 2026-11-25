@@ -22,6 +22,7 @@ pub(super) struct BufferedHttpSseEvidence {
     skip_lf: bool,
     pub(super) hosted: bool,
     pub(super) terminal: bool,
+    pub(super) received_event: bool,
 }
 
 impl BufferedHttpSseEvidence {
@@ -40,6 +41,7 @@ impl BufferedHttpSseEvidence {
                         && let Ok(Some(event)) = decode_http_sse_frame(&self.frame)
                         && let Some(payload) = event.payload
                     {
+                        self.received_event = true;
                         self.hosted |= payload_confirms_hosted(&payload);
                         self.terminal |= super::events::event_is_terminal(&payload);
                     }
@@ -419,7 +421,16 @@ pub(super) fn record_live_stream_progress(ctx: &crate::provider::RequestContext,
             .filter_map(|line| line.strip_prefix(b"data: "))
             .filter_map(|data| serde_json::from_slice::<serde_json::Value>(data).ok())
             .any(|event| {
-                event["type"] == "content_block_delta"
+                (event["type"] == "content_block_delta"
+                    && match event["delta"]["type"].as_str() {
+                        Some("text_delta") => event["delta"]["text"]
+                            .as_str()
+                            .is_some_and(|text| !text.is_empty()),
+                        Some("thinking_delta") => event["delta"]["thinking"]
+                            .as_str()
+                            .is_some_and(|text| !text.is_empty()),
+                        _ => false,
+                    })
                     || (event["type"] == "content_block_start"
                         && event["content_block"]["type"]
                             .as_str()
@@ -521,7 +532,18 @@ mod tests {
             b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
         );
         assert!(monitor.snapshot().active[0].first_output_at.is_none());
+        record_live_stream_progress(&ctx, b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"\"}}\n\n");
+        record_live_stream_progress(&ctx, b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"signature_delta\",\"signature\":\"x\"}}\n\n");
+        assert!(monitor.snapshot().active[0].first_output_at.is_none());
         record_live_stream_progress(&ctx, b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n");
+        assert!(monitor.snapshot().active[0].first_output_at.is_some());
+        let monitor = crate::monitor::MonitorHandle::default();
+        monitor.request_started("r", None, None, crate::monitor::EndpointKind::Messages);
+        let ctx = crate::provider::RequestContext {
+            monitor: Some(monitor.clone()),
+            ..ctx
+        };
+        record_live_stream_progress(&ctx, b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\"}}\n\n");
         assert!(monitor.snapshot().active[0].first_output_at.is_some());
     }
 

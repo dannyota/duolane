@@ -59,6 +59,16 @@ async fn next_frame(
     let mut state = state?;
     loop {
         if let Some(frame) = state.output.pop_front() {
+            if let Some(data) = frame.strip_prefix(b"data: ")
+                && let Ok(value) = serde_json::from_slice::<Value>(data)
+                && value
+                    .pointer("/choices/0/delta/content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty())
+                && let Some(monitor) = state.ctx.monitor.as_ref()
+            {
+                monitor.first_output(&state.ctx.req_id);
+            }
             let next = if state.ended && state.output.is_empty() {
                 state.finish_capture("complete");
                 None
@@ -180,6 +190,9 @@ impl StreamState {
                 return;
             }
         };
+        if let Some(monitor) = self.ctx.monitor.as_ref() {
+            monitor.first_upstream_event(&self.ctx.req_id);
+        }
         if let Some(traffic) = self.ctx.traffic.as_deref() {
             traffic.write_json_event("040-upstream-event", &event);
         }
@@ -318,6 +331,45 @@ pub fn response_headers(upstream: &HeaderMap) -> HeaderMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn streamed_text_marks_first_output() {
+        let monitor = crate::monitor::MonitorHandle::default();
+        monitor.request_started(
+            "r",
+            None,
+            None,
+            crate::monitor::EndpointKind::ChatCompletions,
+        );
+        let ctx = RequestContext {
+            recovery_budget: Default::default(),
+            req_id: "r".into(),
+            session_id: None,
+            traffic: None,
+            monitor: Some(monitor.clone()),
+            passthrough: None,
+        };
+        let mut state = StreamState {
+            upstream: Box::pin(futures_util::stream::empty()),
+            pending: Vec::new(),
+            output: VecDeque::new(),
+            completion: CompletionState::new("test"),
+            role_sent: false,
+            include_usage: false,
+            ended: false,
+            generation_started: false,
+            ctx,
+            outcome: NativeResponseOutcome::default(),
+            body_idle_timeout_ms: 1000,
+            raw: Vec::new(),
+            raw_truncated: 0,
+        };
+        state.observe_event(r#"{"type":"response.output_text.delta","delta":"hello"}"#);
+        let (_, state) = next_frame(Some(state)).await.unwrap();
+        assert!(monitor.snapshot().active[0].first_output_at.is_none());
+        let (_, _state) = next_frame(state).await.unwrap();
+        assert!(monitor.snapshot().active[0].first_output_at.is_some());
+    }
 
     #[test]
     fn boundary_supports_split_safe_delimiters() {

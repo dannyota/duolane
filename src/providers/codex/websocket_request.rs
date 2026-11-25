@@ -151,6 +151,7 @@ pub(super) async fn codex_websocket_request(
         traffic,
         &ctx.recovery_budget,
         used_pooled,
+        Some(ctx),
     )
     .await;
     drop(guard);
@@ -378,6 +379,7 @@ pub(super) fn start_codex_websocket_events(
     headers: &HeaderMap,
     reservation: Option<&ContinuationReservation>,
     websocket_sent: Arc<std::sync::atomic::AtomicBool>,
+    ctx: Option<RequestContext>,
 ) -> CodexWebSocketEventStream {
     if let Some(tc) = ready.traffic.as_deref() {
         write_websocket_metadata_capture(tc, &ready.ws_url, reservation, ready.used_pooled);
@@ -447,7 +449,7 @@ pub(super) fn start_codex_websocket_events(
             return;
         }
         super::websocket_pool::record_websocket_send(used_pooled);
-        let (reusable, terminal_item) = stream_ws_events(
+        let (reusable, terminal_item) = stream_ws_events_monitored(
             &mut guard,
             idle_timeout_ms,
             traffic,
@@ -455,6 +457,7 @@ pub(super) fn start_codex_websocket_events(
             &budget,
             used_pooled,
             Some(&entry),
+            ctx.as_ref(),
         )
         .await;
         drop(guard);
@@ -576,6 +579,7 @@ pub(super) async fn codex_websocket_event_stream_prepared(
         headers,
         reservation,
         websocket_sent,
+        Some(ctx.clone()),
     ))
 }
 
@@ -764,6 +768,7 @@ mod tests {
             &HeaderMap::new(),
             None,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(weak_entry.upgrade().is_some());
@@ -836,6 +841,7 @@ mod tests {
             &HeaderMap::new(),
             Some(&reservation),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
         );
         let error = tokio::time::timeout(Duration::from_secs(2), events.recv())
             .await

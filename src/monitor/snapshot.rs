@@ -427,9 +427,11 @@ mod tests {
     fn first_upstream_event_survives_generation_restart() {
         let monitor = MonitorHandle::default();
         monitor.request_started("retry", None, None, EndpointKind::Messages);
+        monitor.first_upstream_event("retry");
         monitor.generation_started("retry");
         let first = serde_json::to_value(MonitorSnapshot::from(monitor.snapshot())).unwrap();
         std::thread::sleep(Duration::from_millis(2));
+        monitor.first_upstream_event("retry");
         monitor.generation_started("retry");
         let second = serde_json::to_value(MonitorSnapshot::from(monitor.snapshot())).unwrap();
         assert!(!first["active"][0]["first_upstream_event_at"].is_null());

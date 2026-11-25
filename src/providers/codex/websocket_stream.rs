@@ -98,10 +98,12 @@ where
         traffic,
         &Default::default(),
         false,
+        None,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn collect_ws_events_tracked<S>(
     ws: &mut WebSocketStream<S>,
     idle_timeout_ms: u64,
@@ -110,6 +112,7 @@ pub(super) async fn collect_ws_events_tracked<S>(
     traffic: Option<&TrafficCapture>,
     budget: &super::recovery::RecoveryBudget,
     reused: bool,
+    ctx: Option<&crate::provider::RequestContext>,
 ) -> Result<(Vec<u8>, Option<WsEvent>), CodexError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -123,6 +126,7 @@ where
         WEBSOCKET_KEEPALIVE_INTERVAL,
         budget,
         reused,
+        ctx,
     )
     .await
 }
@@ -137,6 +141,7 @@ async fn collect_ws_events_with_keepalive_interval<S>(
     keepalive_interval: Duration,
     budget: &super::recovery::RecoveryBudget,
     reused: bool,
+    ctx: Option<&crate::provider::RequestContext>,
 ) -> Result<(Vec<u8>, Option<WsEvent>), CodexError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -200,6 +205,11 @@ where
 
         match frame {
             Some(Ok(Message::Text(text))) => {
+                if let Some(ctx) = ctx
+                    && let Some(monitor) = ctx.monitor.as_ref()
+                {
+                    monitor.first_upstream_event(&ctx.req_id);
+                }
                 if sse_body.len().saturating_add(text.len()) > MAX_BUFFERED_RESPONSE_BYTES {
                     if budget.is_tracked()
                         && serde_json::from_str::<serde_json::Value>(&text)
@@ -394,6 +404,7 @@ fn completed_response_matches(event: &serde_json::Value, created_id: Option<&str
         && event.pointer("/response/id").and_then(|v| v.as_str()) == created_id
 }
 
+#[cfg(test)]
 pub(super) async fn stream_ws_events<S>(
     ws: &mut WebSocketStream<S>,
     idle_timeout_ms: u64,
@@ -402,6 +413,33 @@ pub(super) async fn stream_ws_events<S>(
     budget: &super::recovery::RecoveryBudget,
     reused: bool,
     pool_entry: Option<&Arc<PoolEntry>>,
+) -> (bool, Option<Result<serde_json::Value, CodexError>>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    stream_ws_events_monitored(
+        ws,
+        idle_timeout_ms,
+        traffic,
+        tx,
+        budget,
+        reused,
+        pool_entry,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn stream_ws_events_monitored<S>(
+    ws: &mut WebSocketStream<S>,
+    idle_timeout_ms: u64,
+    traffic: Option<Arc<TrafficCapture>>,
+    tx: &mpsc::Sender<Result<serde_json::Value, CodexError>>,
+    budget: &super::recovery::RecoveryBudget,
+    reused: bool,
+    pool_entry: Option<&Arc<PoolEntry>>,
+    ctx: Option<&crate::provider::RequestContext>,
 ) -> (bool, Option<Result<serde_json::Value, CodexError>>)
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -472,6 +510,11 @@ where
 
         match frame {
             Some(Ok(Message::Text(text))) => {
+                if let Some(ctx) = ctx
+                    && let Some(monitor) = ctx.monitor.as_ref()
+                {
+                    monitor.first_upstream_event(&ctx.req_id);
+                }
                 let parsed: serde_json::Value = match serde_json::from_str(&text) {
                     Ok(value) => value,
                     Err(_) => {
@@ -783,11 +826,19 @@ mod tests {
             } else {
                 Default::default()
             };
-            let error =
-                collect_ws_events_tracked(&mut client, 1_000, None, None, None, &budget, true)
-                    .await
-                    .err()
-                    .unwrap();
+            let error = collect_ws_events_tracked(
+                &mut client,
+                1_000,
+                None,
+                None,
+                None,
+                &budget,
+                true,
+                None,
+            )
+            .await
+            .err()
+            .unwrap();
             assert_eq!(error.detail.as_deref(), Some("hosted_tool_executed"));
             let result = Err(error);
             assert!(!super::super::recovery::buffered_replay_allowed(
@@ -1292,6 +1343,7 @@ mod tests {
             WEBSOCKET_KEEPALIVE_INTERVAL,
             &Default::default(),
             false,
+            None,
         )
         .await
         {
@@ -1333,6 +1385,7 @@ mod tests {
             Duration::from_millis(10),
             &Default::default(),
             false,
+            None,
         )
         .await
         {

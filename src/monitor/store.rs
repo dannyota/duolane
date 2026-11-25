@@ -133,10 +133,16 @@ impl MonitorStore {
                     active.status = RequestStatus::Upstream;
                 }
             }
+            MonitorEvent::FirstUpstreamEvent { request_id } => {
+                if let Some(active) = self.active.get_mut(&request_id) {
+                    active
+                        .first_upstream_event_at
+                        .get_or_insert_with(SystemTime::now);
+                }
+            }
             MonitorEvent::GenerationStarted { request_id } => {
                 if let Some(active) = self.active.get_mut(&request_id) {
                     let now = SystemTime::now();
-                    active.first_upstream_event_at.get_or_insert(now);
                     active.generation_started_at = Some(now);
                     active.generation_started_instant = Some(Instant::now());
                     active.generation_initial_output_tokens = active.output_tokens.unwrap_or(0);

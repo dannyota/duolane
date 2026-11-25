@@ -486,6 +486,28 @@ impl NativeResponseObserver {
     }
 
     fn record_event(&mut self, event: Option<&str>, value: Value) {
+        if let Some(monitor) = self.ctx.monitor.as_ref() {
+            monitor.first_upstream_event(&self.ctx.req_id);
+        }
+        let kind = value.get("type").and_then(Value::as_str);
+        let meaningful = match kind {
+            Some(
+                "response.output_text.delta"
+                | "response.reasoning_text.delta"
+                | "response.reasoning_summary_text.delta",
+            ) => value
+                .get("delta")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.is_empty()),
+            Some("response.output_item.added") => value
+                .pointer("/item/type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind == "function_call" || kind.ends_with("_call")),
+            _ => false,
+        };
+        if meaningful && let Some(monitor) = self.ctx.monitor.as_ref() {
+            monitor.first_output(&self.ctx.req_id);
+        }
         self.update_usage(&value);
         self.update_outcome(&value);
         let mut captured = value;
@@ -640,6 +662,26 @@ mod tests {
             monitor: None,
             passthrough: None,
         }
+    }
+
+    #[test]
+    fn streamed_text_marks_first_output() {
+        let monitor = crate::monitor::MonitorHandle::default();
+        monitor.request_started(
+            "native-test",
+            None,
+            None,
+            crate::monitor::EndpointKind::Responses,
+        );
+        let mut context = observer_context();
+        context.monitor = Some(monitor.clone());
+        let mut observer =
+            NativeResponseObserver::new(context, true, NativeResponseOutcome::default());
+        observer.observe(b"data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"\"}\n\n");
+        assert!(monitor.snapshot().active[0].first_output_at.is_none());
+        observer
+            .observe(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n");
+        assert!(monitor.snapshot().active[0].first_output_at.is_some());
     }
 
     #[test]

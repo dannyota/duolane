@@ -59,6 +59,15 @@ struct Document<'a> {
     usage: Option<Usage>,
     message: Option<Message>,
     content_block: Option<ContentBlock<'a>>,
+    delta: Option<Delta<'a>>,
+}
+
+#[derive(Deserialize)]
+struct Delta<'a> {
+    #[serde(rename = "type")]
+    kind: Option<&'a str>,
+    text: Option<String>,
+    thinking: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -205,8 +214,22 @@ impl Observer {
             }
             read = end + 1;
         }
+        self.monitor.first_upstream_event(&self.request_id);
         if let Ok(document) = serde_json::from_slice::<Document<'_>>(&self.buffer[..write]) {
-            if document.kind == Some("content_block_delta")
+            if (document.kind == Some("content_block_delta")
+                && document
+                    .delta
+                    .as_ref()
+                    .is_some_and(|delta| match delta.kind {
+                        Some("text_delta") => {
+                            delta.text.as_deref().is_some_and(|text| !text.is_empty())
+                        }
+                        Some("thinking_delta") => delta
+                            .thinking
+                            .as_deref()
+                            .is_some_and(|text| !text.is_empty()),
+                        _ => false,
+                    }))
                 || (document.kind == Some("content_block_start")
                     && document
                         .content_block
@@ -287,7 +310,23 @@ mod tests {
             (r#"{"type":"message_start"}"#, false),
             (r#"{"type":"ping"}"#, false),
             (
+                r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":""}}"#,
+                false,
+            ),
+            (
+                r#"{"type":"content_block_delta","delta":{"type":"signature_delta","signature":"x"}}"#,
+                false,
+            ),
+            (
                 r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}"#,
+                true,
+            ),
+            (
+                r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"\n"}}"#,
+                true,
+            ),
+            (
+                r#"{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"x"}}"#,
                 true,
             ),
             (

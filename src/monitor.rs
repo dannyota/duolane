@@ -108,6 +108,9 @@ pub enum MonitorEvent {
     UpstreamStarted {
         request_id: String,
     },
+    FirstUpstreamEvent {
+        request_id: String,
+    },
     GenerationStarted {
         request_id: String,
     },
@@ -441,6 +444,12 @@ impl MonitorHandle {
 
     pub fn upstream_started(&self, request_id: impl Into<String>) {
         self.publish(MonitorEvent::UpstreamStarted {
+            request_id: request_id.into(),
+        });
+    }
+
+    pub fn first_upstream_event(&self, request_id: impl Into<String>) {
+        self.publish(MonitorEvent::FirstUpstreamEvent {
             request_id: request_id.into(),
         });
     }
