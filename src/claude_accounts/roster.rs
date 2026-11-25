@@ -378,6 +378,13 @@ pub(super) fn table(entries: &[Entry], selected: &str, now: jiff::Timestamp, col
     }
 }
 
+pub(super) fn signed_out(entry: &Entry) -> bool {
+    entry
+        .account
+        .as_ref()
+        .is_some_and(|account| !account.signed_in)
+}
+
 pub(super) fn same_account(entries: &[Entry], a: &str, b: &str) -> bool {
     let key = |name: &str| {
         entries

@@ -171,7 +171,7 @@ enum CodexAuthCommand {
 fn main() -> Result<()> {
     let mut raw = std::env::args_os().skip(1);
     if raw.next().is_some_and(|command| command == "claude") {
-        return duolane::intercept::run_claude(raw.collect());
+        return duolane::intercept::run_claude(raw.collect(), None);
     }
     let args: Vec<_> = std::env::args_os().collect();
     let sensitive = args
@@ -399,7 +399,7 @@ fn main() -> Result<()> {
             AccountsCommand::List => duolane::claude_accounts::list(),
             AccountsCommand::Remove { name, yes } => duolane::claude_accounts::remove(name, yes),
         },
-        Commands::Claude { args } => duolane::intercept::run_claude(args),
+        Commands::Claude { args } => duolane::intercept::run_claude(args, None),
         Commands::Agents { command } => match command {
             AgentsCommand::Setup { force } => duolane::agents::setup(force),
             AgentsCommand::Remove => duolane::agents::remove(),

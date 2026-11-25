@@ -63,9 +63,9 @@ duolane accounts switch backup -- --resume <session-id>
 ```
 
 Arguments after `--` go to Claude Code. If the launch fails, the new selection
-stays saved; fix the problem and run `duolane claude --continue`. `switch`
-refuses when `CLAUDE_CONFIG_DIR` is set, and asks first when run inside a Claude
-Code session or an IDE terminal that sets `CLAUDECODE`.
+stays saved; fix the problem and retry `duolane claude` with the same Claude
+arguments. `switch` refuses when `CLAUDE_CONFIG_DIR` is set, and asks first when
+run inside a Claude Code session or an IDE terminal that sets `CLAUDECODE`.
 
 The first interactive launch of a new profile runs Claude Code's first-run
 setup, which can ask you to choose a login method even though the profile is

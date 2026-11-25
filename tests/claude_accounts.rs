@@ -33,6 +33,7 @@ case "$*" in
     fi
     [ -n "$ANTHROPIC_API_KEY" ] && exit 3
     case "$CLAUDE_CONFIG_DIR" in
+    */zzz) printf '{"loggedIn":true,"email":"third@example.com"}' ;;
     */backup) printf '{"loggedIn":true,"email":"second@example.com","orgId":"org-2","subscriptionType":"max","loginExpiresAt":"2999-01-01T00:00:00Z"}' ;;
     */copy | "") printf '{"loggedIn":true,"email":"First@example.com","orgId":"org-1","subscriptionType":"team"}' ;;
     */evil) printf '{"loggedIn":true,"email":"evil\\u001b[31m@example.com","subscriptionType":"pro"}' ;;
@@ -343,13 +344,14 @@ fn selected(sandbox: &Sandbox) -> Option<Vec<u8>> {
 fn claude_accounts_switch_next_skips_same_account_and_keeps_selection_on_launch_failure() {
     let sandbox = Sandbox::new();
     sandbox.login("copy");
+    sandbox.login("signedout");
     sandbox.login("zzz");
     let output = sandbox.run(&["accounts", "switch", "--next"], &[]);
     assert!(!output.status.success());
     assert_eq!(selected(&sandbox).as_deref(), Some(&b"zzz\n"[..]));
     let stderr = text(&output.stderr);
     assert!(stderr.contains("zzz is now selected"));
-    assert!(stderr.contains("duolane claude --continue"));
+    assert!(stderr.contains("same Claude arguments"));
 }
 
 #[test]
@@ -378,4 +380,31 @@ fn claude_accounts_switch_refuses_inside_claude_code_or_config_override() {
     );
     assert!(text(&overridden.stderr).contains("CLAUDE_CONFIG_DIR is set"));
     assert_eq!(selected(&sandbox), None);
+}
+
+#[test]
+fn claude_accounts_switch_rejects_environment_before_selection() {
+    let sandbox = Sandbox::new();
+    sandbox.login("backup");
+    let output = sandbox.run(
+        &[
+            "accounts",
+            "switch",
+            "backup",
+            "--",
+            "--environment=example",
+        ],
+        &[],
+    );
+    assert!(text(&output.stderr).contains("--environment is unsupported"));
+    assert_eq!(selected(&sandbox), None);
+}
+
+#[test]
+fn claude_accounts_switch_next_allows_unknown_status() {
+    let sandbox = Sandbox::new();
+    sandbox.login("badexit");
+    let output = sandbox.run(&["accounts", "switch", "--next"], &[]);
+    assert!(!output.status.success());
+    assert_eq!(selected(&sandbox).as_deref(), Some(&b"badexit\n"[..]));
 }

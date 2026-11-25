@@ -95,7 +95,7 @@ pub(super) fn same_file(value: &str, expected: &Path) -> bool {
     }
 }
 
-pub fn run(arguments: Vec<OsString>) -> anyhow::Result<()> {
+pub fn run(arguments: Vec<OsString>, expected: Option<&str>) -> anyhow::Result<()> {
     let dir = super::intercept_dir();
     let required = |name: &str| {
         files::read(&dir.join(name))?
@@ -118,7 +118,7 @@ pub fn run(arguments: Vec<OsString>) -> anyhow::Result<()> {
     let install = Install::new(password)?;
     check_environment(&install)?;
     check_listener(&install, &authorities, &leaf)?;
-    let profile = crate::claude_accounts::prepare_launch(&arguments)?;
+    let profile = crate::claude_accounts::prepare_launch(&arguments, expected)?;
     let command = child_command(
         &arguments,
         profile.as_ref(),

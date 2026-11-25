@@ -494,8 +494,11 @@ mod unix {
         recheck_cwd(cwd)
     }
 
-    pub(crate) fn prepare_launch(args: &[OsString]) -> Result<Option<Profile>> {
-        let Some(mut profile) = selected_profile()? else {
+    pub(crate) fn prepare_launch(
+        args: &[OsString],
+        expected: Option<&str>,
+    ) -> Result<Option<Profile>> {
+        let Some(mut profile) = selected_profile_expected(expected)? else {
             return Ok(None);
         };
         reject_auth_overrides()?;
@@ -542,7 +545,13 @@ mod unix {
         if std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|v| !v.is_empty()) {
             return Ok(None);
         }
-        resolve_selection()
+        resolve_selection(None)
+    }
+    fn selected_profile_expected(expected: Option<&str>) -> Result<Option<Profile>> {
+        if expected.is_none() {
+            return selected_profile();
+        }
+        resolve_selection(expected)
     }
     fn read_selection() -> Result<Option<String>> {
         let Some(dir) = selector_dir(false)? else {
@@ -558,8 +567,15 @@ mod unix {
         ensure!(name == "default" || valid_name(name), "invalid selection");
         Ok(Some(name.to_owned()))
     }
-    fn resolve_selection() -> Result<Option<Profile>> {
-        let Some(name) = read_selection()? else {
+    fn resolve_selection(expected: Option<&str>) -> Result<Option<Profile>> {
+        let selected = read_selection()?;
+        if let Some(expected) = expected {
+            ensure!(
+                selected.as_deref().unwrap_or("default") == expected,
+                "selection changed; expected {expected}, nothing was launched"
+            );
+        }
+        let Some(name) = selected else {
             return Ok(None);
         };
         if name == "default" {
@@ -571,7 +587,7 @@ mod unix {
         let profile = profile(name, false)?.context("selected profile is not registered")?;
         ensure!(
             read_selection()?.as_deref() == Some(name),
-            "selection changed during launch; retry"
+            "selection changed; expected {name}, nothing was launched"
         );
         Ok(profile)
     }
@@ -613,7 +629,10 @@ impl Profile {
     }
 }
 #[cfg(not(unix))]
-pub(crate) fn prepare_launch(_: &[std::ffi::OsString]) -> anyhow::Result<Option<Profile>> {
+pub(crate) fn prepare_launch(
+    _: &[std::ffi::OsString],
+    _: Option<&str>,
+) -> anyhow::Result<Option<Profile>> {
     Ok(None)
 }
 

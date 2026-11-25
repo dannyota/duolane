@@ -48,9 +48,13 @@ fn next_target(entries: &[Entry], current: &str) -> Option<String> {
         .position(|entry| entry.name == current)
         .map_or(0, |index| index + 1);
     (0..entries.len())
-        .map(|offset| &entries[(start + offset) % entries.len()].name)
-        .find(|name| *name != current && !roster::same_account(entries, current, name))
-        .cloned()
+        .map(|offset| &entries[(start + offset) % entries.len()])
+        .find(|entry| {
+            entry.name != current
+                && !roster::signed_out(entry)
+                && !roster::same_account(entries, current, &entry.name)
+        })
+        .map(|entry| entry.name.clone())
 }
 
 fn names_session(arg: &OsString) -> bool {
@@ -86,6 +90,13 @@ pub fn switch(name: Option<String>, next: bool, args: Vec<OsString>) -> Result<(
         !set("CLAUDE_CONFIG_DIR"),
         "CLAUDE_CONFIG_DIR is set, so duolane claude would ignore the selection"
     );
+    ensure!(
+        !args.iter().take_while(|arg| *arg != "--").any(|arg| {
+            let bytes = arg.as_bytes();
+            bytes == b"--environment" || bytes.starts_with(b"--environment=")
+        }),
+        "--environment is unsupported with switch"
+    );
     confirm_outside_claude_code()?;
     let current = current_selection()?;
     let profiles = registered()?;
@@ -110,17 +121,21 @@ pub fn switch(name: Option<String>, next: bool, args: Vec<OsString>) -> Result<(
     if target == current {
         bail!("{target} is already selected");
     }
-    save_selection(&target, Some(&current))?;
     let entries = match entries {
         Some(entries) => entries,
         None => roster::entries(&profiles)?,
     };
-    match roster::describe(&entries, &target).0 {
+    let summary = roster::describe(&entries, &target).0;
+    save_selection(&target, Some(&current))?;
+    match summary {
         Some(summary) => println!("Switched to {target} ({summary})."),
         None => println!("Switched to {target}."),
     }
-    crate::intercept::run_claude(launch_arguments(args)).with_context(|| {
-        format!("{target} is now selected; run `duolane claude --continue` to retry the launch")
+    std::io::stdout().flush()?;
+    crate::intercept::run_claude(launch_arguments(args), Some(&target)).with_context(|| {
+        format!(
+            "{target} is now selected; retry with `duolane claude` and the same Claude arguments"
+        )
     })
 }
 

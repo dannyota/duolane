@@ -157,26 +157,29 @@ commands.
 2. Pick the target. A name accepts `default` or a registered profile, as `use`
    does. `--next` takes the profile after the current selection in `list` order,
    wrapping around and including `default`. It skips a profile that holds the
-   same account as the current selection under the `list` comparison; a failed
-   status check is not a match. Without a name or `--next`, show the `use` menu
+   same account as the current selection under the `list` comparison, and a
+   profile whose status check reports it signed out. A failed status check
+   neither matches nor skips. Without a name or `--next`, show the `use` menu
    with the current selection marked. A name and `--next` together are a usage
    error. A target equal to the current selection, or no candidate for `--next`,
    is an error that changes nothing.
-3. Save the target through the checked selector, locks, and atomic write that
-   `use` uses. Print the profile name and its account.
+3. Refuse `--environment` before saving the target. Save the target through the
+   checked selector, locks, and atomic write that `use` uses. Print the profile
+   name and its account.
 4. Run the `duolane claude` launch path with the arguments after `--`. If they
    hold no session flag before their own `--`, prepend `--continue`. Session
    flags are `-c`, `--continue`, `-r`, `--resume`, `--session-id`, `--from-pr`,
    and `--teleport`, in separate and `=` forms. Launch checks, refusals, and the
    first-link confirmation stay as
-   [One transcript per session](#one-transcript-per-session) defines.
+   [One transcript per session](#one-transcript-per-session) defines. Refuse
+   before sharing if the saved selection no longer matches the target.
 
 The selection stays saved when the launch fails, so the exhausted login is not
 used again by accident. The error names the selected profile and says that
-`duolane claude --continue` retries the launch.
+`duolane claude` with the same Claude arguments retries the launch.
 
-`--continue` loads the most recent conversation in the current directory and
-skips `claude -p`, Agent SDK, and `/loop` sessions
+For interactive launches, `--continue` loads the most recent conversation in the
+current directory and skips `claude -p`, Agent SDK, and `/loop` sessions
 ([CLI reference](https://code.claude.com/docs/en/cli-reference#cli-flags)).
 duolane leaves that choice to Claude Code and never reads a transcript to find a
 session. With several sessions in one project, the most recent may not be the

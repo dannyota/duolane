@@ -768,3 +768,81 @@ fn cleanup_removes_the_files_and_fails_on_a_symlinked_settings_file() {
     assert!(text(&cleaned.stdout).contains("removed proxy-password"));
     assert!(!sandbox.intercept().exists());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn claude_accounts_switch_launches_the_selected_profile_with_session_arguments() {
+    use std::os::unix::fs::symlink;
+    let (port, _) = listen().await;
+    let sandbox = Sandbox::new(None);
+    std::fs::create_dir_all(sandbox.intercept()).unwrap();
+    for file in ["ca.pem", "leaf.pem", "proxy-password"] {
+        std::fs::copy(intercept_dir().join(file), sandbox.intercept().join(file)).unwrap();
+    }
+    let profile = sandbox.config.join("claude-accounts/backup");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let ready = profile.join(".duolane-ready");
+    std::fs::write(&ready, b"ready\n").unwrap();
+    std::fs::set_permissions(&ready, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let cwd = sandbox.path("project").canonicalize().unwrap();
+    let key: String = cwd
+        .to_str()
+        .unwrap()
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() {
+                b as char
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let source = sandbox.path("home/.claude/projects").join(&key);
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(profile.join("projects")).unwrap();
+    std::fs::create_dir_all(profile.join(".duolane-projects")).unwrap();
+    symlink(
+        source.canonicalize().unwrap(),
+        profile.join("projects").join(&key),
+    )
+    .unwrap();
+    let record = profile.join(".duolane-projects").join(&key);
+    std::fs::write(&record, cwd.to_str().unwrap()).unwrap();
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+    for args in [
+        vec!["--model", "toy"],
+        vec!["--resume", "session-id", "--", "tail"],
+    ] {
+        let mut command = sandbox.command(port);
+        command
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .args(["accounts", "switch", "backup", "--"])
+            .args(&args);
+        let launched = output(command).await;
+        assert!(launched.status.success(), "{}", text(&launched.stderr));
+        let arguments = received(&launched);
+        let expected = if args[0] == "--resume" {
+            args.clone()
+        } else {
+            [vec!["--continue"], args.clone()].concat()
+        };
+        assert!(
+            arguments.ends_with(
+                &expected
+                    .iter()
+                    .map(|arg| arg.to_string())
+                    .collect::<Vec<_>>()
+            )
+        );
+        assert!(text(&launched.stdout).lines().any(|line| line
+            == format!(
+                "CLAUDE_CONFIG_DIR={}",
+                profile.canonicalize().unwrap().display()
+            )));
+        let mut reset = sandbox.command(port);
+        reset
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .args(["accounts", "use", "default"]);
+        assert!(output(reset).await.status.success());
+    }
+}
