@@ -174,9 +174,11 @@ commands.
    [One transcript per session](#one-transcript-per-session) defines. Refuse
    before sharing if the saved selection no longer matches the target.
 
-The selection stays saved when the launch fails, so the exhausted login is not
-used again by accident. The error names the selected profile and says that
-`duolane claude` with the same Claude arguments retries the launch.
+The selection stays saved when the launch fails unless another selection
+replaced it. If the target is still selected, retry `duolane claude` with the
+same Claude arguments, adding `--continue` if `switch` added it. If the
+selection changed, nothing launched; run `duolane accounts switch <target>`
+again.
 
 For interactive launches, `--continue` loads the most recent conversation in the
 current directory and skips `claude -p`, Agent SDK, and `/loop` sessions

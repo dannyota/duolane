@@ -68,17 +68,38 @@ fn names_session(arg: &OsString) -> bool {
     })
 }
 
-fn launch_arguments(args: Vec<OsString>) -> Vec<OsString> {
+fn launch_arguments(args: Vec<OsString>) -> (Vec<OsString>, bool) {
     if args
         .iter()
         .take_while(|arg| *arg != "--")
         .any(names_session)
     {
-        return args;
+        return (args, false);
     }
     let mut launch = vec![OsString::from("--continue")];
     launch.extend(args);
-    launch
+    (launch, true)
+}
+
+fn retry_hint(target: &str, continued: bool, selection: Result<String>) -> String {
+    match selection {
+        Ok(current) if current == target => {
+            let command = if continued {
+                "duolane claude --continue"
+            } else {
+                "duolane claude"
+            };
+            format!(
+                "{target} is now selected; retry with `{command}` and the same Claude arguments"
+            )
+        }
+        Ok(_) => format!(
+            "selection changed; nothing was launched; run `duolane accounts switch {target}` again"
+        ),
+        Err(_) => {
+            format!("could not verify selection; run `duolane accounts switch {target}` again")
+        }
+    }
 }
 
 pub fn switch(name: Option<String>, next: bool, args: Vec<OsString>) -> Result<()> {
@@ -132,23 +153,35 @@ pub fn switch(name: Option<String>, next: bool, args: Vec<OsString>) -> Result<(
         None => println!("Switched to {target}."),
     }
     std::io::stdout().flush()?;
-    crate::intercept::run_claude(launch_arguments(args), Some(&target)).with_context(|| {
-        format!(
-            "{target} is now selected; retry with `duolane claude` and the same Claude arguments"
-        )
-    })
+    let (arguments, continued) = launch_arguments(args);
+    crate::intercept::run_claude(arguments, Some(&target))
+        .with_context(|| retry_hint(&target, continued, current_selection()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::launch_arguments;
+    use super::{launch_arguments, retry_hint};
     use std::ffi::OsString;
 
     fn run(args: &[&str]) -> Vec<String> {
         launch_arguments(args.iter().map(OsString::from).collect())
+            .0
             .into_iter()
             .map(|arg| arg.into_string().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn claude_accounts_switch_conflict_retry_uses_switch() {
+        let hint = retry_hint("backup", true, Ok("other".into()));
+        assert!(hint.contains("selection changed"));
+        assert!(hint.contains("nothing was launched"));
+        assert!(hint.contains("duolane accounts switch backup"));
+        assert!(!hint.contains("is now selected"));
+        assert!(!hint.contains("duolane claude"));
+        let hint = retry_hint("backup", false, Ok("backup".into()));
+        assert!(hint.contains("duolane claude`"));
+        assert!(!hint.contains("--continue"));
     }
 
     #[test]

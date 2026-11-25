@@ -352,6 +352,22 @@ fn claude_accounts_switch_next_skips_same_account_and_keeps_selection_on_launch_
     let stderr = text(&output.stderr);
     assert!(stderr.contains("zzz is now selected"));
     assert!(stderr.contains("same Claude arguments"));
+    assert!(stderr.contains("duolane claude --continue"));
+    let output = sandbox.run(
+        &[
+            "accounts",
+            "switch",
+            "default",
+            "--",
+            "--resume",
+            "private-session",
+        ],
+        &[],
+    );
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("duolane claude`"));
+    assert!(!stderr.contains("--continue"));
+    assert!(!stderr.contains("private-session"));
 }
 
 #[test]
