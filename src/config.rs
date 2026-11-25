@@ -76,7 +76,11 @@ struct CodexConfig {
     pub previous_response_id: Option<bool>,
     #[serde(rename = "serverCompaction")]
     pub server_compaction: Option<bool>,
-    #[serde(rename = "baseInstructions")]
+    #[serde(
+        rename = "baseInstructions",
+        default,
+        deserialize_with = "codex_base_instructions::deserialize_bool"
+    )]
     pub base_instructions: Option<bool>,
     #[serde(rename = "responsesApi")]
     pub responses_api: Option<bool>,
@@ -290,6 +294,7 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     {
         out.push("DUOLANE_CODEX_REASONING_SUMMARY (env)".to_string());
     }
+    out.extend(codex_base_instructions::env_source(&env));
     if env.contains_key("DUOLANE_CODEX_SERVER_COMPACTION") {
         out.push("DUOLANE_CODEX_SERVER_COMPACTION (env)".to_string());
     }
@@ -1300,5 +1305,25 @@ mod tests {
             let _value = EnvGuard::set("DUOLANE_CODEX_BASE_INSTRUCTIONS", " On ");
             assert!(codex_base_instructions());
         }
+    }
+    #[test]
+    fn invalid_base_instructions_preserves_auth_token() {
+        let cfg: FileConfig =
+            serde_json::from_str(r#"{"authToken":"toy-token","codex":{"baseInstructions":"off"}}"#)
+                .unwrap();
+        assert!(cfg.auth_token.as_deref() == Some("toy-token"));
+        assert!(cfg.codex.unwrap().base_instructions.is_none());
+    }
+
+    #[test]
+    fn base_instructions_valid_env_appears_in_summary() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        let _value = EnvGuard::set("DUOLANE_CODEX_BASE_INSTRUCTIONS", "on");
+        assert!(
+            config_override_summary_lines(&load_config())
+                .contains(&"DUOLANE_CODEX_BASE_INSTRUCTIONS (env)".to_string())
+        );
     }
 }

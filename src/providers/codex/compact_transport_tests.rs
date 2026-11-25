@@ -68,7 +68,7 @@ fn summary_transport_preserves_normal_and_explicit_websocket() {
                 });
                 let mut client = super::client_test_support::authenticated_http_test_client(format!("http://{addr}/responses"));
                 if gzip { client.request_compression = config::CodexRequestCompression::Gzip; }
-                let provider = CodexProvider { client: Arc::new(client) };
+                let provider = CodexProvider::with_client(Arc::new(client));
                 let text = if summary { "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Your task is to create a detailed summary of the conversation so far" } else { "hello" };
                 let body = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol", "max_tokens":32, "stream":streaming, "messages":[{"role":"user", "content":text}, {"role":"system", "content":"context"}]})).unwrap();
                 let response = tokio::time::timeout(std::time::Duration::from_secs(8), provider.handle_messages_inner(body, live_test_context("summary-transport"), None)).await.unwrap();
@@ -137,7 +137,7 @@ fn summary_http_resets_same_owner_websocket_continuation() {
                 send_test_completion(&mut next_ws, "resp_next").await;
                 drop(ws);
             });
-            let provider = CodexProvider { client: authenticated_live_test_client(format!("http://{addr}/responses")) };
+            let provider = CodexProvider::with_client(authenticated_live_test_client(format!("http://{addr}/responses")));
             let owner = ConversationIdentity::Main(format!("summary-continuation-{streaming}"));
             let context = live_test_context("summary-continuation");
             let summary = "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Your task is to create a detailed summary of the conversation so far";

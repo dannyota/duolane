@@ -28,6 +28,9 @@ impl CodexProvider {
         let standalone_search = search::is_standalone_search_request(body);
         let use_responses_lite = !standalone_search
             && apply_model_lane_for_request(&mut resolved, body, config::codex_full_lane());
+        let base = config::codex_base_instructions()
+            .then(|| super::translate::model_catalog::base_instructions(&resolved.model))
+            .flatten();
         let configured_transport = config::codex_transport();
         let websocket_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let compaction_websocket_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -37,6 +40,7 @@ impl CodexProvider {
                 ctx,
                 conversation_identity,
                 &resolved,
+                base.as_deref(),
                 standalone_search,
                 use_responses_lite,
                 configured_transport,

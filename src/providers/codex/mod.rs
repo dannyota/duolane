@@ -87,6 +87,7 @@ pub(crate) fn clear_session_compaction(session_id: &str) {
 
 pub struct CodexProvider {
     client: Arc<CodexHttpClient>,
+    first_source: Option<config::codex_auth::AuthSource>,
 }
 
 impl Default for CodexProvider {
@@ -96,8 +97,13 @@ impl Default for CodexProvider {
 }
 impl CodexProvider {
     pub fn new() -> Self {
+        Self::with_first_source(Some(config::codex_auth::AuthSource::ChatGpt))
+    }
+
+    pub(crate) fn with_first_source(first_source: Option<config::codex_auth::AuthSource>) -> Self {
         Self {
             client: Arc::new(CodexHttpClient::new()),
+            first_source,
         }
     }
 }
@@ -132,6 +138,7 @@ impl CodexProvider {
         ctx: RequestContext,
         conversation_identity: Option<ConversationIdentity>,
         resolved: &ResolvedModel,
+        base: Option<&str>,
         standalone_search: bool,
         use_responses_lite: bool,
         configured_transport: config::CodexTransport,
@@ -220,9 +227,6 @@ impl CodexProvider {
             monitor.model_resolved(&ctx.req_id, &resolved.model);
         }
 
-        let base = config::codex_base_instructions()
-            .then(|| translate::model_catalog::base_instructions(&resolved.model))
-            .flatten();
         let mut translated = match translate_request_with_base(
             body,
             TranslateOptions {
@@ -232,7 +236,7 @@ impl CodexProvider {
                 use_responses_lite,
                 reasoning_account: self.client.auth_manager().reasoning_account().await,
             },
-            base.as_deref(),
+            base,
         ) {
             Ok(t) => t,
             Err(e) => {
@@ -678,6 +682,19 @@ fn codex_generation_event(payload: &serde_json::Value) -> bool {
 }
 
 #[cfg(test)]
+mod provider_constructor_test_support {
+    use super::*;
+    impl CodexProvider {
+        pub(super) fn with_client(client: Arc<CodexHttpClient>) -> Self {
+            Self {
+                client,
+                first_source: Some(config::codex_auth::AuthSource::ChatGpt),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use http_body_util::BodyExt;
     use tokio::net::TcpListener;
@@ -715,7 +732,7 @@ mod tests {
             let client = Arc::new(super::client_test_support::authenticated_http_test_client(
                 format!("http://{addr}/responses"),
             ));
-            let provider = CodexProvider { client };
+            let provider = CodexProvider::with_client(client);
             let body = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol", "max_tokens":64, "messages":[{"role":"user","content":"Perform a web search for the query: hello"}], "tools":[{"type":"web_search_20250305","name":"web_search"}], "tool_choice":{"type":"tool","name":"web_search"}})).unwrap();
             let gate = ReplayGate::new(true);
             let attempt = SourceAttempt::new(
@@ -756,7 +773,7 @@ mod tests {
         let client = Arc::new(super::client_test_support::authenticated_http_test_client(
             format!("http://{}/responses", listener.local_addr().unwrap()),
         ));
-        let provider = CodexProvider { client };
+        let provider = CodexProvider::with_client(client);
         let body: MessagesRequest = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol", "max_tokens":64, "messages":[], "tools":[{"type":"web_search_20250305","name":"web_search"}], "tool_choice":{"type":"tool","name":"web_search"}})).unwrap();
         let context = live_test_context("invalid-search");
         let old = provider
@@ -817,7 +834,7 @@ mod tests {
             let client = Arc::new(super::client_test_support::authenticated_http_test_client(
                 format!("http://{addr}/responses"),
             ));
-            let provider = CodexProvider { client };
+            let provider = CodexProvider::with_client(client);
             let body = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol", "max_tokens":64, "messages":[{"role":"user","content":"Perform a web search for the query: hello"}], "tools":[{"type":"web_search_20250305","name":"web_search"}], "tool_choice":{"type":"tool","name":"web_search"}})).unwrap();
             let attempt = SourceAttempt::new(
                 AuthSource::ChatGpt,
@@ -867,7 +884,7 @@ mod tests {
                     .await
                     .is_err()
             });
-            let provider = CodexProvider { client };
+            let provider = CodexProvider::with_client(client);
             let body = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol", "max_tokens":64, "messages":[{"role":"user","content":"Perform a web search for the query: hello"}], "tools":[{"type":"web_search_20250305","name":"web_search"}], "tool_choice":{"type":"tool","name":"web_search"}})).unwrap();
             let gate = ReplayGate::new(true);
             let attempt = SourceAttempt::new(
@@ -935,7 +952,7 @@ mod tests {
                     .await
                     .is_err()
             });
-            let provider = CodexProvider { client };
+            let provider = CodexProvider::with_client(client);
             let body = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol", "max_tokens":32, "stream":streaming, "messages":[{"role":"user", "content":"hello"}]})).unwrap();
             let response = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
@@ -1014,7 +1031,7 @@ mod tests {
                     emit_live_event(&mut ws, &event).await;
                 }
             });
-            let provider = CodexProvider { client };
+            let provider = CodexProvider::with_client(client);
             let owner = ConversationIdentity::Main(format!("empty-login-{streaming}"));
             let ctx = live_test_context("empty-login");
             let first = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol","max_tokens":32,"stream":streaming,"messages":[{"role":"user","content":"one"}]})).unwrap();
@@ -1088,7 +1105,7 @@ mod tests {
             let mut client = super::client_test_support::authenticated_http_test_client(format!("http://{addr}/responses"));
             client.request_compression = crate::config::CodexRequestCompression::Gzip;
             client.auto_ws_max_bytes = 1024;
-            let provider = CodexProvider { client: Arc::new(client) };
+            let provider = CodexProvider::with_client(Arc::new(client));
             let system = format!("You are a helpful AI assistant tasked with summarizing conversations. {}", "x".repeat(5000));
             let body = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol", "max_tokens":32, "system":system, "messages":[{"role":"user", "content":"hello"}]})).unwrap();
             let response = tokio::time::timeout(std::time::Duration::from_secs(8), provider.handle_messages_inner(body, live_test_context("compact-route"), None)).await;

@@ -124,7 +124,8 @@ Code's system prompt.
 - The setting is on by default. `codex.baseInstructions` is a JSON boolean, and
   `DUOLANE_CODEX_BASE_INSTRUCTIONS` overrides it with `1`, `true`, `yes`, or
   `on`, and `0`, `false`, `no`, or `off`. Any other value falls through to the
-  configuration.
+  configuration. A `codex.baseInstructions` that is not a boolean is ignored and
+  leaves the other settings in the file in force.
 - [Token counting](#token-counting) adds the template once when ChatGPT is the
   first source in the [order](openai-api-key.md#order) and the request would
   carry it there. It does not predict a move to another source.

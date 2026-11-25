@@ -3,7 +3,7 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -26,7 +26,7 @@ pub struct CatalogModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CatalogEntry {
     model: CatalogModel,
-    base_instructions: Option<String>,
+    base_instructions: Option<Arc<str>>,
 }
 
 impl std::ops::Deref for CatalogEntry {
@@ -119,7 +119,7 @@ fn parse_catalog(bytes: &[u8]) -> Option<Vec<CatalogEntry>> {
                     .and_then(|value| value.get("instructions_template"))
                     .and_then(serde_json::Value::as_str)
                     .filter(|text| !text.is_empty() && text.len() <= 262144)
-                    .map(str::to_owned),
+                    .map(Arc::<str>::from),
                 model: CatalogModel {
                     listed: matches!(model.visibility, Visibility::List),
                     slug: model.slug,
@@ -190,7 +190,7 @@ pub fn catalog_models() -> Vec<CatalogModel> {
         .collect()
 }
 
-pub fn base_instructions(slug: &str) -> Option<String> {
+pub fn base_instructions(slug: &str) -> Option<Arc<str>> {
     catalog_entries()
         .into_iter()
         .find(|entry| entry.slug == slug)
@@ -209,6 +209,20 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn cache_snapshots_share_template_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models_cache.json");
+        std::fs::write(&path, serde_json::to_vec(&json!({"models":[{"slug":"gpt-test","supported_in_api":true,"visibility":"list","model_messages":{"instructions_template":"SYNTHETIC BASE"}}]})).unwrap()).unwrap();
+        let mut cache = CacheState::default();
+        let first = cache.load(Some(&path), Instant::now());
+        let second = cache.load(Some(&path), Instant::now());
+        assert!(std::ptr::eq(
+            first[0].base_instructions.as_ref().unwrap().as_ptr(),
+            second[0].base_instructions.as_ref().unwrap().as_ptr()
+        ));
+    }
+
+    #[test]
     fn keeps_only_nonempty_bounded_string_templates() {
         let values = [
             json!("a".repeat(262144)),
@@ -221,7 +235,7 @@ mod tests {
             parse_catalog(&serde_json::to_vec(&json!({"models":models})).unwrap()).unwrap();
         assert_eq!(parsed.len(), 4);
         assert_eq!(
-            parsed[0].base_instructions.as_ref().map(String::len),
+            parsed[0].base_instructions.as_ref().map(|text| text.len()),
             Some(262144)
         );
         assert!(

@@ -22,7 +22,13 @@ pub(super) fn insert_base(
     {
         return;
     }
-    if !out.input.iter().any(|item| matches!(item, ResponsesInputItem::AdditionalTools { tools, .. } if !tools.is_empty())) {
+    let forced = req
+        .extra
+        .get("tool_choice")
+        .filter(|choice| choice.get("type").and_then(serde_json::Value::as_str) == Some("tool"))
+        .and_then(|choice| choice.get("name"))
+        .and_then(serde_json::Value::as_str);
+    if !out.input.iter().any(|item| matches!(item, ResponsesInputItem::AdditionalTools { tools, .. } if tools.iter().any(|tool| forced.is_none_or(|name| tool.get("name").and_then(serde_json::Value::as_str) == Some(name))))) {
         return;
     }
     let index = usize::from(matches!(

@@ -42,15 +42,7 @@ impl CodexProvider {
             monitor.model_resolved(&ctx.req_id, &resolved.model);
         }
 
-        let order = config::codex_auth::load_order(
-            &crate::paths::config_dir(),
-            std::env::var_os("DUOLANE_CODEX_AUTH_ORDER").as_deref(),
-        );
-        let first = order
-            .as_ref()
-            .ok()
-            .and_then(|order| order.sources().first())
-            .copied();
+        let first = self.first_source;
         let base = if count_base(config::codex_base_instructions(), first, Some(())).is_some() {
             super::translate::model_catalog::base_instructions(&resolved.model)
         } else {

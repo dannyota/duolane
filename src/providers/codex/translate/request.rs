@@ -900,6 +900,30 @@ mod tests {
     }
 
     #[test]
+    fn base_instructions_require_forced_tool_to_be_callable() {
+        let mut req = tool_search_request(false, false);
+        req.extra.insert(
+            "tool_choice".into(),
+            json!({"type":"tool", "name":"missing"}),
+        );
+        let options = || TranslateOptions {
+            use_responses_lite: true,
+            ..opts()
+        };
+        let before = serde_json::to_value(translate_request(&req, options()).unwrap()).unwrap();
+        let after = serde_json::to_value(
+            translate_request_with_base(&req, options(), Some("SYNTHETIC BASE")).unwrap(),
+        )
+        .unwrap();
+        assert!(before == after);
+        req.extra
+            .insert("tool_choice".into(), json!({"type":"tool", "name":"Bash"}));
+        let without = translate_request(&req, options()).unwrap();
+        let with = translate_request_with_base(&req, options(), Some("SYNTHETIC BASE")).unwrap();
+        assert_eq!(with.input.len(), without.input.len() + 1);
+    }
+
+    #[test]
     fn base_instructions_skip_ineligible_requests() {
         let base = tool_search_request(false, false);
         let mut cases = Vec::new();
