@@ -10,6 +10,9 @@ mod mouse_tests;
 mod overlay;
 #[cfg(test)]
 mod overview_tests;
+#[cfg(test)]
+mod phase_tests;
+mod request_phases;
 mod requests;
 mod sessions;
 mod summary;
@@ -25,7 +28,7 @@ use overlay::{
     render_help_overlay, render_setup_overlay, render_shutdown_confirmation,
     render_shutdown_overlay,
 };
-use requests::{render_active, render_events, render_recent};
+use requests::{render_active_at, render_events, render_recent};
 
 use std::{
     io::{self, Stdout},
@@ -641,7 +644,7 @@ fn render_at(
             terminal_state.snapshot_at,
         ),
     };
-    render_active(frame, root[2], &terminal_state.active, app.tick);
+    render_active_at(frame, root[2], &terminal_state.active, app.tick, now);
     let recent = render_recent(
         frame,
         root[3],
@@ -825,7 +828,7 @@ mod tests {
     fn request_tables_share_time_status_provider_model_rhythm() {
         assert_eq!(
             headers(&active_columns(LayoutTier::Medium))[..4],
-            ["Started", "Status", "Provider", "Model"]
+            ["Started", "Phase", "Provider", "Model"]
         );
         assert_eq!(
             headers(&recent_columns(LayoutTier::Medium))[..4],
@@ -921,7 +924,7 @@ mod tests {
                     .iter()
                     .filter(|column| column.header.is_empty())
                     .count(),
-                usize::from(matches!(tier, LayoutTier::Expanded | LayoutTier::Wide))
+                0
             );
             assert_eq!(
                 recent
