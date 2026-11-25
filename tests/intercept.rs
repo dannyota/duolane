@@ -66,21 +66,29 @@ async fn capture(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-) -> Json<Value> {
+) -> ([(&'static str, &'static str); 3], Json<Value>) {
     upstream.seen.lock().unwrap().push(Seen {
         method,
         target: uri.to_string(),
         headers,
     });
-    Json(json!({
-        "id": "msg_toy",
-        "type": "message",
-        "role": "assistant",
-        "model": "claude-haiku-5-5",
-        "content": [{"type": "text", "text": "ok"}],
-        "stop_reason": "end_turn",
-        "usage": {"input_tokens": 1, "output_tokens": 1}
-    }))
+    let limits = [
+        ("anthropic-ratelimit-unified-5h-utilization", "0.25"),
+        ("anthropic-ratelimit-unified-5h-reset", "4102444800"),
+        ("anthropic-ratelimit-unified-7d-utilization", "0.5"),
+    ];
+    (
+        limits,
+        Json(json!({
+            "id": "msg_toy",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-5-5",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        })),
+    )
 }
 
 async fn slow_stream(State(upstream): State<Upstream>) -> Body {
@@ -175,7 +183,11 @@ async fn connect(
 }
 
 async fn open(proxy: &Proxy) -> SendRequest<Full<Bytes>> {
-    let credentials = format!("duolane:{}", proxy.password);
+    open_as(proxy, "duolane").await
+}
+
+async fn open_as(proxy: &Proxy, user: &str) -> SendRequest<Full<Bytes>> {
+    let credentials = format!("{user}:{}", proxy.password);
     let (status, _, stream) = connect(proxy, &format!("{HOST}:443"), Some(&credentials)).await;
     assert_eq!(status, 200);
     let mut roots = rustls::RootCertStore::empty();
@@ -246,6 +258,72 @@ async fn connect_requires_the_proxy_password() {
     assert_eq!(connect(&proxy, &target, Some("duolane:wrong")).await.0, 407);
     let credentials = format!("duolane:{}", proxy.password);
     assert_eq!(connect(&proxy, &target, Some(&credentials)).await.0, 200);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tagged_connection_records_plan_usage_for_its_profile() {
+    let (proxy, upstream) = start().await;
+    let target = format!("{HOST}:443");
+    for hostile in [
+        "duolane.backup:wrong".to_string(),
+        format!("duolane.Bad!:{}", proxy.password),
+        format!("duolane.:{}", proxy.password),
+        format!("other.backup:{}", proxy.password),
+    ] {
+        assert_eq!(connect(&proxy, &target, Some(&hostile)).await.0, 407);
+    }
+    let message = json!({
+        "model": "claude-haiku-5-5",
+        "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}]
+    })
+    .to_string();
+    let headers = [
+        ("content-type", "application/json"),
+        ("authorization", LOGIN),
+    ];
+    for user in ["duolane.backup", "duolane"] {
+        let mut sender = open_as(&proxy, user).await;
+        let response = tokio::time::timeout(
+            WAIT,
+            sender.send_request(request("POST", "/v1/messages", &headers, &message)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert!(
+        upstream
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|seen| !seen.headers.contains_key("proxy-authorization"))
+    );
+    let file = std::path::PathBuf::from(std::env::var_os("DUOLANE_STATE_DIR").unwrap())
+        .join("claude-usage.json");
+    let deadline = Instant::now() + WAIT;
+    let profiles = loop {
+        let stored: Value = std::fs::read(&file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let profiles = stored["profiles"].clone();
+        if profiles["backup"].is_object() && profiles["default"].is_object() {
+            break profiles;
+        }
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(profiles["backup"]["five_hour"]["used"], 0.25);
+    assert_eq!(
+        profiles["backup"]["five_hour"]["resets_at"],
+        4_102_444_800u64
+    );
+    assert_eq!(profiles["default"]["seven_day"]["used"], 0.5);
+    assert_eq!(profiles.as_object().unwrap().len(), 2);
 }
 
 #[tokio::test]

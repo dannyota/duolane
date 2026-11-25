@@ -144,6 +144,8 @@ Rejections use the Anthropic error shape and never echo request values:
 | Log file before rotation            | 20 MiB, keeping 5 rotated |
 | Error capture                       | 256 KiB per file          |
 | Error captures kept                 | Newest 200, up to 7 days  |
+| Claude plan usage profiles          | 64                        |
+| Claude plan usage file              | 64 KiB                    |
 
 An error capture larger than its limit keeps valid JSON: an oversized field
 becomes its byte count and a prefix. `DUOLANE_LOG_VERBOSE` lifts the logged

@@ -26,8 +26,9 @@ switches a running process or falls back on a quota error. Codex is unchanged.
   it. `default` restores the original behavior. This command never starts a
   login or changes an open session.
 - `duolane accounts list` prints `default` and every registered profile with its
-  account, plan, and the time left on the stored login, marks the selected
-  profile, and notes a profile that holds the same account as an earlier row.
+  account, plan, the time left on the stored login, and its
+  [plan usage](#plan-usage). It marks the selected profile and notes a profile
+  that holds the same account as an earlier row.
 - `duolane accounts remove <name>` signs a named profile out with
   `claude auth logout`, then deletes its directory. It asks for confirmation on
   a terminal unless `--yes` is given, and refuses `default`. If logout fails,
@@ -187,6 +188,54 @@ duolane leaves that choice to Claude Code and never reads a transcript to find a
 session. With several sessions in one project, the most recent may not be the
 one that ran out; pass `-- --resume <session-id>` instead. duolane cannot see a
 previous process in another terminal; close it first.
+
+## Plan usage
+
+`accounts list` and the `use` menu show how much of each account's five hour and
+seven day allowance is used. duolane reads this from responses that already pass
+through the proxy. It never asks Anthropic for usage and never reads a Claude
+credential to do so.
+
+- Anthropic answers a message request with
+  `anthropic-ratelimit-unified-5h-utilization`,
+  `anthropic-ratelimit-unified-5h-reset`, and the same pair for `7d`. The
+  utilization is treated as a fraction of the window and the reset as epoch
+  seconds. First-party documentation does not describe these headers. Their
+  names were read from the Claude Code 2.1.330 and 2.1.332 programs. The units
+  and a live response were not checked.
+- The Claude route reads those headers from each upstream response and forwards
+  the response unchanged. It ignores a value that is missing, repeated, not a
+  finite number, negative, or above 100.
+- A named launch tells the proxy its profile in the proxy user name:
+  `duolane claude` sets `HTTPS_PROXY` to
+  `http://duolane.<name>:<password>@127.0.0.1:<port>`. `Proxy-Authorization`
+  ends at the proxy listener, so the name never reaches Anthropic and no request
+  changes. Every request on that `CONNECT` belongs to that profile.
+- A connection with the plain user `duolane`, and every request on the plain
+  HTTP listener, counts as `default`. A session started with an explicit
+  `CLAUDE_CONFIG_DIR` therefore also counts as `default`.
+- The proxy keeps the newest values for at most 64 profiles and saves them to
+  `claude-usage.json` in the state directory, an owner-only file of at most 64
+  KiB, written off the request path. A process mutex and a file lock serialize
+  each read, merge, and write. When two values carry the same second, the later
+  one wins. `accounts list` ignores the file when it is not a regular owner-only
+  file, and ignores an entry whose name is not a valid profile name or whose
+  value is out of range.
+- A value changes only when that account sends a request through the proxy.
+  `SEEN` shows its age. Percentages round down, so 100% means full. A window
+  shows 0% once its reset has passed, or, when it has no reset, once its full
+  observation is one window length old. A response that omits a window drops its
+  previous value if that value has no reset.
+- `STATUS` summarizes the newest values. `limited` means a window is full and
+  has not reset by the rule above; it shows the time until the latest such reset
+  when every full window has one. `available` means at least one window was seen
+  and none is limited. `unknown` means the proxy has no values for the account.
+  On a color terminal, `available` is green, `limited` is bold red, and
+  `unknown` is dim. `STATUS` is an observation, not a reason to change accounts
+  automatically.
+- Profiles that hold the same account share the newest values. The total line is
+  the mean over the accounts the proxy has seen, counting each account once, so
+  it assumes equal plans.
 
 ## Alternatives and evidence
 

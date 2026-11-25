@@ -28,6 +28,7 @@ use super::tunnel::{self, Refusal};
 use super::{INTERCEPTED_HOST, INTERCEPTED_PORT, PROXY_USER, dispatch, set_keepalive};
 use crate::anthropic::json_error;
 use crate::auth::constant_time_eq;
+use crate::claude_accounts::limits::LaunchProfile;
 
 const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -56,7 +57,7 @@ fn pool_sizes(soft_limit: Option<u64>) -> (usize, usize) {
 
 pub struct InterceptListener {
     listener: TcpListener,
-    credentials: String,
+    password: String,
     tls: TlsAcceptor,
     relay: Relay,
     ca: CertificateDer<'static>,
@@ -65,7 +66,7 @@ pub struct InterceptListener {
 }
 
 struct Shared {
-    credentials: String,
+    password: String,
     tls: TlsAcceptor,
     relay: Relay,
     app: Router,
@@ -81,6 +82,7 @@ enum Route {
 struct Handoff {
     upgrade: OnUpgrade,
     route: Route,
+    profile: Option<LaunchProfile>,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -106,7 +108,7 @@ impl InterceptListener {
         let config = server_config(loaded.pair)?;
         Ok(Self {
             listener,
-            credentials: format!("{PROXY_USER}:{password}"),
+            password,
             tls: TlsAcceptor::from(Arc::new(config)),
             relay: Relay::new()?,
             ca: loaded.ca,
@@ -126,7 +128,7 @@ impl InterceptListener {
     pub async fn serve(self, app: Router, shutdown: impl Future<Output = ()>) {
         let Self {
             listener,
-            credentials,
+            password,
             tls,
             relay,
             ca,
@@ -140,7 +142,7 @@ impl InterceptListener {
         let soft_limit = None;
         let (intercepted, tunnels) = pool_sizes(soft_limit);
         let shared = Arc::new(Shared {
-            credentials,
+            password,
             tls,
             relay,
             app,
@@ -255,10 +257,11 @@ async fn connection(
     let Handoff {
         upgrade,
         route,
+        profile,
         _permit,
     } = handoff;
     match route {
-        Route::Intercept => intercepted(upgrade, shared, stopped).await,
+        Route::Intercept => intercepted(upgrade, shared, profile, stopped).await,
         Route::Tunnel(upstream) => {
             if let Ok(upgraded) = upgrade.await {
                 tunnel::splice(TokioIo::new(upgraded), upstream).await;
@@ -280,7 +283,7 @@ async fn handle_connect(
             "The intercept proxy accepts only CONNECT",
         );
     }
-    if !authorized(request.headers(), &shared.credentials) {
+    let Some(profile) = authorized(request.headers(), &shared.password) else {
         let mut response = json_error(
             StatusCode::PROXY_AUTHENTICATION_REQUIRED,
             "authentication_error",
@@ -291,7 +294,7 @@ async fn handle_connect(
             HeaderValue::from_static("Basic realm=\"duolane\""),
         );
         return response;
-    }
+    };
     let Some((host, port)) = authority_target(request.uri()) else {
         return json_error(
             StatusCode::BAD_REQUEST,
@@ -344,6 +347,7 @@ async fn handle_connect(
     let handoff = Handoff {
         upgrade: hyper::upgrade::on(&mut request),
         route,
+        profile,
         _permit: permit,
     };
     if sender.send(handoff).is_err() {
@@ -364,24 +368,27 @@ fn take<T>(slot: &Slot<T>) -> Option<T> {
     slot.lock().ok().and_then(|mut value| value.take())
 }
 
-fn authorized(headers: &HeaderMap, credentials: &str) -> bool {
+fn authorized(headers: &HeaderMap, password: &str) -> Option<Option<LaunchProfile>> {
     let mut values = headers.get_all(header::PROXY_AUTHORIZATION).iter();
     let (Some(value), None) = (values.next(), values.next()) else {
-        return false;
+        return None;
     };
-    let Some((scheme, token)) = value
-        .to_str()
-        .ok()
-        .and_then(|value| value.trim().split_once(' '))
-    else {
-        return false;
-    };
-    scheme.eq_ignore_ascii_case("basic")
-        && STANDARD
-            .decode(token.trim())
-            .ok()
-            .and_then(|decoded| String::from_utf8(decoded).ok())
-            .is_some_and(|decoded| constant_time_eq(&decoded, credentials))
+    let (scheme, token) = value.to_str().ok()?.trim().split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
+    }
+    let decoded = String::from_utf8(STANDARD.decode(token.trim()).ok()?).ok()?;
+    let (user, candidate) = decoded.split_once(':')?;
+    if !constant_time_eq(candidate, password) {
+        return None;
+    }
+    if user == PROXY_USER {
+        return Some(None);
+    }
+    user.strip_prefix(PROXY_USER)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .filter(|name| crate::claude_accounts::valid_profile_tag(name))
+        .map(|name| Some(LaunchProfile(name.into())))
 }
 
 fn authority_target(uri: &Uri) -> Option<(String, u16)> {
@@ -394,7 +401,12 @@ fn authority_target(uri: &Uri) -> Option<(String, u16)> {
     (!host.is_empty() && !authority.as_str().contains('@')).then(|| (host.to_string(), port))
 }
 
-async fn intercepted(upgrade: OnUpgrade, shared: Arc<Shared>, mut stopped: watch::Receiver<bool>) {
+async fn intercepted(
+    upgrade: OnUpgrade,
+    shared: Arc<Shared>,
+    profile: Option<LaunchProfile>,
+    mut stopped: watch::Receiver<bool>,
+) {
     let Ok(upgraded) = upgrade.await else {
         return;
     };
@@ -405,7 +417,12 @@ async fn intercepted(upgrade: OnUpgrade, shared: Arc<Shared>, mut stopped: watch
     };
     let service = service_fn(move |request| {
         let shared = shared.clone();
-        async move { Ok::<_, Infallible>(dispatch::dispatch(request, &shared.app, &shared.relay).await) }
+        let profile = profile.clone();
+        async move {
+            Ok::<_, Infallible>(
+                dispatch::dispatch(request, &shared.app, &shared.relay, profile).await,
+            )
+        }
     });
     let mut builder = http1::Builder::new();
     builder

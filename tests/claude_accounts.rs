@@ -137,6 +137,24 @@ fn claude_accounts_list_shows_accounts_selection_and_duplicates() {
     assert!(row(&table, "big").contains("unknown"));
     assert!(row(&table, "evil").contains("evil[31m@example.com"));
     assert!(!table.contains('\u{1b}'));
+    assert!(table.contains("all accounts: 5H - used, 7D - used (0 of"));
+
+    let state = sandbox.root.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let usage = state.join("claude-usage.json");
+    std::fs::write(
+        &usage,
+        r#"{"profiles":{"backup":{"five_hour":{"used":0.25,"resets_at":4102444800},"seven_day":{"used":0.5},"observed_at":1},"../x":{"observed_at":2}}}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&usage, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let table = text(&sandbox.run(&["accounts", "list"], &[]).stdout);
+    assert!(row(&table, "backup").contains("25%") && row(&table, "backup").contains("50%"));
+    assert!(table.contains("all accounts: 5H 25% used, 7D 50% used (1 of"));
+    std::fs::set_permissions(&usage, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let table = text(&sandbox.run(&["accounts", "list"], &[]).stdout);
+    assert!(!row(&table, "backup").contains("25%"));
 }
 
 #[test]

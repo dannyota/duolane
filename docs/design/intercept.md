@@ -29,7 +29,10 @@ A [spike](#spike-results) confirmed the behavior this design depends on. The
   `DUOLANE_INTERCEPT_PORT`, by default 18766. The bind address setting does not
   apply to it.
 - It accepts only `CONNECT`. Any other method gets 405, and a `CONNECT` without
-  the proxy password gets 407.
+  the proxy password gets 407. The proxy user is `duolane`, or `duolane.`
+  followed by a valid profile name when a named
+  [account](claude-accounts.md#plan-usage) launched the session. Any other user
+  gets 407.
 - At shutdown it stops accepting, gives open connections 5 seconds, then closes
   them, because tunnels and long polls would otherwise never end.
 - `duolane serve` raises its soft open-file limit to the hard limit, up to

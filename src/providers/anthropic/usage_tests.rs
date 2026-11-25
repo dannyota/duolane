@@ -34,6 +34,7 @@ async fn relay_chunks(content_type: &str, chunks: Vec<Vec<u8>>) -> (Vec<u8>, Mon
             raw_body: Bytes::from_static(br#"{"messages":[]}"#),
             headers: axum::http::HeaderMap::new(),
             path_and_query: "/v1/messages".into(),
+            claude_profile: None,
         }),
     };
     let provider = AnthropicProvider::with_timeouts(
