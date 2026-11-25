@@ -1,5 +1,7 @@
 #[path = "websocket_pool_bound.rs"]
 mod bound;
+#[path = "websocket_pool_freshness.rs"]
+mod freshness;
 use bound::IDLE_POOL_BOUND;
 #[cfg(test)]
 use bound::idle_pool_bound;
@@ -82,6 +84,7 @@ pub(super) struct PoolEntry {
     identity: Option<HandshakeIdentity>,
     created_at: u64,
     last_activity: AtomicU64,
+    returned_at: Mutex<Option<tokio::time::Instant>>,
     return_id: AtomicU64,
     completed_ids: Mutex<std::collections::HashSet<[u8; 32]>>,
 }
@@ -94,6 +97,7 @@ impl PoolEntry {
             identity: None,
             created_at: now_ms(),
             last_activity: AtomicU64::new(next_pool_activity()),
+            returned_at: Mutex::new(None),
             return_id: AtomicU64::new(0),
             completed_ids: Mutex::new(std::collections::HashSet::new()),
         }
@@ -391,10 +395,12 @@ pub(super) fn pool_insert_for_turn_token(
 ) -> Option<u64> {
     let owner = reservation_pool_owner(Some(reservation))?;
     if !owner.2 {
-        return pool_insert_token(owner, entry);
+        return pool_insert_token(owner, entry, true);
     }
-    super::continuation::if_current_turn_for_owner(reservation, || pool_insert_token(owner, entry))
-        .flatten()
+    super::continuation::if_current_turn_for_owner(reservation, || {
+        pool_insert_token(owner, entry, true)
+    })
+    .flatten()
 }
 
 pub(super) fn pool_remove_entry(owner: &PoolKey, entry: &Arc<PoolEntry>) {
@@ -440,10 +446,10 @@ pub(super) fn invalidate_codex_websocket_pool_return(
 }
 
 fn pool_insert_if_vacant_or_same(owner: PoolKey, entry: Arc<PoolEntry>) -> bool {
-    pool_insert_token(owner, entry).is_some()
+    pool_insert_token(owner, entry, false).is_some()
 }
 
-fn pool_insert_token(owner: PoolKey, entry: Arc<PoolEntry>) -> Option<u64> {
+fn pool_insert_token(owner: PoolKey, entry: Arc<PoolEntry>, returned: bool) -> Option<u64> {
     let mut guard = WS_POOL.lock().unwrap();
     let now = now_ms();
     let expired_keys: Vec<_> = guard
@@ -478,6 +484,9 @@ fn pool_insert_token(owner: PoolKey, entry: Arc<PoolEntry>) -> Option<u64> {
     let return_id = next_monotonic_nonzero(&POOL_RETURN_SEQUENCE, "WebSocket return ID");
     entry.return_id.store(return_id, Ordering::Relaxed);
     entry.touch();
+    if returned {
+        *entry.returned_at.lock().unwrap() = Some(tokio::time::Instant::now());
+    }
     guard.insert(owner, entry);
     drop(guard);
     drop(evicted);
@@ -1254,6 +1263,7 @@ mod tests {
                 identity: None,
                 created_at: now_ms(),
                 last_activity: AtomicU64::new(next_pool_activity()),
+                returned_at: Mutex::new(None),
                 return_id: AtomicU64::new(0),
                 completed_ids: Mutex::new(std::collections::HashSet::new()),
             });

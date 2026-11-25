@@ -178,6 +178,13 @@ native server compaction retain their configured transport.
   minutes ago or does not answer a ping. The request then counts as a WebSocket
   attempt that failed before it was sent, and the rules below choose a new
   socket, HTTP, or an error.
+- When the socket returned to the pool less than 10 seconds ago, a check that
+  does not wait replaces the ping: frames that already arrived are read, a ping
+  is answered, and a close, an end of stream, an error, or any other frame
+  closes the socket as a failed ping does. The ping would cost one round trip on
+  most agent steps, and a socket the server closed after its last response is
+  still caught before the send. A socket that fails after this check follows the
+  rules below for a transport failure, as on a new socket.
 - Reuse never changes how a request ends: errors, limits, and incomplete
   responses keep the results the rules below give them. It only decides what
   happens to the socket. A socket returns to the pool when its stream showed a

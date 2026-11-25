@@ -1,3 +1,5 @@
+#[path = "websocket_validation.rs"]
+mod validation;
 use futures_util::{SinkExt, StreamExt};
 use http::HeaderMap;
 use std::sync::Arc;
@@ -7,6 +9,9 @@ use tokio::sync::{OwnedMutexGuard, mpsc};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use validation::check_pooled_websocket;
+#[cfg(test)]
+use validation::validate_pooled_websocket;
 
 use crate::provider::RequestContext;
 use crate::traffic::TrafficCapture;
@@ -99,7 +104,7 @@ pub(super) async fn codex_websocket_request(
     let mut guard = entry.ws.clone().lock_owned().await;
 
     if used_pooled
-        && validate_pooled_websocket(&mut guard, connect_timeout_ms)
+        && check_pooled_websocket(&entry, &mut guard, connect_timeout_ms)
             .await
             .is_err()
     {
@@ -240,43 +245,6 @@ fn new_pool_entry(stream: CodexWebSocketStream, identity: Option<HandshakeIdenti
     }
 }
 
-async fn validate_pooled_websocket<S>(
-    websocket: &mut WebSocketStream<S>,
-    timeout_ms: u64,
-) -> Result<(), String>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let nonce = next_monotonic_nonzero(&POOLED_VALIDATION_SEQUENCE, "pooled validation")
-        .to_be_bytes()
-        .to_vec();
-    websocket
-        .send(Message::Ping(nonce.clone().into()))
-        .await
-        .map_err(|error| error.to_string())?;
-    tokio::time::timeout(Duration::from_millis(timeout_ms), async {
-        loop {
-            match websocket.next().await {
-                Some(Ok(Message::Pong(payload))) if payload == nonce => return Ok(()),
-                Some(Ok(Message::Ping(payload))) => websocket
-                    .send(Message::Pong(payload))
-                    .await
-                    .map_err(|error| error.to_string())?,
-                Some(Ok(Message::Pong(_))) => {
-                    return Err("unexpected Pong during pooled validation".to_string());
-                }
-                Some(Ok(_)) => {
-                    return Err("unexpected frame during pooled validation".to_string());
-                }
-                Some(Err(error)) => return Err(error.to_string()),
-                None => return Err("connection closed during pooled validation".to_string()),
-            }
-        }
-    })
-    .await
-    .map_err(|_| "validation timeout".to_string())?
-}
-
 pub(super) struct ReadyWebSocket {
     ws_url: String,
     guard: OwnedMutexGuard<CodexWebSocketStream>,
@@ -336,7 +304,7 @@ pub(super) async fn prepare_codex_websocket(
     };
     let mut guard = entry.ws.clone().lock_owned().await;
     if used_pooled
-        && let Err(detail) = validate_pooled_websocket(&mut guard, connect_timeout_ms).await
+        && let Err(detail) = check_pooled_websocket(&entry, &mut guard, connect_timeout_ms).await
     {
         drop(guard);
         if let Some(owner) = &pool_owner {
