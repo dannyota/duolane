@@ -1,6 +1,28 @@
 use super::*;
 
 impl MonitorApp {
+    pub(super) fn handle_key_query(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        state: &MonitorSnapshot,
+        frame_size: (u16, u16),
+        size: impl FnOnce() -> std::io::Result<(u16, u16)>,
+    ) -> std::io::Result<Option<MonitorExit>> {
+        if key.code == KeyCode::Enter
+            && self.usage_open
+            && self.phase == MonitorPhase::Running
+            && !self.show_help
+            && !self.show_setup
+            && self.accounts.confirmation_visible()
+        {
+            return Ok(match size() {
+                Ok(size) => self.handle_key_sized(key, state, size, frame_size),
+                Err(_) => None,
+            });
+        }
+        Ok(self.handle_key(key, state))
+    }
+
     pub(super) fn handle_key_sized(
         &mut self,
         key: crossterm::event::KeyEvent,

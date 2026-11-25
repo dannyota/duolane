@@ -218,7 +218,7 @@ fn run_monitor_events(
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if let Some(exit) =
-                        app.handle_key_sized(key, state, crossterm::terminal::size()?, targets.size)
+                        app.handle_key_query(key, state, targets.size, crossterm::terminal::size)?
                     {
                         return Ok(exit);
                     }

@@ -1,13 +1,30 @@
 pub(super) fn needed_height(
     area: ratatui::layout::Rect,
-    _: &crate::monitor::snapshot::MonitorSnapshot,
+    snapshot: &crate::monitor::snapshot::MonitorSnapshot,
     count: usize,
 ) -> u16 {
     let claude = 4_u16.saturating_add((count.min(u16::MAX as usize / 3) * 3) as u16);
-    if area.width >= 90 {
-        claude.max(6)
+    let width = if area.width >= 90 {
+        area.width / 2
     } else {
-        claude.saturating_add(6)
+        area.width
+    }
+    .saturating_sub(2);
+    let now = std::time::SystemTime::now();
+    let quota = snapshot
+        .codex_quota
+        .as_ref()
+        .filter(|q| now.duration_since(q.observed_at).is_ok());
+    let lines = vec![
+        ratatui::text::Line::from(quota_summary(quota, now)),
+        super::usage_limits::codex("Primary", quota.and_then(|q| q.primary.as_ref()), now),
+        super::usage_limits::codex("Secondary", quota.and_then(|q| q.secondary.as_ref()), now),
+    ];
+    let chatgpt = super::usage_limits::wrapped_height(&lines, width).saturating_add(2);
+    if area.width >= 90 {
+        claude.max(chatgpt)
+    } else {
+        claude.saturating_add(chatgpt)
     }
 }
 
@@ -108,6 +125,9 @@ impl Accounts {
     #[cfg(test)]
     pub(super) fn names(&self) -> &[String] {
         &self.names
+    }
+    pub(super) fn confirmation_visible(&self) -> bool {
+        self.pending.is_some() && self.confirmation_visible
     }
     pub(super) fn confirming(&self) -> bool {
         self.pending.is_some()
@@ -401,15 +421,43 @@ impl Accounts {
                 quota.and_then(|q| q.secondary.as_ref()),
                 now,
             );
-            if inner.height >= 3 {
+            if super::usage_limits::wrapped_height(
+                &[detail[0].clone(), primary.clone(), secondary.clone()],
+                inner.width,
+            ) <= inner.height
+            {
                 detail.push(primary);
                 detail.push(secondary);
+            } else if inner.height >= 2 {
+                if inner.height == 2 {
+                    detail.clear();
+                }
+                detail.push(Line::from(super::usage_limits::compact_with_reset(
+                    primary,
+                    inner.width,
+                )));
+                detail.push(Line::from(super::usage_limits::compact_with_reset(
+                    secondary,
+                    inner.width,
+                )));
             } else {
                 if inner.height < 2 {
                     detail.clear();
                 }
-                let mut spans = super::usage_limits::compact("Primary", primary);
-                spans.extend(super::usage_limits::compact("Secondary", secondary));
+                let mut spans = super::usage_limits::compact(
+                    &super::usage_limits::codex_label(
+                        "Primary",
+                        quota.and_then(|q| q.primary.as_ref()),
+                    ),
+                    primary,
+                );
+                spans.extend(super::usage_limits::compact(
+                    &super::usage_limits::codex_label(
+                        "Secondary",
+                        quota.and_then(|q| q.secondary.as_ref()),
+                    ),
+                    secondary,
+                ));
                 detail.push(Line::from(spans));
             }
             if self.local {
@@ -451,6 +499,39 @@ mod tests {
         let text = crate::tui::tests::buffer_text(&buffer);
         assert!(text.contains("Claude profiles: Unknown"));
         assert!(!text.contains("Claude example"));
+    }
+
+    #[test]
+    fn narrow_compact_windows_keep_reset_times_on_their_rows() {
+        let now = SystemTime::now();
+        let reset = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        let mut state: crate::monitor::snapshot::MonitorSnapshot =
+            crate::monitor::mock_state().into();
+        state.codex_quota = Some(CodexQuotaSnapshot {
+            observed_at: now,
+            primary: Some(CodexQuotaWindow {
+                used_percent: Some(42.0),
+                window_minutes: Some(300),
+                reset_at: Some(reset),
+            }),
+            secondary: Some(CodexQuotaWindow {
+                used_percent: Some(12.0),
+                window_minutes: Some(120),
+                reset_at: Some(reset + 3600),
+            }),
+        });
+        let mut accounts = Accounts::new(false);
+        let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(40, 7, |f| {
+            accounts.render(f, f.area(), &state)
+        }));
+        let second = super::super::cells::format_system_time(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(reset + 3600),
+        );
+        assert!(text.contains(&second), "{text}");
     }
 
     #[cfg(unix)]
@@ -542,6 +623,12 @@ mod tests {
         );
         app.handle_key(key, &state);
         crate::tui::tests::draw(80, 24, |f| crate::tui::render(f, &mut app, &state));
+        assert!(
+            app.handle_key_query(key, &state, (80, 24), || Err(std::io::Error::other("size")))
+                .is_ok()
+        );
+        assert!(app.accounts.confirming());
+        assert_eq!(app.accounts.selected, "default");
         app.handle_key_sized(key, &state, (79, 24), (80, 24));
         assert!(app.accounts.confirming());
     }

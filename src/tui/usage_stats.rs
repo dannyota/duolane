@@ -28,16 +28,12 @@ fn median(values: &mut [f64]) -> Option<f64> {
     }
 }
 
-type GroupKey = (String, Option<String>, String);
+type GroupKey = (Option<String>, Option<String>, Option<String>);
 
 fn groups(recent: &[CompletedSnapshot]) -> Vec<(GroupKey, Group)> {
     let mut groups = BTreeMap::<GroupKey, Group>::new();
     for row in recent {
-        let key = (
-            row.provider.clone().unwrap_or_else(|| "-".into()),
-            row.model.clone(),
-            row.effort.clone().unwrap_or_else(|| "-".into()),
-        );
+        let key = (row.provider.clone(), row.model.clone(), row.effort.clone());
         let group = groups.entry(key).or_default();
         group.count += 1;
         if let Some(wait) = row
@@ -137,10 +133,14 @@ pub(super) fn render(
                 (n * 2.0).round().min(width.saturating_sub(waits) as f64) as usize
             });
             Row::new(vec![
-                Cell::from(if lane == "anthropic" {
+                Cell::from(if lane.as_deref() == Some("anthropic") {
                     "claude".into()
                 } else {
-                    lane.chars().filter(|c| !c.is_control()).collect::<String>()
+                    lane.as_deref()
+                        .unwrap_or("-")
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .collect::<String>()
                 }),
                 Cell::from(
                     model
@@ -152,6 +152,8 @@ pub(super) fn render(
                 ),
                 Cell::from(
                     effort
+                        .as_deref()
+                        .unwrap_or("-")
                         .chars()
                         .filter(|c| !c.is_control())
                         .collect::<String>(),

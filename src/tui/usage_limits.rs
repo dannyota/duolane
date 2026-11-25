@@ -64,17 +64,24 @@ pub(super) fn claude(
     Line::from(format!("  {label:<5} Unknown"))
 }
 
+pub(super) fn codex_label(
+    label: &str,
+    window: Option<&crate::monitor::CodexQuotaWindow>,
+) -> String {
+    match window.and_then(|w| w.window_minutes) {
+        Some(300) => "5h".to_owned(),
+        Some(10080) => "week".to_owned(),
+        Some(n) if (1..=525_600_000).contains(&n) => format!("{label} ({n}m)"),
+        _ => label.to_owned(),
+    }
+}
+
 pub(super) fn codex(
     label: &str,
     window: Option<&crate::monitor::CodexQuotaWindow>,
     now: SystemTime,
 ) -> Line<'static> {
-    let label = match window.and_then(|w| w.window_minutes) {
-        Some(300) => "5h".to_owned(),
-        Some(10080) => "week".to_owned(),
-        Some(n) if (1..=525_600_000).contains(&n) => format!("{label} ({n}m)"),
-        _ => label.to_owned(),
-    };
+    let label = codex_label(label, window);
     let mut spans = vec![Span::raw(format!("  {label:<9} "))];
     spans.extend(bar(window.and_then(|w| w.used_percent), TEAL, true));
     let reset = window
@@ -104,6 +111,49 @@ pub(super) fn compact(label: &str, line: Line<'static>) -> Vec<Span<'static>> {
     spans.push(Span::styled("█".repeat(count), line.spans[1].style));
     spans.push(Span::styled("░".repeat(4 - count), line.spans[2].style));
     spans.push(line.spans[3].clone());
+    spans
+}
+
+pub(super) fn wrapped_height(lines: &[Line<'_>], width: u16) -> u16 {
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        widgets::{Paragraph, Widget, Wrap},
+    };
+    if width == 0 {
+        return u16::MAX;
+    }
+    let area = Rect::new(0, 0, width, 64);
+    let mut buffer = Buffer::empty(area);
+    Paragraph::new(lines.to_vec())
+        .wrap(Wrap { trim: false })
+        .render(area, &mut buffer);
+    (0..area.height)
+        .rev()
+        .find(|y| (0..width).any(|x| buffer[(x, *y)].symbol() != " "))
+        .map_or(0, |y| y + 1)
+}
+
+pub(super) fn compact_with_reset(line: Line<'static>, width: u16) -> Vec<Span<'static>> {
+    let label = line.spans[0].content.trim().to_owned();
+    let mut spans = compact(&label, line.clone());
+    if let Some(reset) = line.spans.last() {
+        let text = reset.content.split(" (").next().unwrap_or(&reset.content);
+        spans.push(Span::raw(text.to_owned()));
+    }
+    if Line::from(spans.clone()).width() > usize::from(width) && spans.len() >= 5 {
+        spans.drain(1..3);
+    }
+    if Line::from(spans.clone()).width() > usize::from(width)
+        && let Some(reset) = spans.last_mut()
+    {
+        reset.content = reset.content.replace("reset ", "").into();
+    }
+    if Line::from(spans.clone()).width() > usize::from(width) {
+        let reset = spans.pop().unwrap_or_default();
+        let content = format!("{} {}", reset.content.trim(), Line::from(spans));
+        return vec![Span::raw(cells::ellipsize(&content, usize::from(width)))];
+    }
     spans
 }
 

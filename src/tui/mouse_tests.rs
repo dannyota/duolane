@@ -403,3 +403,85 @@ pub(super) fn app_for_accounts_test(accounts: accounts::Accounts) -> MonitorApp 
     app.usage_open = true;
     app
 }
+
+#[test]
+fn attached_usage_shows_both_reset_times_at_90_by_24() {
+    use crate::monitor::{CodexQuotaSnapshot, CodexQuotaWindow};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now();
+    let reset = now.duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600;
+    let mut state: MonitorSnapshot = mock_state().into();
+    state.codex_quota = Some(CodexQuotaSnapshot {
+        observed_at: now,
+        primary: Some(CodexQuotaWindow {
+            used_percent: Some(42.0),
+            window_minutes: Some(300),
+            reset_at: Some(reset),
+        }),
+        secondary: Some(CodexQuotaWindow {
+            used_percent: Some(12.0),
+            window_minutes: Some(10080),
+            reset_at: Some(reset + Duration::from_secs(3600).as_secs()),
+        }),
+    });
+    let mut app = app();
+    app.usage_open = true;
+    let text = buffer_text(&draw(90, 24, |frame| render(frame, &mut app, &state)));
+    let second_reset = cells::format_system_time(UNIX_EPOCH + Duration::from_secs(reset + 3600));
+    assert!(text.contains(&second_reset), "{text}");
+}
+
+#[test]
+fn compact_subscription_uses_validated_window_labels() {
+    use crate::monitor::{CodexQuotaSnapshot, CodexQuotaWindow};
+    use std::time::SystemTime;
+    let mut state: MonitorSnapshot = mock_state().into();
+    state.codex_quota = Some(CodexQuotaSnapshot {
+        observed_at: SystemTime::now(),
+        primary: Some(CodexQuotaWindow {
+            used_percent: Some(42.0),
+            window_minutes: Some(300),
+            reset_at: None,
+        }),
+        secondary: Some(CodexQuotaWindow {
+            used_percent: Some(12.0),
+            window_minutes: Some(120),
+            reset_at: None,
+        }),
+    });
+    let mut app = app();
+    app.usage_open = true;
+    let text = buffer_text(&draw(100, 10, |frame| render(frame, &mut app, &state)));
+    assert!(text.contains("5h"), "{text}");
+    assert!(text.contains("Secondary (120m)"), "{text}");
+}
+
+#[test]
+fn key_events_only_query_size_when_saving_confirmation() {
+    let state: MonitorSnapshot = mock_state().into();
+    let mut app = app();
+    let key = crossterm::event::KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
+    assert!(
+        app.handle_key_query(key, &state, (80, 24), || Err(std::io::Error::other("size")))
+            .is_ok()
+    );
+    assert!(app.show_help);
+}
+
+#[test]
+fn usage_keeps_missing_and_literal_dash_provider_and_effort_separate() {
+    let mut state: MonitorSnapshot = mock_state().into();
+    let mut row = state.recent[0].clone();
+    row.model = Some("distinct".into());
+    row.provider = None;
+    row.effort = None;
+    let mut provider = row.clone();
+    provider.provider = Some("-".into());
+    let mut effort = row.clone();
+    effort.effort = Some("-".into());
+    state.recent = vec![row, provider, effort];
+    let mut app = app();
+    app.usage_open = true;
+    let text = detail_text(&mut app, &state);
+    assert_eq!(text.matches("distinct").count(), 3, "{text}");
+}
