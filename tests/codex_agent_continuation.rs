@@ -644,6 +644,7 @@ async fn emit_completion(
     text: &str,
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
     let events = [
+        json!({"type":"response.created","response":{"id":response_id}}),
         json!({
             "type": "response.output_item.added",
             "output_index": 0,
@@ -663,6 +664,7 @@ async fn emit_completion(
             "type": "response.completed",
             "response": {
                 "id": response_id,
+                "status": "completed",
                 "usage": {"input_tokens": 5, "output_tokens": 2}
             }
         }),
@@ -681,6 +683,7 @@ async fn emit_function_call(
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
     let item_id = format!("fc-{response_id}");
     let events = [
+        json!({"type":"response.created","response":{"id":response_id}}),
         json!({
             "type": "response.output_item.added",
             "output_index": 0,
@@ -711,6 +714,7 @@ async fn emit_function_call(
             "type": "response.completed",
             "response": {
                 "id": response_id,
+                "status": "completed",
                 "usage": {"input_tokens": 5, "output_tokens": 2}
             }
         }),

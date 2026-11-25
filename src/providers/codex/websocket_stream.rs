@@ -76,6 +76,7 @@ pub(super) struct WsEvent {
     pub(super) event_type: String,
     pub(super) payload: serde_json::Value,
     pub(super) hosted_tool_executed: bool,
+    pub(super) reusable: bool,
 }
 
 #[cfg(test)]
@@ -96,6 +97,7 @@ where
         pool_entry,
         traffic,
         &Default::default(),
+        false,
     )
     .await
 }
@@ -107,6 +109,7 @@ pub(super) async fn collect_ws_events_tracked<S>(
     pool_entry: Option<&Arc<PoolEntry>>,
     traffic: Option<&TrafficCapture>,
     budget: &super::recovery::RecoveryBudget,
+    reused: bool,
 ) -> Result<(Vec<u8>, Option<WsEvent>), CodexError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -119,10 +122,12 @@ where
         traffic,
         WEBSOCKET_KEEPALIVE_INTERVAL,
         budget,
+        reused,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn collect_ws_events_with_keepalive_interval<S>(
     ws: &mut WebSocketStream<S>,
     idle_timeout_ms: u64,
@@ -131,6 +136,7 @@ async fn collect_ws_events_with_keepalive_interval<S>(
     traffic: Option<&TrafficCapture>,
     keepalive_interval: Duration,
     budget: &super::recovery::RecoveryBudget,
+    reused: bool,
 ) -> Result<(Vec<u8>, Option<WsEvent>), CodexError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -142,6 +148,8 @@ where
     let mut last_response_event_at = response_wait_started;
     let mut response_started = false;
 
+    let mut created_id: Option<String> = None;
+    let mut seen_created = false;
     let terminal_event = loop {
         let response_deadline_started = if response_started {
             last_response_event_at
@@ -223,6 +231,17 @@ where
                     }
                 };
 
+                if reused && !seen_created && stale_before_created(&parsed) {
+                    budget.mark_ambiguous_hosted();
+                    break Err(stale_response_error());
+                }
+                if parsed.get("type").and_then(|v| v.as_str()) == Some("response.created") {
+                    seen_created = true;
+                    created_id = parsed
+                        .pointer("/response/id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+                }
                 sse_body.extend_from_slice(&encode_sse(&text));
                 if let Some(tc) = traffic {
                     tc.write_json_event("040-upstream-event", &parsed);
@@ -245,6 +264,7 @@ where
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown")
                             .to_string(),
+                        reusable: completed_response_matches(&parsed, created_id.as_deref()),
                         payload: parsed,
                         hosted_tool_executed,
                     }));
@@ -295,12 +315,43 @@ where
         })
 }
 
+fn stale_before_created(event: &serde_json::Value) -> bool {
+    let kind = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if is_terminal_event(event) {
+        return matches!(kind, "response.completed" | "response.done")
+            && !super::events::response_is_incomplete_terminal(event)
+            && super::events::classify_event_failure(event).is_none();
+    }
+    kind.starts_with("response.") && !matches!(kind, "response.created" | "response.in_progress")
+}
+
+fn stale_response_error() -> CodexError {
+    CodexError {
+        status: 0,
+        message: "Stale WebSocket response event".to_string(),
+        detail: None,
+        retry_after: None,
+        usage_limit: None,
+        origin: CodexErrorOrigin::WebSocketTransient,
+    }
+}
+
+fn completed_response_matches(event: &serde_json::Value, created_id: Option<&str>) -> bool {
+    is_terminal_event(event)
+        && super::events::classify_event_failure(event).is_none()
+        && !super::events::response_is_incomplete_terminal(event)
+        && event.pointer("/response/status").and_then(|v| v.as_str()) == Some("completed")
+        && created_id.is_some()
+        && event.pointer("/response/id").and_then(|v| v.as_str()) == created_id
+}
+
 pub(super) async fn stream_ws_events<S>(
     ws: &mut WebSocketStream<S>,
     idle_timeout_ms: u64,
     traffic: Option<Arc<TrafficCapture>>,
     tx: &mpsc::Sender<Result<serde_json::Value, CodexError>>,
     budget: &super::recovery::RecoveryBudget,
+    reused: bool,
 ) -> (bool, Option<Result<serde_json::Value, CodexError>>)
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -312,6 +363,9 @@ where
     let mut response_started = false;
     let mut status = 200u16;
     let mut reusable = false;
+    let mut completed = false;
+    let mut created_id: Option<String> = None;
+    let mut seen_created = false;
     let mut terminal_item = None;
 
     loop {
@@ -382,6 +436,17 @@ where
                     }
                 };
 
+                if reused && !seen_created && stale_before_created(&parsed) {
+                    terminal_item = Some(Err(stale_response_error()));
+                    break;
+                }
+                if parsed.get("type").and_then(|v| v.as_str()) == Some("response.created") {
+                    seen_created = true;
+                    created_id = parsed
+                        .pointer("/response/id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+                }
                 if budget.is_tracked() && super::client_sse::payload_confirms_hosted(&parsed) {
                     budget.mark_hosted();
                 }
@@ -408,8 +473,9 @@ where
                             origin: CodexErrorOrigin::WebSocket,
                         }));
                     } else {
-                        reusable = parsed.get("type").and_then(|value| value.as_str())
+                        completed = parsed.get("type").and_then(|value| value.as_str())
                             == Some("response.completed");
+                        reusable = completed_response_matches(&parsed, created_id.as_deref());
                         terminal_item = Some(Ok(parsed));
                     }
                     break;
@@ -457,7 +523,7 @@ where
         }
     }
 
-    if !reusable {
+    if !completed {
         budget.mark_ambiguous_hosted();
     }
     if let Some(tc) = traffic.as_deref() {
@@ -533,6 +599,102 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stale_response_events_exclude_failures_and_keepalives() {
+        assert!(stale_before_created(
+            &serde_json::json!({"type":"response.output_text.delta"})
+        ));
+        assert!(stale_before_created(
+            &serde_json::json!({"type":"response.completed","response":{"status":"completed"}})
+        ));
+        assert!(!stale_before_created(
+            &serde_json::json!({"type":"response.failed"})
+        ));
+        assert!(!stale_before_created(&serde_json::json!({"type":"error"})));
+        assert!(!stale_before_created(
+            &serde_json::json!({"type":"codex.rate_limits"})
+        ));
+    }
+
+    #[tokio::test]
+    async fn reused_socket_rejects_stale_output_before_delivery() {
+        let (client_io, server_io) = tokio::io::duplex(2048);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        server
+            .send(Message::text(
+                r#"{"type":"response.output_text.delta","delta":"stale"}"#,
+            ))
+            .await
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(2);
+        let (reusable, terminal) =
+            stream_ws_events(&mut client, 1_000, None, &tx, &Default::default(), true).await;
+        assert!(!reusable);
+        assert!(matches!(
+            terminal,
+            Some(Err(CodexError {
+                origin: CodexErrorOrigin::WebSocketTransient,
+                ..
+            }))
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_and_incomplete_terminals_are_delivered_without_reuse() {
+        for (kind, status) in [
+            ("response.failed", "failed"),
+            ("response.incomplete", "incomplete"),
+        ] {
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            server
+                .send(Message::text(
+                    serde_json::json!({"type":"response.created","response":{"id":"response"}})
+                        .to_string(),
+                ))
+                .await
+                .unwrap();
+            let terminal = serde_json::json!({"type":kind,"response":{"id":"response","status":status,"incomplete_details":{"reason":"max_output_tokens"}}});
+            server
+                .send(Message::text(terminal.to_string()))
+                .await
+                .unwrap();
+            let (tx, _rx) = mpsc::channel(2);
+            let (reusable, result) =
+                stream_ws_events(&mut client, 1_000, None, &tx, &Default::default(), false).await;
+            assert!(!reusable);
+            assert_eq!(result.unwrap().unwrap(), terminal);
+        }
+    }
+
+    #[tokio::test]
+    async fn reuse_requires_matching_created_and_completed_response() {
+        for (created, terminal, expected) in [("one", "one", true), ("one", "two", false)] {
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            let task = tokio::spawn(async move {
+                server
+                    .send(Message::text(
+                        serde_json::json!({"type":"response.created", "response":{"id":created}})
+                            .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                server.send(Message::text(serde_json::json!({"type":"response.completed", "response":{"id":terminal,"status":"completed"}}).to_string())).await.unwrap();
+            });
+            let (tx, _rx) = mpsc::channel(2);
+            let (reusable, terminal) =
+                stream_ws_events(&mut client, 1_000, None, &tx, &Default::default(), false).await;
+            assert_eq!(reusable, expected);
+            assert!(matches!(terminal, Some(Ok(_))));
+            task.await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn abrupt_loopback_eof_is_transient_only_for_tracked_websocket() {
         use super::super::recovery::{RecoveryBudget, live_retry_exhausted};
@@ -557,7 +719,8 @@ mod tests {
                 budget.enable_typed_websocket();
             }
             let (tx, _rx) = mpsc::channel(1);
-            let (_, terminal) = stream_ws_events(&mut socket, 1_000, None, &tx, &budget).await;
+            let (_, terminal) =
+                stream_ws_events(&mut socket, 1_000, None, &tx, &budget, false).await;
             let error = terminal.unwrap().unwrap_err();
             assert_eq!(
                 error.origin,
@@ -603,7 +766,7 @@ mod tests {
         let send = tokio::spawn(async move {
             server.send(Message::text(r#"{"type":"response.failed","response":{"output":[{"type":"web_search_call"}]}}"#)).await.unwrap();
         });
-        let (_, terminal) = stream_ws_events(&mut client, 1_000, None, &tx, &budget).await;
+        let (_, terminal) = stream_ws_events(&mut client, 1_000, None, &tx, &budget, false).await;
         assert!(terminal.is_some());
         assert!(gate.hosted());
         assert!(rx.try_recv().is_err());
@@ -651,6 +814,7 @@ mod tests {
             None,
             WEBSOCKET_KEEPALIVE_INTERVAL,
             &Default::default(),
+            false,
         )
         .await
         {
@@ -691,6 +855,7 @@ mod tests {
             None,
             Duration::from_millis(10),
             &Default::default(),
+            false,
         )
         .await
         {

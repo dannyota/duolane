@@ -174,6 +174,11 @@ async fn send_test_completion(
     ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     id: &str,
 ) {
+    emit_live_event(
+        ws,
+        &serde_json::json!({"type":"response.created","response":{"id":id}}),
+    )
+    .await;
     for event in test_completion(id) {
         emit_live_event(ws, &event).await;
     }

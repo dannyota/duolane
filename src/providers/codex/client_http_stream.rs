@@ -198,6 +198,7 @@ impl CodexHttpClient {
                 &self.websocket_proxy_config,
                 &self.base_url,
                 &headers,
+                Some(super::sources::CredentialId::for_chatgpt_auth(&auth)),
                 ctx.traffic.clone(),
                 continuation,
                 super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
@@ -697,13 +698,32 @@ impl CodexHttpClient {
         rx
     }
 }
-
 #[cfg(test)]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     use super::super::client_test_support::*;
+
+    async fn send_completed_websocket_response(
+        websocket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        response_id: &str,
+    ) {
+        use futures_util::SinkExt;
+        websocket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({"type":"response.created", "response":{"id":response_id}})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        super::super::client_test_support::send_completed_websocket_response(
+            websocket,
+            response_id,
+        )
+        .await;
+    }
+
     use super::*;
 
     async fn write_http_chunk(stream: &mut tokio::net::TcpStream, body: &[u8]) {

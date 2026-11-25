@@ -25,6 +25,7 @@ pub(super) async fn codex_websocket_request(
     proxy_config: &WebSocketProxyConfig,
     url: &str,
     headers: &HeaderMap,
+    credential: Option<super::sources::CredentialId>,
     body_value: &serde_json::Value,
     ctx: &RequestContext,
     traffic: Option<&TrafficCapture>,
@@ -75,12 +76,13 @@ pub(super) async fn codex_websocket_request(
     let requires_origin = continuation
         .and_then(|candidate| candidate.previous_response_id.as_deref())
         .is_some();
-    let pooled = take_pool_entry_for_request(reservation)?;
+    let identity = credential.map(|credential| handshake_identity(credential, headers));
+    let pooled = take_pool_entry_for_request(reservation, identity.as_ref())?;
     let mut used_pooled = pooled.is_some();
     let mut entry = if let Some(entry) = pooled {
         entry
     } else {
-        Arc::new(PoolEntry::new(
+        Arc::new(new_pool_entry(
             connect_with_timeout(
                 websocket_client,
                 proxy_config,
@@ -90,6 +92,7 @@ pub(super) async fn codex_websocket_request(
                 &ctx.recovery_budget,
             )
             .await?,
+            identity.clone(),
         ))
     };
     let mut guard = entry.ws.clone().lock_owned().await;
@@ -106,7 +109,7 @@ pub(super) async fn codex_websocket_request(
         if requires_origin {
             return Err(continuation_socket_missing_error());
         }
-        entry = Arc::new(PoolEntry::new(
+        entry = Arc::new(new_pool_entry(
             connect_with_timeout(
                 websocket_client,
                 proxy_config,
@@ -116,11 +119,13 @@ pub(super) async fn codex_websocket_request(
                 &ctx.recovery_budget,
             )
             .await?,
+            identity.clone(),
         ));
         guard = entry.ws.clone().lock_owned().await;
         used_pooled = false;
     }
 
+    log_socket_reuse(ctx, used_pooled);
     websocket_sent.store(true, std::sync::atomic::Ordering::Release);
     ctx.recovery_budget
         .set_send(super::api::SendEvidence::OutcomeUnknown);
@@ -142,6 +147,7 @@ pub(super) async fn codex_websocket_request(
         Some(&entry),
         traffic,
         &ctx.recovery_budget,
+        used_pooled,
     )
     .await;
     drop(guard);
@@ -180,7 +186,7 @@ pub(super) async fn codex_websocket_request(
         });
     }
 
-    let completed = terminal_event.event_type == "response.completed";
+    let completed = terminal_event.reusable;
     let origin_reinserted = if completed {
         reservation.is_some_and(|reservation| pool_insert_for_turn(reservation, entry.clone()))
     } else {
@@ -211,6 +217,23 @@ pub(super) async fn codex_websocket_request(
     );
     response.hosted_tool_executed = terminal_event.hosted_tool_executed;
     Ok(response)
+}
+
+fn log_socket_reuse(ctx: &RequestContext, reused: bool) {
+    crate::logging::create_logger("codex").info(
+        "codex_websocket_request",
+        Some(serde_json::Map::from_iter([
+            ("reqId".to_string(), serde_json::json!(&ctx.req_id)),
+            ("socketReused".to_string(), serde_json::json!(reused)),
+        ])),
+    );
+}
+
+fn new_pool_entry(stream: CodexWebSocketStream, identity: Option<HandshakeIdentity>) -> PoolEntry {
+    match identity {
+        Some(identity) => PoolEntry::with_identity(stream, identity),
+        None => PoolEntry::new(stream),
+    }
 }
 
 async fn validate_pooled_websocket<S>(
@@ -268,6 +291,7 @@ pub(super) async fn prepare_codex_websocket(
     proxy_config: &WebSocketProxyConfig,
     url: &str,
     headers: &HeaderMap,
+    credential: Option<super::sources::CredentialId>,
     traffic: Option<Arc<TrafficCapture>>,
     reservation: Option<&ContinuationReservation>,
     connect_timeout_ms: u64,
@@ -287,7 +311,8 @@ pub(super) async fn prepare_codex_websocket(
     let requires_origin = continuation
         .and_then(|candidate| candidate.previous_response_id.as_deref())
         .is_some();
-    let pooled = take_pool_entry_for_request(reservation)?;
+    let identity = credential.map(|credential| handshake_identity(credential, headers));
+    let pooled = take_pool_entry_for_request(reservation, identity.as_ref())?;
     let used_pooled = pooled.is_some();
     let entry = if let Some(entry) = pooled {
         entry
@@ -301,7 +326,7 @@ pub(super) async fn prepare_codex_websocket(
             budget,
         )
         .await?;
-        Arc::new(PoolEntry::new(stream))
+        Arc::new(new_pool_entry(stream, identity))
     };
     let mut guard = entry.ws.clone().lock_owned().await;
     if used_pooled
@@ -369,7 +394,7 @@ pub(super) fn start_codex_websocket_events(
             ws_url: _,
             mut guard,
             entry,
-            used_pooled: _,
+            used_pooled,
             reservation,
             traffic,
             idle_timeout_ms,
@@ -416,8 +441,15 @@ pub(super) fn start_codex_websocket_events(
             }
             return;
         }
-        let (reusable, terminal_item) =
-            stream_ws_events(&mut guard, idle_timeout_ms, traffic, &tx, &budget).await;
+        let (reusable, terminal_item) = stream_ws_events(
+            &mut guard,
+            idle_timeout_ms,
+            traffic,
+            &tx,
+            &budget,
+            used_pooled,
+        )
+        .await;
         drop(guard);
 
         let origin_reinserted = if reusable {
@@ -449,6 +481,7 @@ pub(super) async fn codex_websocket_event_stream(
     proxy_config: &WebSocketProxyConfig,
     url: &str,
     headers: &HeaderMap,
+    credential: Option<super::sources::CredentialId>,
     body_value: &serde_json::Value,
     ctx: &RequestContext,
     traffic: Option<Arc<TrafficCapture>>,
@@ -463,6 +496,7 @@ pub(super) async fn codex_websocket_event_stream(
         proxy_config,
         url,
         headers,
+        credential,
         body_value,
         ctx,
         traffic,
@@ -481,6 +515,7 @@ pub(super) async fn codex_websocket_event_stream_prepared(
     proxy_config: &WebSocketProxyConfig,
     url: &str,
     headers: &HeaderMap,
+    credential: Option<super::sources::CredentialId>,
     body_value: &serde_json::Value,
     ctx: &RequestContext,
     traffic: Option<Arc<TrafficCapture>>,
@@ -505,6 +540,7 @@ pub(super) async fn codex_websocket_event_stream_prepared(
                 proxy_config,
                 url,
                 headers,
+                credential,
                 traffic,
                 reservation,
                 connect_timeout_ms,
@@ -514,6 +550,7 @@ pub(super) async fn codex_websocket_event_stream_prepared(
             .await?
         }
     };
+    log_socket_reuse(ctx, ready.used_pooled);
     Ok(start_codex_websocket_events(
         ready,
         body_value,
@@ -693,6 +730,7 @@ mod tests {
             &HeaderMap::new(),
             None,
             None,
+            None,
             10_000,
             10_000,
             &super::super::recovery::RecoveryBudget::default(),
@@ -760,6 +798,7 @@ mod tests {
             &WebSocketProxyConfig::direct(),
             &format!("http://{addr}/responses"),
             &HeaderMap::new(),
+            None,
             None,
             Some(&reservation),
             1_000,

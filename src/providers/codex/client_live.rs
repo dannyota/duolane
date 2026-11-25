@@ -168,6 +168,7 @@ impl CodexHttpClient {
                 &self.websocket_proxy_config,
                 &self.base_url,
                 &ws_headers,
+                Some(super::sources::CredentialId::for_chatgpt_auth(&auth)),
                 &ws_body,
                 &ctx,
                 ctx.traffic.clone(),
@@ -513,9 +514,6 @@ pub(super) fn websocket_pool_owner(
     continuation: Option<&super::continuation::ContinuationReservation>,
 ) -> Option<&ConversationIdentity> {
     let continuation = continuation?;
-    if continuation.candidate().disabled_reason.as_deref() == Some("disabled") {
-        return None;
-    }
     continuation.owner()
 }
 
@@ -551,6 +549,26 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::super::client_test_support::*;
+
+    async fn send_completed_websocket_response(
+        websocket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        response_id: &str,
+    ) {
+        use futures_util::SinkExt;
+        websocket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({"type":"response.created", "response":{"id":response_id}})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        super::super::client_test_support::send_completed_websocket_response(
+            websocket,
+            response_id,
+        )
+        .await;
+    }
+
     use super::*;
 
     #[tokio::test]
@@ -747,6 +765,8 @@ mod tests {
             )
             .await
             .unwrap();
+        let created = events.recv().await.unwrap().unwrap();
+        assert_eq!(created["type"], "response.created");
         let terminal = events.recv().await.unwrap().unwrap();
         assert_eq!(terminal["type"], "response.completed");
         assert!(events.used_full_context_retry());
@@ -806,6 +826,8 @@ mod tests {
             .stream_codex_websocket_events(&request, &context, Some(&continuation))
             .await
             .unwrap();
+        let created = events.recv().await.unwrap().unwrap();
+        assert_eq!(created["type"], "response.created");
         let terminal = events.recv().await.unwrap().unwrap();
         assert_eq!(terminal["type"], "response.completed");
 
@@ -1036,6 +1058,8 @@ mod tests {
             )
             .await
             .unwrap();
+        let created_a = attempt_a.recv().await.unwrap().unwrap();
+        assert_eq!(created_a["type"], "response.created");
         let terminal_a = attempt_a.recv().await.unwrap().unwrap();
         assert_eq!(terminal_a["response"]["id"], "resp_attempt_a");
         let socket_a = attempt_a.socket_id().expect("attempt A socket ID");
@@ -1052,6 +1076,8 @@ mod tests {
             )
             .await
             .unwrap();
+        let created_b = attempt_b.recv().await.unwrap().unwrap();
+        assert_eq!(created_b["type"], "response.created");
         let terminal_b = attempt_b.recv().await.unwrap().unwrap();
         assert_eq!(terminal_b["response"]["id"], "resp_attempt_b");
         let socket_b = attempt_b.socket_id().expect("attempt B socket ID");
@@ -1112,7 +1138,7 @@ mod tests {
         let append = test_continuation(Some(owner.clone()), Some(2), Some("resp_1"), Some(1), None);
         let missing_identity = test_continuation(None, None, None, None, Some("missing_identity"));
 
-        assert_eq!(websocket_pool_owner(Some(&disabled)), None);
+        assert_eq!(websocket_pool_owner(Some(&disabled)), Some(&owner));
         assert_eq!(websocket_pool_owner(Some(&first_enabled)), Some(&owner));
         assert_eq!(websocket_pool_owner(Some(&append)), Some(&owner));
         assert_eq!(websocket_pool_owner(Some(&missing_identity)), None);
