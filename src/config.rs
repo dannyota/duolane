@@ -76,12 +76,6 @@ struct CodexConfig {
     pub previous_response_id: Option<bool>,
     #[serde(rename = "serverCompaction")]
     pub server_compaction: Option<bool>,
-    #[serde(
-        rename = "baseInstructions",
-        default,
-        deserialize_with = "codex_base_instructions::deserialize_bool"
-    )]
-    pub base_instructions: Option<bool>,
     #[serde(rename = "responsesApi")]
     pub responses_api: Option<bool>,
     #[serde(rename = "fullLane")]
@@ -310,6 +304,9 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     {
         out.push("DUOLANE_AUTO_REVIEW_EFFORT (env)".to_string());
     }
+    if let Some(enabled) = codex_base_instructions::file_value(&cfg.config_dir) {
+        out.push(format!("codex.baseInstructions: {enabled}"));
+    }
     if let Some(file_cfg) = file {
         if file_cfg
             .auto_review_effort
@@ -351,9 +348,6 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
             }
             if let Some(enabled) = codex.server_compaction {
                 out.push(format!("codex.serverCompaction: {enabled}"));
-            }
-            if let Some(enabled) = codex.base_instructions {
-                out.push(format!("codex.baseInstructions: {enabled}"));
             }
             if codex.responses_api == Some(true) {
                 out.push("codex.responsesApi: true".to_string());
@@ -1307,12 +1301,23 @@ mod tests {
         }
     }
     #[test]
-    fn invalid_base_instructions_preserves_auth_token() {
-        let cfg: FileConfig =
-            serde_json::from_str(r#"{"authToken":"toy-token","codex":{"baseInstructions":"off"}}"#)
-                .unwrap();
-        assert!(cfg.auth_token.as_deref() == Some("toy-token"));
-        assert!(cfg.codex.unwrap().base_instructions.is_none());
+    fn base_instructions_duplicate_last_value_and_invalid_values_preserve_auth_token() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        for (setting, expected) in [
+            (r#""baseInstructions":false,"baseInstructions":true"#, true),
+            (r#""baseInstructions":"off""#, true),
+            (r#""baseInstructions":false"#, false),
+        ] {
+            std::fs::write(
+                config.path().join("config.json"),
+                format!(r#"{{"authToken":"toy-token","codex":{{{setting}}}}}"#),
+            )
+            .unwrap();
+            assert!(auth_token().as_deref() == Some("toy-token"));
+            assert_eq!(codex_base_instructions(), expected);
+        }
     }
 
     #[test]

@@ -22,13 +22,12 @@ pub(super) fn insert_base(
     {
         return;
     }
-    let forced = req
-        .extra
-        .get("tool_choice")
-        .filter(|choice| choice.get("type").and_then(serde_json::Value::as_str) == Some("tool"))
-        .and_then(|choice| choice.get("name"))
-        .and_then(serde_json::Value::as_str);
-    if !out.input.iter().any(|item| matches!(item, ResponsesInputItem::AdditionalTools { tools, .. } if tools.iter().any(|tool| forced.is_none_or(|name| tool.get("name").and_then(serde_json::Value::as_str) == Some(name))))) {
+    let forced = match &out.tool_choice {
+        Some(ResponsesToolChoice::Function { name, .. }) if name.is_empty() => return,
+        Some(ResponsesToolChoice::Function { name, .. }) => Some(name.as_str()),
+        _ => None,
+    };
+    if !out.input.iter().any(|item| matches!(item, ResponsesInputItem::AdditionalTools { tools, .. } if tools.iter().any(|tool| tool.get("name").and_then(serde_json::Value::as_str).is_some_and(|name| !name.is_empty() && forced.is_none_or(|forced| forced == name))))) {
         return;
     }
     let index = usize::from(matches!(

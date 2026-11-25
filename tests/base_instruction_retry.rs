@@ -17,6 +17,10 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn account_retry_keeps_selected_template_after_catalog_changes() {
+    assert_ne!(
+        "SYNTHETIC BASE ONE".len(),
+        "SYNTHETIC BASE TWO LONGER".len()
+    );
     let dir = tempfile::tempdir().unwrap();
     let auth = dir.path().join("auth.json");
     let catalog = dir.path().join("models_cache.json");
@@ -35,10 +39,10 @@ async fn account_retry_keeps_selected_template_after_catalog_changes() {
     let router = Router::new().fallback(post({
         let calls = calls.clone(); let valid = valid.clone();
         move |Json(body): Json<Value>| { let calls = calls.clone(); let valid = valid.clone(); let auth = auth.clone(); let catalog = catalog.clone(); async move {
-            valid.fetch_and(body.to_string().contains("SYNTHETIC BASE ONE") && !body.to_string().contains("SYNTHETIC BASE TWO"), Ordering::SeqCst);
+            valid.fetch_and(body.to_string().contains("SYNTHETIC BASE ONE") && !body.to_string().contains("SYNTHETIC BASE TWO LONGER"), Ordering::SeqCst);
             if calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 std::fs::write(auth, json!({"tokens":{"access_token":"toy-access-new","refresh_token":"toy-refresh-new","account_id":"second-account"}}).to_string()).unwrap();
-                std::fs::write(catalog, json!({"models":[{"slug":"gpt-99-sol","supported_in_api":true,"visibility":"list","use_responses_lite":true,"model_messages":{"instructions_template":"SYNTHETIC BASE TWO"}}]}).to_string()).unwrap();
+                std::fs::write(catalog, json!({"models":[{"slug":"gpt-99-sol","supported_in_api":true,"visibility":"list","use_responses_lite":true,"model_messages":{"instructions_template":"SYNTHETIC BASE TWO LONGER"}}]}).to_string()).unwrap();
                 tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
                 return (StatusCode::UNAUTHORIZED, "{}");
             }

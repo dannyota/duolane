@@ -917,6 +917,11 @@ mod tests {
         .unwrap();
         assert!(before == after);
         req.extra
+            .insert("tool_choice".into(), json!({"type":"tool"}));
+        let before = translate_request(&req, options()).unwrap();
+        let after = translate_request_with_base(&req, options(), Some("SYNTHETIC BASE")).unwrap();
+        assert_eq!(before.input.len(), after.input.len());
+        req.extra
             .insert("tool_choice".into(), json!({"type":"tool", "name":"Bash"}));
         let without = translate_request(&req, options()).unwrap();
         let with = translate_request_with_base(&req, options(), Some("SYNTHETIC BASE")).unwrap();
@@ -933,6 +938,12 @@ mod tests {
         let mut placeholder = base.clone();
         placeholder.extra.insert("tools".into(), json!([{"name":"DeferredToolPlaceholder","defer_loading":true,"input_schema":{"type":"object"}}]));
         cases.push((placeholder, true));
+        let mut unnamed = base.clone();
+        unnamed.extra.insert(
+            "tools".into(),
+            json!([{"name":"","input_schema":{"type":"object"}}]),
+        );
+        cases.push((unnamed, true));
         let mut none = base.clone();
         none.extra
             .insert("tool_choice".into(), json!({"type":"none"}));

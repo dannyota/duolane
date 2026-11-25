@@ -6,11 +6,7 @@ pub fn codex_base_instructions() -> bool {
     {
         return enabled;
     }
-    let config_dir = crate::paths::config_dir();
-    if let Some(file) = super::read_file_config(&config_dir)
-        && let Some(codex) = file.codex
-        && let Some(enabled) = codex.base_instructions
-    {
+    if let Some(enabled) = file_value(&crate::paths::config_dir()) {
         return enabled;
     }
     true
@@ -24,11 +20,11 @@ pub(super) fn parse_bool(raw: &str) -> Option<bool> {
     }
 }
 
-pub(super) fn deserialize_bool<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<bool>, D::Error> {
-    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
-    Ok(value.as_bool())
+pub(super) fn file_value(config_dir: &std::path::Path) -> Option<bool> {
+    let raw = std::fs::read_to_string(config_dir.join("config.json")).ok()?;
+    serde_json::from_str::<super::FileConfig>(&raw).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value.get("codex")?.get("baseInstructions")?.as_bool()
 }
 
 pub(super) fn env_source(env: &std::collections::HashMap<String, String>) -> Option<String> {
