@@ -90,6 +90,7 @@ impl CodexHttpClient {
                         &self.websocket_proxy_config,
                         &self.base_url,
                         &ws_headers,
+                        Some(super::sources::CredentialId::for_chatgpt_auth(&auth)),
                         &ws_body,
                         ctx,
                         ctx.traffic.as_deref(),
@@ -149,6 +150,7 @@ impl CodexHttpClient {
                         &self.websocket_proxy_config,
                         &self.base_url,
                         &ws_headers,
+                        Some(super::sources::CredentialId::for_chatgpt_auth(&auth)),
                         &ws_body,
                         ctx,
                         ctx.traffic.as_deref(),
@@ -261,10 +263,8 @@ impl CodexHttpClient {
                 true
             };
             let exhausted = || buffered_transient_exhausted(ctx, transport, typed_transient);
-            let replay_allowed = !ctx.recovery_budget.hosted()
-                && !result
-                    .as_ref()
-                    .is_ok_and(|response| response.hosted_tool_executed);
+            let replay_allowed =
+                super::recovery::buffered_replay_allowed(&result, &ctx.recovery_budget);
             if replay_allowed
                 && should_refresh_after_unauthorized(&result, auth_refresh_attempted, transport)
             {
@@ -696,14 +696,340 @@ impl CodexHttpClient {
         Ok((resp, started_at))
     }
 }
-
 #[cfg(test)]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     use super::super::client_test_support::*;
+
+    async fn send_completed_websocket_response(
+        websocket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        response_id: &str,
+    ) {
+        use futures_util::SinkExt;
+        websocket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({"type":"response.created", "response":{"id":response_id}})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        super::super::client_test_support::send_completed_websocket_response(
+            websocket,
+            response_id,
+        )
+        .await;
+    }
+
     use super::*;
+
+    #[tokio::test]
+    async fn continuation_off_reuses_only_the_same_conversation_socket() {
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut first = tokio_tungstenite::accept_async(socket).await.unwrap();
+            for id in ["first", "second"] {
+                let request = next_websocket_json(&mut first).await;
+                assert!(request.get("previous_response_id").is_none());
+                send_completed_websocket_response(&mut first, id).await;
+            }
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut second = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut second).await;
+            send_completed_websocket_response(&mut second, "third").await;
+        });
+        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let context = http_test_context();
+        let request = buffered_request_with_texts(&["one"]);
+        let owner = ConversationIdentity::Main("off-sequential".into());
+        let other = ConversationIdentity::Main("off-other".into());
+        let mut socket_ids = Vec::new();
+        for (owner, id) in [(&owner, "first"), (&owner, "second"), (&other, "third")] {
+            let reservation = super::super::continuation::continuation_candidate_for_owner(
+                Some(owner),
+                &request,
+                false,
+            );
+            let response = client
+                .post_codex_with_transport(
+                    &request,
+                    &context,
+                    Some(&reservation),
+                    crate::config::CodexTransport::WebSocket,
+                    &Default::default(),
+                )
+                .await
+                .unwrap();
+            assert!(String::from_utf8_lossy(&response.body).contains(id));
+            socket_ids.push(response.socket_id.unwrap());
+        }
+        assert_eq!(socket_ids[0], socket_ids[1]);
+        assert_ne!(socket_ids[1], socket_ids[2]);
+        server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
+
+    #[tokio::test]
+    async fn stale_output_on_reused_socket_is_discarded_and_retried() {
+        use futures_util::SinkExt;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut first = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut first).await;
+            send_completed_websocket_response(&mut first, "first").await;
+            let _ = next_websocket_json(&mut first).await;
+            first
+                .send(tokio_tungstenite::tungstenite::Message::text(
+                    r#"{"type":"response.output_text.delta","delta":"stale-marker"}"#,
+                ))
+                .await
+                .unwrap();
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut retry = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut retry).await;
+            send_completed_websocket_response(&mut retry, "retry").await;
+        });
+        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let context = http_test_context();
+        let request = buffered_request_with_texts(&["one"]);
+        let owner = ConversationIdentity::Main("off-stale".into());
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        client
+            .post_codex_with_transport(
+                &request,
+                &context,
+                Some(&reservation),
+                crate::config::CodexTransport::WebSocket,
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+        let response = client
+            .post_codex_with_transport(
+                &request,
+                &context,
+                Some(&reservation),
+                crate::config::CodexTransport::WebSocket,
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&response.body).contains("stale-marker"));
+        assert!(String::from_utf8_lossy(&response.body).contains("retry"));
+        server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
+
+    #[tokio::test]
+    async fn changed_credential_and_lane_close_the_previous_socket() {
+        use futures_util::StreamExt;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (index, id) in ["first", "second", "third"].into_iter().enumerate() {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _ = next_websocket_json(&mut websocket).await;
+                send_completed_websocket_response(&mut websocket, id).await;
+                if index < 2 {
+                    let closed =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), websocket.next())
+                            .await
+                            .unwrap();
+                    assert!(matches!(
+                        closed,
+                        None | Some(Err(_))
+                            | Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+                    ));
+                }
+            }
+        });
+        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let context = http_test_context();
+        let mut request = buffered_request_with_texts(&["one"]);
+        let owner = ConversationIdentity::Main("off-identity".into());
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        client
+            .post_codex_with_transport(
+                &request,
+                &context,
+                Some(&reservation),
+                crate::config::CodexTransport::WebSocket,
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+        let mut changed_auth = http_test_auth();
+        changed_auth.access = "synthetic-other".into();
+        client.auth_manager().set_test_auth(changed_auth);
+        client
+            .post_codex_with_transport(
+                &request,
+                &context,
+                Some(&reservation),
+                crate::config::CodexTransport::WebSocket,
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+        request.client_metadata = Some(Default::default());
+        client
+            .post_codex_with_transport(
+                &request,
+                &context,
+                Some(&reservation),
+                crate::config::CodexTransport::WebSocket,
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
+
+    #[tokio::test]
+    async fn refreshed_access_reuses_socket_but_changed_refresh_credential_does_not() {
+        use futures_util::StreamExt;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            for id in ["first", "second"] {
+                let _ = next_websocket_json(&mut ws).await;
+                send_completed_websocket_response(&mut ws, id).await;
+            }
+            let closed = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+                .await
+                .unwrap();
+            assert!(matches!(
+                closed,
+                None | Some(Err(_)) | Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+            ));
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            send_completed_websocket_response(&mut ws, "third").await;
+        });
+        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let mut auth = http_test_auth();
+        auth.refresh = "synthetic-refresh-one".into();
+        client.auth_manager().set_test_auth(auth.clone());
+        let request = buffered_request_with_texts(&["one"]);
+        let context = http_test_context();
+        let owner = ConversationIdentity::Main("refresh-identity".into());
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        for index in 0..3 {
+            if index == 1 {
+                auth.access = "synthetic-access-two".into();
+                client.auth_manager().set_test_auth(auth.clone());
+            }
+            if index == 2 {
+                auth.refresh = "synthetic-refresh-two".into();
+                client.auth_manager().set_test_auth(auth.clone());
+            }
+            client
+                .post_codex_with_transport(
+                    &request,
+                    &context,
+                    Some(&reservation),
+                    crate::config::CodexTransport::WebSocket,
+                    &Default::default(),
+                )
+                .await
+                .unwrap();
+        }
+        server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
+
+    #[tokio::test]
+    async fn fresh_responses_without_created_or_status_succeed_without_pooling() {
+        use futures_util::SinkExt;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for with_created in [false, true] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _ = next_websocket_json(&mut ws).await;
+                if with_created {
+                    ws.send(tokio_tungstenite::tungstenite::Message::text(
+                        r#"{"type":"response.created","response":{"id":"response"}}"#,
+                    ))
+                    .await
+                    .unwrap();
+                }
+                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                    r#"{"type":"response.output_text.delta","output_index":0,"delta":"answer"}"#,
+                ))
+                .await
+                .unwrap();
+                let terminal = if with_created {
+                    serde_json::json!({"type":"response.completed","response":{"id":"response"}})
+                } else {
+                    serde_json::json!({"type":"response.completed","response":{"id":"response","status":"completed"}})
+                };
+                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                    terminal.to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+        });
+        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let context = http_test_context();
+        let request = buffered_request_with_texts(&["one"]);
+        for name in ["missing-created", "missing-status"] {
+            let owner = ConversationIdentity::Main(name.into());
+            let reservation = super::super::continuation::continuation_candidate_for_owner(
+                Some(&owner),
+                &request,
+                false,
+            );
+            let response = client
+                .post_codex_with_transport(
+                    &request,
+                    &context,
+                    Some(&reservation),
+                    crate::config::CodexTransport::WebSocket,
+                    &Default::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status, 200);
+            assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_none());
+        }
+        server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
 
     #[tokio::test]
     async fn buffered_missing_origin_retries_full_context_and_rebinds_exact_socket() {
