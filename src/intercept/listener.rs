@@ -40,7 +40,7 @@ const MAX_FREE_DESCRIPTORS: u64 = 2880;
 const MAX_INTERCEPTED: usize = 512;
 const MAX_TUNNELS: usize = 2048;
 
-fn pool_sizes(soft_limit: Option<u64>) -> (usize, usize) {
+pub(crate) fn pool_sizes(soft_limit: Option<u64>) -> (usize, usize) {
     match soft_limit {
         None => (MAX_INTERCEPTED, MAX_TUNNELS),
         Some(limit) => {

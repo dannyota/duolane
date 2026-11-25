@@ -142,7 +142,7 @@ impl CodexHttpClient {
 
         'attempt: loop {
             let sent_before_attempt = websocket_sent.load(std::sync::atomic::Ordering::Acquire);
-            socket_id_publisher.publish(None);
+            socket_id_publisher.publish_return(None, None);
             let ws_headers = match build_codex_headers(&auth, &ctx, body.client_metadata.is_some())
             {
                 Ok(headers) => super::websocket::codex_websocket_headers(&headers),
@@ -168,6 +168,7 @@ impl CodexHttpClient {
                 &self.websocket_proxy_config,
                 &self.base_url,
                 &ws_headers,
+                Some(super::sources::CredentialId::for_chatgpt_auth(&auth)),
                 &ws_body,
                 &ctx,
                 ctx.traffic.clone(),
@@ -255,10 +256,15 @@ impl CodexHttpClient {
                     biased;
                     _ = tx.closed() => {
                         if let Some(reservation) = continuation.as_ref() {
-                            super::websocket::invalidate_codex_websocket_pool_socket(
+                            super::websocket::invalidate_codex_websocket_pool_return(
                                 reservation,
-                                stream.socket_id(),
+                                stream.close_and_return_id(),
                             );
+                        }
+                        #[cfg(test)]
+                        if let Some(hook) = tests::race_hook(continuation.as_ref()) {
+                            hook.coordinator_reached.add_permits(1);
+                            hook.coordinator_release.acquire().await.unwrap().forget();
                         }
                         abort_abandoned_live_continuation(
                             continuation.as_ref(),
@@ -270,9 +276,9 @@ impl CodexHttpClient {
                 };
                 if tx.is_closed() {
                     if let Some(reservation) = continuation.as_ref() {
-                        super::websocket::invalidate_codex_websocket_pool_socket(
+                        super::websocket::invalidate_codex_websocket_pool_return(
                             reservation,
-                            stream.socket_id(),
+                            stream.close_and_return_id(),
                         );
                     }
                     abort_abandoned_live_continuation(continuation.as_ref(), &socket_id_publisher);
@@ -284,7 +290,7 @@ impl CodexHttpClient {
                 if let (Some(quota), Ok(payload)) = (&quota, &item) {
                     quota.observe(payload);
                 }
-                socket_id_publisher.publish(stream.socket_id());
+                socket_id_publisher.publish_return(stream.socket_id(), stream.return_id());
 
                 hosted_tool_executed |= item
                     .as_ref()
@@ -324,9 +330,9 @@ impl CodexHttpClient {
                         Ok(auth) => {
                             if tx.is_closed() {
                                 if let Some(reservation) = continuation.as_ref() {
-                                    super::websocket::invalidate_codex_websocket_pool_socket(
+                                    super::websocket::invalidate_codex_websocket_pool_return(
                                         reservation,
-                                        stream.socket_id(),
+                                        stream.close_and_return_id(),
                                     );
                                 }
                                 abort_abandoned_live_continuation(
@@ -349,9 +355,9 @@ impl CodexHttpClient {
                             }
                             if tx.send(Err(refresh_err)).await.is_err() {
                                 if let Some(reservation) = continuation.as_ref() {
-                                    super::websocket::invalidate_codex_websocket_pool_socket(
+                                    super::websocket::invalidate_codex_websocket_pool_return(
                                         reservation,
-                                        stream.socket_id(),
+                                        stream.close_and_return_id(),
                                     );
                                 }
                                 abort_abandoned_live_continuation(
@@ -406,16 +412,31 @@ impl CodexHttpClient {
                                 pending_events.clear();
                             }
                             if tx.send(Ok(payload)).await.is_err() {
+                                cleanup_failed_live_forward(
+                                    continuation.as_ref(),
+                                    stream.close_and_return_id(),
+                                    &socket_id_publisher,
+                                );
                                 return;
                             }
                         }
                         super::events::CodexStreamEventKind::TerminalSuccess => {
                             for pending in pending_events.drain(..) {
                                 if tx.send(Ok(pending)).await.is_err() {
+                                    cleanup_failed_live_forward(
+                                        continuation.as_ref(),
+                                        stream.close_and_return_id(),
+                                        &socket_id_publisher,
+                                    );
                                     return;
                                 }
                             }
                             if tx.send(Ok(payload)).await.is_err() {
+                                cleanup_failed_live_forward(
+                                    continuation.as_ref(),
+                                    stream.close_and_return_id(),
+                                    &socket_id_publisher,
+                                );
                                 return;
                             }
                         }
@@ -424,22 +445,42 @@ impl CodexHttpClient {
                                 forwarded_any = true;
                                 for pending in pending_events.drain(..) {
                                     if tx.send(Ok(pending)).await.is_err() {
+                                        cleanup_failed_live_forward(
+                                            continuation.as_ref(),
+                                            stream.close_and_return_id(),
+                                            &socket_id_publisher,
+                                        );
                                         return;
                                     }
                                 }
                             }
                             if tx.send(Ok(payload)).await.is_err() {
+                                cleanup_failed_live_forward(
+                                    continuation.as_ref(),
+                                    stream.close_and_return_id(),
+                                    &socket_id_publisher,
+                                );
                                 return;
                             }
                         }
                         super::events::CodexStreamEventKind::Control => {
                             if tx.send(Ok(payload)).await.is_err() {
+                                cleanup_failed_live_forward(
+                                    continuation.as_ref(),
+                                    stream.close_and_return_id(),
+                                    &socket_id_publisher,
+                                );
                                 return;
                             }
                         }
                         super::events::CodexStreamEventKind::Structural => {
                             if forwarded_any {
                                 if tx.send(Ok(payload)).await.is_err() {
+                                    cleanup_failed_live_forward(
+                                        continuation.as_ref(),
+                                        stream.close_and_return_id(),
+                                        &socket_id_publisher,
+                                    );
                                     return;
                                 }
                             } else {
@@ -449,14 +490,9 @@ impl CodexHttpClient {
                     },
                     Err(err) => {
                         if tx.send(Err(err)).await.is_err() {
-                            if let Some(reservation) = continuation.as_ref() {
-                                super::websocket::invalidate_codex_websocket_pool_socket(
-                                    reservation,
-                                    stream.socket_id(),
-                                );
-                            }
-                            abort_abandoned_live_continuation(
+                            cleanup_failed_live_forward(
                                 continuation.as_ref(),
+                                stream.close_and_return_id(),
                                 &socket_id_publisher,
                             );
                             return;
@@ -464,6 +500,12 @@ impl CodexHttpClient {
                     }
                 }
                 if terminal {
+                    #[cfg(test)]
+                    if continuation.as_ref().and_then(|r| r.owner())
+                        == Some(&ConversationIdentity::Main("auto-terminal-drop".into()))
+                    {
+                        tests::AUTO_TERMINAL_QUEUED.add_permits(1);
+                    }
                     return;
                 }
             }
@@ -475,6 +517,17 @@ pub(super) fn full_context_continuation(
     continuation: Option<&super::continuation::ContinuationReservation>,
 ) -> Option<super::continuation::ContinuationReservation> {
     continuation.map(super::continuation::ContinuationReservation::full_context_retry)
+}
+
+fn cleanup_failed_live_forward(
+    continuation: Option<&super::continuation::ContinuationReservation>,
+    return_id: Option<u64>,
+    publisher: &super::websocket::CodexWebSocketSocketIdPublisher,
+) {
+    if let Some(reservation) = continuation {
+        super::websocket::invalidate_codex_websocket_pool_return(reservation, return_id);
+    }
+    abort_abandoned_live_continuation(continuation, publisher);
 }
 
 fn abort_live_continuation(continuation: Option<&super::continuation::ContinuationReservation>) {
@@ -513,9 +566,6 @@ pub(super) fn websocket_pool_owner(
     continuation: Option<&super::continuation::ContinuationReservation>,
 ) -> Option<&ConversationIdentity> {
     let continuation = continuation?;
-    if continuation.candidate().disabled_reason.as_deref() == Some("disabled") {
-        return None;
-    }
     continuation.owner()
 }
 
@@ -539,7 +589,57 @@ fn unauthorized_event_policy(payload: &serde_json::Value) -> (bool, bool) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use std::sync::Mutex;
+    use tokio::sync::Semaphore;
+
+    pub(crate) struct RaceHook {
+        pub inserted: Semaphore,
+        pub worker_release: Semaphore,
+        pub worker_done: Semaphore,
+        pub coordinator_reached: Semaphore,
+        pub coordinator_release: Semaphore,
+    }
+
+    static RACE_HOOK: Mutex<Option<Arc<RaceHook>>> = Mutex::new(None);
+    pub(super) static AUTO_TERMINAL_QUEUED: Semaphore = Semaphore::const_new(0);
+    pub(crate) static AUTO_FORWARD_EOF: Semaphore = Semaphore::const_new(0);
+    pub(crate) static AUTO_FORWARD_TERMINAL: Semaphore = Semaphore::const_new(0);
+    pub(crate) static AUTO_FORWARD_RELEASE: Semaphore = Semaphore::const_new(0);
+    pub(crate) static AUTO_FORWARD_DONE: Semaphore = Semaphore::const_new(0);
+    pub(crate) static AUTO_RACE_FORWARD_DONE: Semaphore = Semaphore::const_new(0);
+    static AUTO_RACE_DROP_REACHED: Semaphore = Semaphore::const_new(0);
+    static AUTO_RACE_DROP_RELEASE: std::sync::Barrier = std::sync::Barrier::new(2);
+
+    pub(crate) fn is_auto_drop_race(
+        reservation: Option<&super::super::continuation::ContinuationReservation>,
+    ) -> bool {
+        reservation.and_then(|r| r.owner())
+            == Some(&super::ConversationIdentity::Main(
+                "auto-drop-publish-race".into(),
+            ))
+    }
+
+    pub(crate) fn pause_auto_drop(
+        reservation: &super::super::continuation::ContinuationReservation,
+    ) {
+        if is_auto_drop_race(Some(reservation)) {
+            AUTO_RACE_DROP_REACHED.add_permits(1);
+            AUTO_RACE_DROP_RELEASE.wait();
+        }
+    }
+
+    pub(crate) fn race_hook(
+        reservation: Option<&super::super::continuation::ContinuationReservation>,
+    ) -> Option<Arc<RaceHook>> {
+        if reservation.and_then(|r| r.owner())
+            != Some(&super::ConversationIdentity::Main("publish-race".into()))
+        {
+            return None;
+        }
+        RACE_HOOK.lock().unwrap().clone()
+    }
+
     #[test]
     fn plain_unauthorized_event_remains_refreshable() {
         let payload =
@@ -551,7 +651,403 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::super::client_test_support::*;
+
+    async fn send_completed_websocket_response(
+        websocket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        response_id: &str,
+    ) {
+        use futures_util::SinkExt;
+        websocket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({"type":"response.created", "response":{"id":response_id}})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        super::super::client_test_support::send_completed_websocket_response(
+            websocket,
+            response_id,
+        )
+        .await;
+    }
+
     use super::*;
+
+    #[tokio::test]
+    async fn downstream_disconnect_before_return_token_publication_removes_socket() {
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let hook = Arc::new(RaceHook {
+            inserted: Semaphore::new(0),
+            worker_release: Semaphore::new(0),
+            worker_done: Semaphore::new(0),
+            coordinator_reached: Semaphore::new(0),
+            coordinator_release: Semaphore::new(0),
+        });
+        *RACE_HOOK.lock().unwrap() = Some(hook.clone());
+        let owner = ConversationIdentity::Main("publish-race".into());
+        let request = buffered_test_request();
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            send_completed_websocket_response(&mut ws, "response").await;
+        });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let events = client
+            .stream_codex_websocket_events_for_owner(
+                &request,
+                &http_test_context(),
+                Some(&reservation),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            hook.inserted.acquire().await.unwrap().forget();
+            assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_some());
+            drop(events);
+            hook.coordinator_reached.acquire().await.unwrap().forget();
+            hook.worker_release.add_permits(1);
+            hook.worker_done.acquire().await.unwrap().forget();
+            hook.coordinator_release.add_permits(1);
+            server.await.unwrap();
+            assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_none());
+        })
+        .await
+        .unwrap();
+        *RACE_HOOK.lock().unwrap() = None;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
+
+    #[tokio::test]
+    async fn downstream_disconnect_during_buffered_terminal_forwarding_removes_socket() {
+        use futures_util::SinkExt;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let owner = ConversationIdentity::Main("terminal-forward-drop".into());
+        let request = buffered_test_request();
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            ws.send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({"type":"response.created","response":{"id":"first"}})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+            for _ in 0..70 {
+                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                    r#"{"type":"response.in_progress"}"#,
+                ))
+                .await
+                .unwrap();
+            }
+            ws.send(tokio_tungstenite::tungstenite::Message::text(serde_json::json!({"type":"response.completed","response":{"id":"first","status":"completed"}}).to_string())).await.unwrap();
+        });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let events = client
+            .stream_codex_websocket_events_for_owner(
+                &request,
+                &http_test_context(),
+                Some(&reservation),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while super::super::websocket::pooled_socket_id_for_tests(&owner).is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(events);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while super::super::websocket::pooled_socket_id_for_tests(&owner).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
+
+    #[tokio::test]
+    async fn auto_disconnect_after_terminal_queued_removes_socket() {
+        use futures_util::SinkExt;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let owner = ConversationIdentity::Main("auto-terminal-drop".into());
+        let request = buffered_test_request();
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server =
+            tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _ = next_websocket_json(&mut ws).await;
+                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                    r#"{"type":"response.created","response":{"id":"first"}}"#,
+                ))
+                .await
+                .unwrap();
+                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                r#"{"type":"response.completed","response":{"id":"first","status":"completed"}}"#,
+            )).await.unwrap();
+            });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let events = client
+            .stream_codex_auto_events_for_owner(
+                &request,
+                &http_test_context(),
+                &super::super::client_body::CodexHttpBodyCache::new(),
+                Some(&reservation),
+                false,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            AUTO_TERMINAL_QUEUED.acquire().await.unwrap().forget();
+            AUTO_FORWARD_EOF.acquire().await.unwrap().forget();
+        })
+        .await
+        .unwrap();
+        assert!(events.return_id().is_some());
+        assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_some());
+        drop(events);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while super::super::websocket::pooled_socket_id_for_tests(&owner).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
+
+    #[tokio::test]
+    async fn auto_drop_before_return_publication_removes_socket() {
+        use futures_util::SinkExt;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let owner = ConversationIdentity::Main("auto-drop-publish-race".into());
+        let request = buffered_test_request();
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            ws.send(tokio_tungstenite::tungstenite::Message::text(
+                r#"{"type":"response.created","response":{"id":"first"}}"#,
+            ))
+            .await
+            .unwrap();
+            release_rx.await.unwrap();
+            super::super::client_test_support::send_completed_websocket_response(&mut ws, "first")
+                .await;
+        });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let events = client
+            .stream_codex_auto_events_for_owner(
+                &request,
+                &http_test_context(),
+                &super::super::client_body::CodexHttpBodyCache::new(),
+                Some(&reservation),
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(events.return_id().is_none());
+        let dropping = tokio::task::spawn_blocking(move || drop(events));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            AUTO_RACE_DROP_REACHED.acquire().await.unwrap().forget();
+            release_tx.send(()).unwrap();
+            AUTO_RACE_FORWARD_DONE.acquire().await.unwrap().forget();
+        })
+        .await
+        .unwrap();
+        let pooled = super::super::websocket::pooled_socket_id_for_tests(&owner).is_some();
+        AUTO_RACE_DROP_RELEASE.wait();
+        dropping.await.unwrap();
+        server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        assert!(!pooled);
+    }
+
+    #[tokio::test]
+    async fn auto_delivered_terminal_keeps_socket_pooled() {
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let owner = ConversationIdentity::Main("auto-terminal-delivered".into());
+        let request = buffered_test_request();
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            send_completed_websocket_response(&mut ws, "first").await;
+        });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let mut events = client
+            .stream_codex_auto_events_for_owner(
+                &request,
+                &http_test_context(),
+                &super::super::client_body::CodexHttpBodyCache::new(),
+                Some(&reservation),
+                false,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap().unwrap();
+                if super::super::websocket::is_terminal_event(&event) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        AUTO_FORWARD_TERMINAL.acquire().await.unwrap().forget();
+        drop(events);
+        AUTO_FORWARD_RELEASE.add_permits(1);
+        AUTO_FORWARD_DONE.acquire().await.unwrap().forget();
+        server.await.unwrap();
+        assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_some());
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
+
+    #[tokio::test]
+    async fn terminal_forward_failure_preserves_later_return_of_same_socket() {
+        use futures_util::SinkExt;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let owner = ConversationIdentity::Main("terminal-return-race".into());
+        let request = buffered_test_request();
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            ws.send(tokio_tungstenite::tungstenite::Message::text(
+                r#"{"type":"response.created","response":{"id":"first"}}"#,
+            ))
+            .await
+            .unwrap();
+            for _ in 0..63 {
+                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                    r#"{"type":"response.in_progress"}"#,
+                ))
+                .await
+                .unwrap();
+            }
+            ws.send(tokio_tungstenite::tungstenite::Message::text(
+                r#"{"type":"response.completed","response":{"id":"first","status":"completed"}}"#,
+            ))
+            .await
+            .unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            send_completed_websocket_response(&mut ws, "second").await;
+            let _ = done_rx.await;
+        });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let first = client
+            .stream_codex_websocket_events_for_owner(
+                &request,
+                &http_test_context(),
+                Some(&reservation),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while first.socket_id().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let socket_id = first.socket_id().unwrap();
+        let mut second = client
+            .stream_codex_websocket_events_for_owner(
+                &request,
+                &http_test_context(),
+                Some(&reservation),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(item) = second.recv().await {
+                if super::super::websocket::is_terminal_event(&item.unwrap()) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(second.socket_id(), Some(socket_id));
+        drop(first);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            super::super::websocket::pooled_socket_id_for_tests(&owner),
+            Some(socket_id)
+        );
+        let _ = done_tx.send(());
+        server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
 
     #[tokio::test]
     async fn websocket_binds_quota_before_event_task_runs() {
@@ -747,6 +1243,8 @@ mod tests {
             )
             .await
             .unwrap();
+        let created = events.recv().await.unwrap().unwrap();
+        assert_eq!(created["type"], "response.created");
         let terminal = events.recv().await.unwrap().unwrap();
         assert_eq!(terminal["type"], "response.completed");
         assert!(events.used_full_context_retry());
@@ -806,6 +1304,8 @@ mod tests {
             .stream_codex_websocket_events(&request, &context, Some(&continuation))
             .await
             .unwrap();
+        let created = events.recv().await.unwrap().unwrap();
+        assert_eq!(created["type"], "response.created");
         let terminal = events.recv().await.unwrap().unwrap();
         assert_eq!(terminal["type"], "response.completed");
 
@@ -1036,13 +1536,17 @@ mod tests {
             )
             .await
             .unwrap();
+        let created_a = attempt_a.recv().await.unwrap().unwrap();
+        assert_eq!(created_a["type"], "response.created");
         let terminal_a = attempt_a.recv().await.unwrap().unwrap();
         assert_eq!(terminal_a["response"]["id"], "resp_attempt_a");
         let socket_a = attempt_a.socket_id().expect("attempt A socket ID");
-        super::super::websocket::invalidate_codex_websocket_pool_socket(
+        let return_a = attempt_a.return_id().expect("attempt A return ID");
+        super::super::websocket::invalidate_codex_websocket_pool_return(
             &continuation,
-            Some(socket_a),
+            Some(return_a),
         );
+        assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_none());
 
         let mut attempt_b = client
             .stream_codex_websocket_events_for_owner(
@@ -1052,6 +1556,8 @@ mod tests {
             )
             .await
             .unwrap();
+        let created_b = attempt_b.recv().await.unwrap().unwrap();
+        assert_eq!(created_b["type"], "response.created");
         let terminal_b = attempt_b.recv().await.unwrap().unwrap();
         assert_eq!(terminal_b["response"]["id"], "resp_attempt_b");
         let socket_b = attempt_b.socket_id().expect("attempt B socket ID");
@@ -1074,9 +1580,9 @@ mod tests {
         let cleanup_continuation = continuation.clone();
         let cleanup = tokio::spawn(async move {
             cleanup_task_barrier.wait().await;
-            super::super::websocket::invalidate_codex_websocket_pool_socket(
+            super::super::websocket::invalidate_codex_websocket_pool_return(
                 &cleanup_continuation,
-                Some(socket_a),
+                Some(return_a),
             );
             abort_abandoned_live_continuation(Some(&cleanup_continuation), &handoff_publisher);
         });
@@ -1112,7 +1618,7 @@ mod tests {
         let append = test_continuation(Some(owner.clone()), Some(2), Some("resp_1"), Some(1), None);
         let missing_identity = test_continuation(None, None, None, None, Some("missing_identity"));
 
-        assert_eq!(websocket_pool_owner(Some(&disabled)), None);
+        assert_eq!(websocket_pool_owner(Some(&disabled)), Some(&owner));
         assert_eq!(websocket_pool_owner(Some(&first_enabled)), Some(&owner));
         assert_eq!(websocket_pool_owner(Some(&append)), Some(&owner));
         assert_eq!(websocket_pool_owner(Some(&missing_identity)), None);

@@ -136,7 +136,9 @@ impl ContinuationReservation {
         let mut candidate = self.candidate.clone();
         candidate.previous_response_id = None;
         candidate.input_delta = None;
-        candidate.disabled_reason = Some("full_context_retry".to_string());
+        if candidate.disabled_reason.as_deref() != Some("disabled") {
+            candidate.disabled_reason = Some("full_context_retry".to_string());
+        }
         Self::new(candidate, self.owner.clone(), None).for_account(&self.account)
     }
 }

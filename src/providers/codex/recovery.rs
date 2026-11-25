@@ -34,6 +34,19 @@ impl Default for AttemptTrace {
     }
 }
 
+pub(super) fn buffered_replay_allowed(
+    result: &Result<super::client::OwnerAwareCodexResponse, CodexError>,
+    budget: &RecoveryBudget,
+) -> bool {
+    !budget.hosted()
+        && !result
+            .as_ref()
+            .is_err_and(|error| error.detail.as_deref() == Some("hosted_tool_executed"))
+        && !result
+            .as_ref()
+            .is_ok_and(|response| response.hosted_tool_executed)
+}
+
 pub(super) fn buffered_transient_exhausted(
     ctx: &crate::provider::RequestContext,
     transport: crate::config::CodexTransport,

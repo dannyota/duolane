@@ -1004,6 +1004,7 @@ mod tests {
                 let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
                 let _ = next_live_websocket_request(&mut ws).await;
                 for event in [
+                    serde_json::json!({"type":"response.created","response":{"id":"resp_first"}}),
                     serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_first"}}),
                     serde_json::json!({"type":"response.output_text.delta","output_index":0,"delta":"first"}),
                     serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}),
@@ -1017,6 +1018,7 @@ mod tests {
                 auth.access = "new-test-token".into();
                 auth.account_id = Some("other-account".into());
                 server_client.auth_manager().set_test_auth(auth);
+                emit_live_event(&mut ws, &serde_json::json!({"type":"response.created","response":{"id":"resp_empty"}})).await;
                 emit_live_event(&mut ws, &serde_json::json!({"type":"response.completed","response":{"id":"resp_empty","status":"completed","output":[]}})).await;
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();

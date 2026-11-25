@@ -198,6 +198,7 @@ impl CodexHttpClient {
                 &self.websocket_proxy_config,
                 &self.base_url,
                 &headers,
+                Some(super::sources::CredentialId::for_chatgpt_auth(&auth)),
                 ctx.traffic.clone(),
                 continuation,
                 super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
@@ -253,16 +254,7 @@ impl CodexHttpClient {
                 self.stream_codex_http_events_for_owner_tracked(body, ctx, http_body)
                     .await
             }
-            Some(item) => {
-                let (tx, rx) = tokio::sync::mpsc::channel(64);
-                let receiver = websocket.replace_receiver(rx);
-                tokio::spawn(async move {
-                    if tx.send(item).await.is_ok() {
-                        forward_codex_events(receiver, tx).await;
-                    }
-                });
-                Ok(websocket)
-            }
+            Some(item) => Ok(websocket.forward_auto(item, continuation.cloned())),
             None => Err(CodexError {
                 status: 0,
                 message: "WebSocket connection closed before the first Codex event".to_string(),
@@ -697,13 +689,32 @@ impl CodexHttpClient {
         rx
     }
 }
-
 #[cfg(test)]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     use super::super::client_test_support::*;
+
+    async fn send_completed_websocket_response(
+        websocket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        response_id: &str,
+    ) {
+        use futures_util::SinkExt;
+        websocket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({"type":"response.created", "response":{"id":response_id}})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        super::super::client_test_support::send_completed_websocket_response(
+            websocket,
+            response_id,
+        )
+        .await;
+    }
+
     use super::*;
 
     async fn write_http_chunk(stream: &mut tokio::net::TcpStream, body: &[u8]) {

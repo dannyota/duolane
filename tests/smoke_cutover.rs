@@ -654,6 +654,7 @@ async fn spawn_websocket_sequence_upstream(captured: Arc<Mutex<Vec<Value>>>) -> 
                 let response_text = texts[idx];
                 let response_id = format!("resp_{}", idx + 1);
                 let events = [
+                    json!({"type":"response.created","response":{"id":response_id}}),
                     json!({
                         "type":"response.output_item.added",
                         "output_index":0,
@@ -671,7 +672,7 @@ async fn spawn_websocket_sequence_upstream(captured: Arc<Mutex<Vec<Value>>>) -> 
                     }),
                     json!({
                         "type":"response.completed",
-                        "response":{"id":response_id,"usage":{"input_tokens":5,"output_tokens":2}}
+                        "response":{"id":response_id,"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}
                     }),
                 ];
 
@@ -745,6 +746,7 @@ async fn spawn_websocket_previous_missing_then_retry_upstream(
                 let response_text = if handled == 0 { "first" } else { "retry" };
                 let response_id = if handled == 0 { "resp_1" } else { "resp_retry" };
                 let events = [
+                    json!({"type":"response.created","response":{"id":response_id}}),
                     json!({
                         "type":"response.output_item.added",
                         "output_index":0,
@@ -762,7 +764,7 @@ async fn spawn_websocket_previous_missing_then_retry_upstream(
                     }),
                     json!({
                         "type":"response.completed",
-                        "response":{"id":response_id,"usage":{"input_tokens":5,"output_tokens":2}}
+                        "response":{"id":response_id,"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}
                     }),
                 ];
 
@@ -837,6 +839,7 @@ async fn spawn_websocket_close_then_retry_upstream(captured: Arc<Mutex<Vec<Value
                 let response_text = if handled == 0 { "first" } else { "retry" };
                 let response_id = if handled == 0 { "resp_1" } else { "resp_retry" };
                 let events = [
+                    json!({"type":"response.created","response":{"id":response_id}}),
                     json!({
                         "type":"response.output_item.added",
                         "output_index":0,
@@ -854,7 +857,7 @@ async fn spawn_websocket_close_then_retry_upstream(captured: Arc<Mutex<Vec<Value
                     }),
                     json!({
                         "type":"response.completed",
-                        "response":{"id":response_id,"usage":{"input_tokens":5,"output_tokens":2}}
+                        "response":{"id":response_id,"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}
                     }),
                 ];
 
@@ -906,6 +909,8 @@ async fn spawn_websocket_empty_completion_then_retry_upstream(
                 }
 
                 if handled == 1 {
+                    let created = json!({"type":"response.created","response":{"id":"resp_empty"}});
+                    let _ = sender.send(Message::text(created.to_string())).await;
                     let event = json!({
                         "type": "response.completed",
                         "response": {
@@ -923,6 +928,7 @@ async fn spawn_websocket_empty_completion_then_retry_upstream(
                 let response_text = if handled == 0 { "first" } else { "retry" };
                 let response_id = if handled == 0 { "resp_1" } else { "resp_retry" };
                 let events = [
+                    json!({"type":"response.created","response":{"id":response_id}}),
                     json!({
                         "type":"response.output_item.added",
                         "output_index":0,
@@ -940,7 +946,7 @@ async fn spawn_websocket_empty_completion_then_retry_upstream(
                     }),
                     json!({
                         "type":"response.completed",
-                        "response":{"id":response_id,"usage":{"input_tokens":5,"output_tokens":2}}
+                        "response":{"id":response_id,"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}
                     }),
                 ];
 
