@@ -52,6 +52,10 @@ async fn dispatch_request(
     let method = req.method().clone();
     let uri = req.uri().clone();
     let headers = req.headers().clone();
+    let claude_profile = req
+        .extensions()
+        .get::<crate::claude_accounts::limits::LaunchProfile>()
+        .map(|profile| profile.0.clone());
     let conversation_identity = (!count_tokens)
         .then(|| ConversationIdentity::from_headers(&headers))
         .flatten();
@@ -456,6 +460,7 @@ async fn dispatch_request(
                 .path_and_query()
                 .map(|pq| pq.as_str().to_string())
                 .unwrap_or_else(|| path.clone()),
+            claude_profile,
         }),
     };
 

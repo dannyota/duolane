@@ -8,10 +8,16 @@ use tower::ServiceExt;
 use super::INTERCEPTED_HOST;
 use super::relay::Relay;
 use crate::anthropic::json_error;
+use crate::claude_accounts::limits::LaunchProfile;
 
 const MESSAGE_PATHS: [&str; 2] = ["/v1/messages", "/v1/messages/count_tokens"];
 
-pub(super) async fn dispatch(request: Request<Incoming>, app: &Router, relay: &Relay) -> Response {
+pub(super) async fn dispatch(
+    mut request: Request<Incoming>,
+    app: &Router,
+    relay: &Relay,
+    profile: Option<LaunchProfile>,
+) -> Response {
     if !host_allowed(request.headers()) {
         return json_error(
             StatusCode::MISDIRECTED_REQUEST,
@@ -51,6 +57,9 @@ pub(super) async fn dispatch(request: Request<Incoming>, app: &Router, relay: &R
     }
     if !message_path || request.method() != Method::POST {
         return relay.forward(request).await;
+    }
+    if let Some(profile) = profile {
+        request.extensions_mut().insert(profile);
     }
     match app.clone().oneshot(request.map(Body::new)).await {
         Ok(response) => response,

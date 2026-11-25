@@ -1,3 +1,4 @@
+pub(crate) mod limits;
 #[cfg(unix)]
 mod picker;
 #[cfg(unix)]
@@ -7,9 +8,26 @@ pub(crate) mod store;
 #[cfg(unix)]
 mod transcripts;
 
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name != "default"
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+pub(crate) fn valid_profile_tag(name: &str) -> bool {
+    name == "default" || valid_name(name)
+}
+
 #[cfg(unix)]
 mod unix {
-    use super::{picker, roster, store, transcripts};
+    use super::{limits, picker, roster, store, transcripts, valid_name};
     use crate::paths;
     use anyhow::{Context, Result, bail, ensure};
     use std::ffi::OsString;
@@ -31,6 +49,10 @@ mod unix {
     impl Profile {
         pub(crate) fn path(&self) -> &Path {
             &self.path
+        }
+
+        pub(crate) fn name(&self) -> Option<&str> {
+            self.path.file_name().and_then(|name| name.to_str())
         }
 
         pub(crate) fn settings(&self) -> Result<Option<Vec<u8>>> {
@@ -63,18 +85,6 @@ mod unix {
                 cwd: None,
             }
         }
-    }
-    fn valid_name(name: &str) -> bool {
-        !name.is_empty()
-            && name.len() <= 32
-            && name != "default"
-            && name
-                .bytes()
-                .next()
-                .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-            && name
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
     }
     fn input(prompt: &str) -> Result<String> {
         print!("{prompt}");
@@ -306,12 +316,15 @@ mod unix {
     pub fn list() -> Result<()> {
         let selected = current_selection()?;
         let entries = roster::entries(&registered()?)?;
-        let table = roster::table(&entries, &selected, jiff::Timestamp::now(), color());
+        let usage = limits::load();
+        let now = jiff::Timestamp::now();
+        let table = roster::table(&entries, &selected, &usage, now, color());
         println!("{}", table.header);
         for row in table.rows {
             println!("{row}");
         }
-        println!("\n ● selected for the next duolane claude launch");
+        println!("\n   {}", roster::total(&entries, &usage, now));
+        println!(" ● selected for the next duolane claude launch");
         if std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|v| !v.is_empty()) {
             println!(" CLAUDE_CONFIG_DIR is set, so duolane claude ignores the selection");
         }
@@ -373,7 +386,13 @@ mod unix {
 
     fn choose(profiles: &[(String, PathBuf)], selected: &str) -> Result<Option<String>> {
         let entries = roster::entries(profiles)?;
-        let table = roster::table(&entries, selected, jiff::Timestamp::now(), false);
+        let table = roster::table(
+            &entries,
+            selected,
+            &limits::load(),
+            jiff::Timestamp::now(),
+            false,
+        );
         let start = entries
             .iter()
             .position(|entry| entry.name == selected)
@@ -570,6 +589,9 @@ pub(crate) struct Profile;
 #[cfg(not(unix))]
 impl Profile {
     pub(crate) fn path(&self) -> &std::path::Path {
+        unreachable!()
+    }
+    pub(crate) fn name(&self) -> Option<&str> {
         unreachable!()
     }
     pub(crate) fn settings(&self) -> anyhow::Result<Option<Vec<u8>>> {

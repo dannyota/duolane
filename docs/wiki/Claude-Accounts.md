@@ -25,14 +25,27 @@ same profile name again.
 
 ## See your profiles
 
-`duolane accounts list` shows the account, plan, and remaining login time of
-each profile and marks the selected one:
+`duolane accounts list` shows the account, plan, remaining login time, and plan
+usage of each profile and marks the selected one:
 
 ```text
-   PROFILE   ACCOUNT              PLAN   LOGIN
- ● default   first@example.com    team   26d left
-   backup    second@example.com   max    29d left
+   PROFILE   ACCOUNT              PLAN   LOGIN      STATUS          5H           7D         SEEN
+ ● default   first@example.com    team   26d left   limited 1h20m   100% 1h20m   64% 3d5h   5m ago
+   backup    second@example.com   max    29d left   unknown         -            -
+
+   all accounts: 5H 100% used, 7D 64% used (1 of 2 seen by the proxy)
 ```
+
+`5H` and `7D` show how much of each plan window is used and the time until it
+resets. duolane reads them from Anthropic's responses as they pass through
+`duolane serve`, so a profile shows values only after a session used it through
+the proxy, and `SEEN` shows how old they are. Sessions not started by
+`duolane claude` count as `default`.
+
+`STATUS` shows `available` in green when the newest values are under the limit,
+`limited` in red with the time until reset when a window is full, and `unknown`
+when the proxy has not seen the account yet. When the selected login is limited,
+switch to an available one with `duolane accounts use <name>`.
 
 On a terminal, `duolane accounts use` shows the same details in a menu. Move
 with the arrow keys, press Enter to select, or press Esc to keep the current
