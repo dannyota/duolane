@@ -9,6 +9,27 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+pub(super) fn height(app: &super::MonitorApp, state: &MonitorSnapshot) -> u16 {
+    match &app.detail {
+        Some(super::DetailView::Session(_)) => 15,
+        Some(super::DetailView::Request(detail)) => {
+            let index = detail.index(
+                app.recent_selected,
+                state.recent.iter().map(|request| &request.request_id),
+            );
+            state.recent.get(index).map_or(3, |request| {
+                19 + u16::from(
+                    request
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| !error.is_empty()),
+                ) + u16::from(request.traffic_capture_path.is_some())
+            })
+        }
+        None => 0,
+    }
+}
+
 pub(super) fn render_session_detail(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,

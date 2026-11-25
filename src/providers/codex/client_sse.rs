@@ -493,8 +493,12 @@ pub(super) fn translate_live_stream_payload(
     Ok((chunk, terminal))
 }
 
-pub(super) fn single_live_stream_response(chunk: Vec<u8>) -> axum::response::Response {
+pub(super) fn single_live_stream_response(
+    chunk: Vec<u8>,
+    ctx: crate::provider::RequestContext,
+) -> axum::response::Response {
     event_stream_response(futures_util::stream::once(async move {
+        record_live_stream_progress(&ctx, &chunk);
         Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(chunk))
     }))
 }

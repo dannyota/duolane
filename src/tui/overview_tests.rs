@@ -316,3 +316,54 @@ fn retried_request_wait_uses_first_upstream_event() {
     }));
     assert!(text.lines().any(|line| line.contains("wait 1.0s")));
 }
+
+#[test]
+fn old_snapshot_wait_is_unmeasured() {
+    let mut state: MonitorSnapshot = mock_state().into();
+    state.active.clear();
+    state.recent.truncate(1);
+    let row = &mut state.recent[0];
+    row.provider = Some("codex".into());
+    row.first_upstream_event_at = None;
+    row.generation_started_at = Some(row.started_at + std::time::Duration::from_secs(8));
+    row.latency = std::time::Duration::from_secs(10);
+    let mut app = app();
+    let text = buffer_text(&draw(200, 40, |frame| {
+        render_at(
+            frame,
+            &mut app,
+            &state,
+            std::time::UNIX_EPOCH,
+            jiff::tz::TimeZone::UTC,
+        );
+    }));
+    assert_eq!(usage_stats::lane_stats(&state.recent, "codex").0, None);
+    assert!(text.lines().any(|line| line.contains("Wait")));
+    let recent = buffer_text(&draw(200, 5, |frame| {
+        super::requests::render_recent(frame, frame.area(), &state.recent, 0, false);
+    }));
+    let row = recent.lines().find(|line| line.contains("10s")).unwrap();
+    assert!(!row.contains('█'));
+    assert!(row.split_whitespace().any(|value| value == "-"));
+}
+
+#[test]
+fn long_request_detail_fits_tall_terminal() {
+    let mut state: MonitorSnapshot = mock_state().into();
+    state.sessions.truncate(1);
+    state.recent.truncate(1);
+    state.recent[0].traffic_capture_path = Some("/capture/unique-path.json".into());
+    let mut app = app();
+    app.detail = Some(DetailView::Request(DetailSelection::Keyboard));
+    let text = buffer_text(&draw(160, 80, |frame| {
+        render_at(
+            frame,
+            &mut app,
+            &state,
+            std::time::UNIX_EPOCH,
+            jiff::tz::TimeZone::UTC,
+        );
+    }));
+    assert!(text.contains("input tokens"));
+    assert!(text.contains("/capture/unique-path.json"));
+}

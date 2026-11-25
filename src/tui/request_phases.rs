@@ -226,10 +226,9 @@ pub(super) fn active_timeline(
 }
 
 pub(super) fn recent_timeline(request: &CompletedSnapshot, width: usize) -> Cell<'static> {
-    let first = request
-        .first_upstream_event_at
-        .map(|time| elapsed(request.started_at, time))
-        .unwrap_or_default()
-        .min(request.latency);
+    let Some(first) = request.first_upstream_event_at else {
+        return Cell::from("");
+    };
+    let first = elapsed(request.started_at, first).min(request.latency);
     timeline(request.latency, first, request.latency, width, true)
 }

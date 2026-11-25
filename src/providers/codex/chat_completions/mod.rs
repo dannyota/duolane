@@ -108,9 +108,23 @@ async fn collect_body(
     let mut stream = upstream.bytes_stream();
     let mut bytes = Vec::new();
     let mut started = false;
+    let mut decoder = ctx.map(|_| super::client_sse::HttpSseDecoder::default());
     loop {
         match tokio::time::timeout(Duration::from_millis(idle_timeout_ms), stream.next()).await {
             Ok(Some(Ok(chunk))) => {
+                if let Some(active_decoder) = decoder.as_mut() {
+                    let mut events = Vec::new();
+                    if active_decoder.push(&chunk, &mut events).is_err() {
+                        decoder = None;
+                    } else if events.iter().any(|event| event.payload.is_some()) {
+                        if let Some(ctx) = ctx
+                            && let Some(monitor) = ctx.monitor.as_ref()
+                        {
+                            monitor.first_upstream_event(&ctx.req_id);
+                        }
+                        decoder = None;
+                    }
+                }
                 if !started {
                     if let Some(ctx) = ctx
                         && let Some(monitor) = ctx.monitor.as_ref()
@@ -411,6 +425,24 @@ mod tests {
             expires: u64::MAX,
         });
         (ChatCompletionsBackend::with_client(client), server)
+    }
+
+    #[tokio::test]
+    async fn buffered_chat_records_first_upstream_event() {
+        const SSE: &[u8] = b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp\",\"status\":\"completed\",\"output\":[]}}\n\n";
+        let (backend, server) = mock_backend(SSE).await;
+        let request = request::translate_request(json!({
+            "model":"gpt-5.6-sol", "messages":[{"role":"user","content":"hello"}]
+        }))
+        .unwrap();
+        let monitor = MonitorHandle::new(10);
+        let _response = backend.handle(request, context(monitor.clone())).await;
+        server.await.unwrap();
+        assert!(
+            monitor.snapshot().active[0]
+                .first_upstream_event_at
+                .is_some()
+        );
     }
 
     #[tokio::test]

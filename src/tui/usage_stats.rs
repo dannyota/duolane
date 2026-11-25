@@ -38,7 +38,6 @@ fn groups(recent: &[CompletedSnapshot]) -> Vec<(GroupKey, Group)> {
         group.count += 1;
         if let Some(wait) = row
             .first_upstream_event_at
-            .or(row.generation_started_at)
             .and_then(|started| started.duration_since(row.started_at).ok())
         {
             group.waits.push(wait.as_secs_f64());
@@ -327,7 +326,7 @@ mod tests {
             row.provider = Some("lane".into());
             row.model = Some("model".into());
             row.effort = None;
-            row.generation_started_at = Some(row.started_at + Duration::from_secs(wait));
+            row.first_upstream_event_at = Some(row.started_at + Duration::from_secs(wait));
             row.generation_duration = Some(Duration::from_secs(duration));
             row.output_tokens = output;
             let snapshot: CompletedSnapshot = row.into();

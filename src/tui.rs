@@ -614,7 +614,7 @@ fn render_at(
         area.width,
         root[5].y.saturating_sub(root[1].y),
     );
-    let parts = summary::layout(body, state, app.detail.is_some());
+    let parts = summary::layout(body, state, detail::height(app, state));
     summary::render(frame, parts[0], terminal_state, &app.accounts, now, zone);
     let root = [root[0], parts[1], parts[2], parts[3], parts[4], root[5]];
     let sessions = match &app.detail {

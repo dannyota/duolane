@@ -183,9 +183,10 @@ pub(super) fn render(
 pub(super) fn layout(
     body: Rect,
     state: &MonitorSnapshot,
-    detail_open: bool,
+    detail_height: u16,
 ) -> std::rc::Rc<[Rect]> {
-    let detail_min = if detail_open { body.height.min(10) } else { 0 };
+    let detail_open = detail_height > 0;
+    let detail_min = detail_height.min(body.height.saturating_sub(14).max(body.height.min(10)));
     let requested_summary = summary::height(body.width);
     let reserve = if detail_open {
         detail_min

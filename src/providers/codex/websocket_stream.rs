@@ -205,11 +205,6 @@ where
 
         match frame {
             Some(Ok(Message::Text(text))) => {
-                if let Some(ctx) = ctx
-                    && let Some(monitor) = ctx.monitor.as_ref()
-                {
-                    monitor.first_upstream_event(&ctx.req_id);
-                }
                 if sse_body.len().saturating_add(text.len()) > MAX_BUFFERED_RESPONSE_BYTES {
                     if budget.is_tracked()
                         && serde_json::from_str::<serde_json::Value>(&text)
@@ -249,6 +244,11 @@ where
                     }
                     budget.mark_ambiguous_hosted();
                     break Err(stale_response_error());
+                }
+                if let Some(ctx) = ctx
+                    && let Some(monitor) = ctx.monitor.as_ref()
+                {
+                    monitor.first_upstream_event(&ctx.req_id);
                 }
                 if parsed.get("type").and_then(|v| v.as_str()) == Some("response.created") {
                     conflicting_created |= different_created_id(&parsed, created_id.as_deref());
@@ -510,11 +510,6 @@ where
 
         match frame {
             Some(Ok(Message::Text(text))) => {
-                if let Some(ctx) = ctx
-                    && let Some(monitor) = ctx.monitor.as_ref()
-                {
-                    monitor.first_upstream_event(&ctx.req_id);
-                }
                 let parsed: serde_json::Value = match serde_json::from_str(&text) {
                     Ok(value) => value,
                     Err(_) => {
@@ -543,6 +538,11 @@ where
                         error
                     }));
                     break;
+                }
+                if let Some(ctx) = ctx
+                    && let Some(monitor) = ctx.monitor.as_ref()
+                {
+                    monitor.first_upstream_event(&ctx.req_id);
                 }
                 if parsed.get("type").and_then(|v| v.as_str()) == Some("response.created") {
                     conflicting_created |= different_created_id(&parsed, created_id.as_deref());
@@ -772,6 +772,107 @@ mod tests {
         assert!(!stale_before_created(
             &serde_json::json!({"type":"codex.rate_limits"})
         ));
+    }
+
+    #[tokio::test]
+    async fn stale_websocket_frame_does_not_mark_first_upstream_event() {
+        for buffered in [false, true] {
+            let monitor = crate::monitor::MonitorHandle::new(10);
+            monitor.request_started(
+                "ws-test",
+                None,
+                None,
+                crate::monitor::EndpointKind::Messages,
+            );
+            let ctx = crate::provider::RequestContext {
+                recovery_budget: Default::default(),
+                req_id: "ws-test".into(),
+                session_id: None,
+                traffic: None,
+                monitor: Some(monitor.clone()),
+                passthrough: None,
+            };
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            server
+                .send(Message::text(
+                    r#"{"type":"response.output_text.delta","delta":"stale"}"#,
+                ))
+                .await
+                .unwrap();
+            if buffered {
+                let _ = collect_ws_events_tracked(
+                    &mut client,
+                    1000,
+                    None,
+                    None,
+                    None,
+                    &Default::default(),
+                    true,
+                    Some(&ctx),
+                )
+                .await;
+            } else {
+                let (tx, _rx) = mpsc::channel(2);
+                let _ = stream_ws_events_monitored(
+                    &mut client,
+                    1000,
+                    None,
+                    &tx,
+                    &Default::default(),
+                    true,
+                    None,
+                    Some(&ctx),
+                )
+                .await;
+            }
+            assert!(
+                monitor.snapshot().active[0]
+                    .first_upstream_event_at
+                    .is_none()
+            );
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            server
+                .send(Message::text(
+                    r#"{"type":"response.completed","response":{"id":"new","status":"completed"}}"#,
+                ))
+                .await
+                .unwrap();
+            if buffered {
+                let _ = collect_ws_events_tracked(
+                    &mut client,
+                    1000,
+                    None,
+                    None,
+                    None,
+                    &Default::default(),
+                    false,
+                    Some(&ctx),
+                )
+                .await;
+            } else {
+                let (tx, _rx) = mpsc::channel(2);
+                let _ = stream_ws_events_monitored(
+                    &mut client,
+                    1000,
+                    None,
+                    &tx,
+                    &Default::default(),
+                    false,
+                    None,
+                    Some(&ctx),
+                )
+                .await;
+            }
+            assert!(
+                monitor.snapshot().active[0]
+                    .first_upstream_event_at
+                    .is_some()
+            );
+        }
     }
 
     #[tokio::test]
