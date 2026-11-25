@@ -26,14 +26,15 @@ not put the token in a URL, screenshot, or bug report.
 
 ## Codex transport and effort
 
-| Environment variable                | Config key                    | Values or effect                                                                                                      |
-| ----------------------------------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `DUOLANE_CODEX_TRANSPORT`           | `codex.transport`             | `auto`, `http`, or `websocket`                                                                                        |
-| `DUOLANE_CODEX_REQUEST_COMPRESSION` | `codex.requestCompression`    | `off` (default) or `gzip` for HTTP Responses and search requests                                                      |
-| `DUOLANE_CODEX_AUTO_WS_MAX_BYTES`   | `codex.autoWebSocketMaxBytes` | Route eligible full-context requests above this byte limit to HTTP in Auto mode; `4194304` by default, `0` to disable |
-| `DUOLANE_CODEX_BASE_INSTRUCTIONS`   | `codex.baseInstructions`      | `on` (default) or `off`: send the Codex catalog's base instructions before Claude Code's system prompt on agent turns |
-| `DUOLANE_AUTO_REVIEW_MODEL`         | `autoReviewModel`             | Override Claude Code's classifier model                                                                               |
-| `DUOLANE_AUTO_REVIEW_EFFORT`        | `autoReviewEffort`            | `none`, `low`, `medium`, `high`, `xhigh`, or `max` for classifiers routed to Codex                                    |
+| Environment variable                 | Config key                    | Values or effect                                                                                                      |
+| ------------------------------------ | ----------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `DUOLANE_CODEX_TRANSPORT`            | `codex.transport`             | `auto`, `http`, or `websocket`                                                                                        |
+| `DUOLANE_CODEX_REQUEST_COMPRESSION`  | `codex.requestCompression`    | `off` (default) or `gzip` for HTTP Responses and search requests                                                      |
+| `DUOLANE_CODEX_AUTO_WS_MAX_BYTES`    | `codex.autoWebSocketMaxBytes` | Route eligible full-context requests above this byte limit to HTTP in Auto mode; `4194304` by default, `0` to disable |
+| `DUOLANE_CODEX_PREVIOUS_RESPONSE_ID` | `codex.previousResponseId`    | `on` (default) or `off`: send only the new items of a conversation with `previous_response_id` over WebSocket         |
+| `DUOLANE_CODEX_BASE_INSTRUCTIONS`    | `codex.baseInstructions`      | `on` (default) or `off`: send the Codex catalog's base instructions before Claude Code's system prompt on agent turns |
+| `DUOLANE_AUTO_REVIEW_MODEL`          | `autoReviewModel`             | Override Claude Code's classifier model                                                                               |
+| `DUOLANE_AUTO_REVIEW_EFFORT`         | `autoReviewEffort`            | `none`, `low`, `medium`, `high`, `xhigh`, or `max` for classifiers routed to Codex                                    |
 
 The Auto byte limit applies independently of HTTP request compression. See the
 [Codex route design](https://github.com/dannyota/duolane/blob/HEAD/docs/design/codex.md)
