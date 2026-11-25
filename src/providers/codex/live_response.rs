@@ -1,3 +1,5 @@
+#[path = "live_response_errors.rs"]
+mod errors;
 use super::client::CodexHttpClient;
 use super::client_sse::{
     append_live_metadata_payload, event_stream_response, record_live_stream_downstream_capture,
@@ -12,7 +14,6 @@ use super::continuation::ContinuationReservation;
 use super::continuation::continuation_candidate_for_owner;
 use super::error_response::*;
 use super::live_completion::*;
-use super::recovery::live_retry_exhausted;
 use super::request_state::*;
 use super::translate::live_stream::LiveStreamTranslator;
 #[cfg(test)]
@@ -28,6 +29,8 @@ use crate::request_identity::ConversationIdentity;
 use crate::retry::{compute_backoff_delay, sleep};
 use axum::response::Response;
 use bytes::Bytes;
+use errors::exhausted_response;
+pub(super) use errors::tracked_error_response;
 use std::{sync::Arc, time::Duration, time::Instant};
 const LIVE_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 enum LiveStreamStart {
@@ -255,29 +258,6 @@ pub(super) async fn live_stream_response(
             }
         }
     }
-}
-fn exhausted_response(
-    ctx: &RequestContext,
-    transport: config::CodexTransport,
-    cause: &client::CodexError,
-) -> Response {
-    let exhausted = live_retry_exhausted(ctx, transport, cause);
-    let mut response = map_codex_error_to_response(&exhausted);
-    if ctx.recovery_budget.is_tracked() {
-        response
-            .extensions_mut()
-            .insert(Arc::new(ctx.recovery_budget.failure(cause.clone())));
-    }
-    response
-}
-pub(super) fn tracked_error_response(ctx: &RequestContext, error: &client::CodexError) -> Response {
-    let mut response = map_codex_error_to_response(error);
-    if ctx.recovery_budget.is_tracked() {
-        response.extensions_mut().insert(Arc::new(
-            ctx.recovery_budget.failure_with_cause(error.clone()),
-        ));
-    }
-    response
 }
 fn provider_retry(
     upstream_events: &websocket::CodexWebSocketEventStream,
@@ -710,6 +690,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::super::provider_test_support::*;
+    use super::super::recovery::live_retry_exhausted;
     use super::*;
 
     #[tokio::test]

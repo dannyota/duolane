@@ -1,3 +1,5 @@
+#[path = "client_http_stream_tracked.rs"]
+mod tracked;
 use super::client::*;
 use super::client_body::CodexHttpBodyCache;
 use super::client_http_tools::{HttpToolState, STALLED_READ_FINISH_FIELD};
@@ -126,17 +128,6 @@ impl CodexHttpClient {
             ctx.clone(),
             quota,
         ))
-    }
-    pub(super) async fn stream_codex_http_events_for_owner_tracked(
-        self: &Arc<Self>,
-        body: &ResponsesRequest,
-        ctx: &RequestContext,
-        http_body: &CodexHttpBodyCache,
-    ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
-        let receiver = self
-            .stream_codex_http_events_inner(body, ctx, http_body, ctx.recovery_budget.is_tracked())
-            .await?;
-        Ok(super::websocket::CodexWebSocketEventStream::http(receiver))
     }
     pub(super) async fn stream_codex_auto_events_for_owner(
         self: &Arc<Self>,
