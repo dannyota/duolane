@@ -287,8 +287,24 @@ fn banner_covers_all_footer_targets() {
         hits = render_with_banner(frame, &mut app, &state, Some("offline"));
     });
     assert!(
-        app.handle_mouse(left_click(&screen, "Reconnecting"), &state, &hits)
-            .is_none()
+        buffer_text(&screen)
+            .lines()
+            .last()
+            .unwrap()
+            .trim_end()
+            .ends_with("offline")
+    );
+    assert!(
+        app.handle_mouse(
+            MouseEvent {
+                column: 1,
+                row: 47,
+                ..left_click(&screen, "Reconnecting")
+            },
+            &state,
+            &hits
+        )
+        .is_none()
     );
     let screen = draw(120, 48, |frame| {
         hits = render_with_banner(frame, &mut app, &state, None);
@@ -351,4 +367,39 @@ fn usage_tables_use_remaining_width_and_show_omitted_rows() {
     assert!(speed.contains('█') || speed.contains('░'), "{text}");
     assert!(tokens.contains('█'), "{text}");
     assert!(speed.contains("more") && tokens.contains("more"), "{text}");
+}
+
+#[test]
+fn usage_keeps_missing_and_literal_dash_models_separate() {
+    let mut state: MonitorSnapshot = mock_state().into();
+    let mut first = state.recent[0].clone();
+    first.model = None;
+    let mut second = first.clone();
+    second.model = Some("-".into());
+    state.recent = vec![first, second];
+    let mut app = app();
+    app.usage_open = true;
+    let text = detail_text(&mut app, &state);
+    let speed = text
+        .split("Speed by model")
+        .nth(1)
+        .unwrap()
+        .split("Tokens by session")
+        .next()
+        .unwrap();
+    assert_eq!(
+        speed
+            .lines()
+            .filter(|line| line.contains("claude") || line.contains("codex"))
+            .count(),
+        2
+    );
+}
+
+#[cfg(unix)]
+pub(super) fn app_for_accounts_test(accounts: accounts::Accounts) -> MonitorApp {
+    let mut app = app();
+    app.accounts = accounts;
+    app.usage_open = true;
+    app
 }

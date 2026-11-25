@@ -1,6 +1,23 @@
 use super::*;
 
 impl MonitorApp {
+    pub(super) fn handle_key_sized(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        state: &MonitorSnapshot,
+        size: (u16, u16),
+        frame_size: (u16, u16),
+    ) -> Option<MonitorExit> {
+        if key.code == KeyCode::Enter
+            && self.usage_open
+            && self.accounts.confirming()
+            && size != frame_size
+        {
+            return None;
+        }
+        self.handle_key(key, state)
+    }
+
     pub(super) fn handle_key(
         &mut self,
         key: crossterm::event::KeyEvent,

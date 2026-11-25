@@ -217,7 +217,9 @@ fn run_monitor_events(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(exit) = app.handle_key(key, state) {
+                    if let Some(exit) =
+                        app.handle_key_sized(key, state, crossterm::terminal::size()?, targets.size)
+                    {
                         return Ok(exit);
                     }
                 }
@@ -508,6 +510,7 @@ fn render_with_banner(
             1,
         );
         targets.keys.retain(|(rect, _)| rect.y != banner.y);
+        frame.render_widget(ratatui::widgets::Clear, banner);
         frame.render_widget(
             Paragraph::new(format!("Reconnecting; showing last snapshot: {error}"))
                 .style(Style::default().fg(YELLOW).bg(BG)),
@@ -550,7 +553,7 @@ fn render(
             area.width,
             root[5].y.saturating_sub(root[1].y),
         );
-        let panes = usage_stats::layout(body, state);
+        let panes = usage_stats::layout(body, state, app.accounts.count());
         app.accounts.render(frame, panes[0], terminal_state);
         usage_stats::render(frame, panes[1], panes[2], terminal_state, &state.recent);
         chrome::render_chrome_footer(frame, root[5], app, &mut targets);

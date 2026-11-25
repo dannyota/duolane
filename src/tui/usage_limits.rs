@@ -93,6 +93,20 @@ pub(super) fn codex(
     Line::from(spans)
 }
 
+pub(super) fn compact(label: &str, line: Line<'static>) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::raw(format!(" {label} "))];
+    if line.spans.len() < 5 {
+        spans.push(Span::raw("Unknown"));
+        return spans;
+    }
+    let filled = line.spans[1].content.chars().count();
+    let count = (filled * 4 + 5) / 10;
+    spans.push(Span::styled("█".repeat(count), line.spans[1].style));
+    spans.push(Span::styled("░".repeat(4 - count), line.spans[2].style));
+    spans.push(line.spans[3].clone());
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

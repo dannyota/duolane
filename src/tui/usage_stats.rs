@@ -28,12 +28,14 @@ fn median(values: &mut [f64]) -> Option<f64> {
     }
 }
 
-fn groups(recent: &[CompletedSnapshot]) -> Vec<((String, String, String), Group)> {
-    let mut groups = BTreeMap::<(String, String, String), Group>::new();
+type GroupKey = (String, Option<String>, String);
+
+fn groups(recent: &[CompletedSnapshot]) -> Vec<(GroupKey, Group)> {
+    let mut groups = BTreeMap::<GroupKey, Group>::new();
     for row in recent {
         let key = (
             row.provider.clone().unwrap_or_else(|| "-".into()),
-            row.model.clone().unwrap_or_else(|| "-".into()),
+            row.model.clone(),
             row.effort.clone().unwrap_or_else(|| "-".into()),
         );
         let group = groups.entry(key).or_default();
@@ -76,8 +78,8 @@ fn number(value: Option<f64>, suffix: &str) -> String {
         .unwrap_or_else(|| "-".into())
 }
 
-pub(super) fn layout(area: Rect, state: &MonitorSnapshot) -> [Rect; 3] {
-    let accounts = area.height.saturating_mul(45) / 100;
+pub(super) fn layout(area: Rect, state: &MonitorSnapshot, account_count: usize) -> [Rect; 3] {
+    let accounts = super::accounts::needed_height(area, state, account_count).min(area.height / 2);
     let remaining = area.height.saturating_sub(accounts);
     let speed_rows = groups(&state.recent).len();
     let token_rows = state.sessions.len();
@@ -142,6 +144,8 @@ pub(super) fn render(
                 }),
                 Cell::from(
                     model
+                        .as_deref()
+                        .unwrap_or("-")
                         .chars()
                         .filter(|c| !c.is_control())
                         .collect::<String>(),

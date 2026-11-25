@@ -1,3 +1,16 @@
+pub(super) fn needed_height(
+    area: ratatui::layout::Rect,
+    _: &crate::monitor::snapshot::MonitorSnapshot,
+    count: usize,
+) -> u16 {
+    let claude = 4_u16.saturating_add((count.min(u16::MAX as usize / 3) * 3) as u16);
+    if area.width >= 90 {
+        claude.max(6)
+    } else {
+        claude.saturating_add(6)
+    }
+}
+
 pub(super) struct Accounts {
     local: bool,
     limits: std::collections::BTreeMap<String, crate::claude_accounts::limits::Limits>,
@@ -12,6 +25,7 @@ pub(super) struct Accounts {
     rows: ratatui::layout::Rect,
     subscription: ratatui::layout::Rect,
     first: usize,
+    row_height: usize,
 }
 
 impl Accounts {
@@ -30,7 +44,12 @@ impl Accounts {
             rows: ratatui::layout::Rect::default(),
             subscription: ratatui::layout::Rect::default(),
             first: 0,
+            row_height: 3,
         }
+    }
+
+    pub(super) fn count(&self) -> usize {
+        self.names.len()
     }
 
     pub(super) fn refresh_limits(&mut self) {
@@ -226,7 +245,7 @@ impl Accounts {
         {
             return;
         }
-        let index = self.first + usize::from(y - self.rows.y) / 3;
+        let index = self.first + usize::from(y - self.rows.y) / self.row_height;
         if index < self.names.len() {
             self.focus = index;
         }
@@ -249,9 +268,18 @@ impl Accounts {
         } else {
             Direction::Vertical
         };
+        let claude_height = (3_u16
+            .saturating_add((self.names.len().min(u16::MAX as usize / 3) * 3) as u16)
+            .saturating_add(u16::from(self.overridden)))
+        .min(area.height.saturating_sub(5));
+        let constraints = if direction == Direction::Vertical {
+            [Constraint::Length(claude_height), Constraint::Min(0)]
+        } else {
+            [Constraint::Percentage(50), Constraint::Percentage(50)]
+        };
         let panes = Layout::default()
             .direction(direction)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints(constraints)
             .split(area);
         let block = Block::default()
             .title(" Claude profiles ")
@@ -264,29 +292,27 @@ impl Accounts {
                 self.rows.x,
                 self.rows.y,
                 self.rows.width,
-                self.rows.height.min(2),
+                self.rows.height.min(1 + u16::from(self.overridden)),
             );
             let saved = if self.selected.is_empty() {
                 "Unknown"
             } else {
                 &self.selected
             };
-            let message = if self.overridden {
-                "CLAUDE_CONFIG_DIR overrides selection"
-            } else {
-                "CLAUDE_CONFIG_DIR does not override selection"
-            };
-            frame.render_widget(
-                Paragraph::new(vec![
-                    Line::from(format!("Saved: {saved}")),
-                    Line::from(message),
-                ]),
-                info,
-            );
+            let mut info_lines = vec![Line::from(format!("Saved: {saved}"))];
+            if self.overridden {
+                info_lines.push(Line::from("CLAUDE_CONFIG_DIR overrides selection"));
+            }
+            frame.render_widget(Paragraph::new(info_lines), info);
             self.rows.y += info.height;
             self.rows.height -= info.height;
         }
-        let count = usize::from(self.rows.height).div_ceil(3);
+        self.row_height = if usize::from(self.rows.height) >= self.names.len() * 3 {
+            3
+        } else {
+            1
+        };
+        let count = usize::from(self.rows.height) / self.row_height;
         self.first = self
             .focus
             .min(self.names.len().saturating_sub(1))
@@ -310,22 +336,31 @@ impl Accounts {
             } else {
                 Style::default().fg(super::DIM_WHITE)
             };
-            lines.push(
-                Line::from(format!(
-                    "Claude {name}{}",
-                    if *name == self.selected {
-                        "  Saved"
-                    } else {
-                        ""
-                    }
-                ))
-                .style(style),
+            let title = format!(
+                "Claude {name}{}",
+                if *name == self.selected { " Saved" } else { "" }
             );
             let limits = self.limits.get(name);
-            lines.push(super::usage_limits::claude("5h", limits, 18_000, seconds));
-            lines.push(super::usage_limits::claude(
-                "week", limits, 604_800, seconds,
-            ));
+            let five = super::usage_limits::claude("5h", limits, 18_000, seconds);
+            let week = super::usage_limits::claude("week", limits, 604_800, seconds);
+            if self.row_height == 3 {
+                lines.push(Line::from(title).style(style));
+                lines.push(five);
+                lines.push(week);
+            } else {
+                let mut windows = super::usage_limits::compact("5h", five);
+                windows.extend(super::usage_limits::compact("week", week));
+                let suffix = if *name == self.selected { " Saved" } else { "" };
+                let available = usize::from(self.rows.width)
+                    .saturating_sub(Line::from(windows.clone()).width() + 7 + suffix.len());
+                let title = format!(
+                    "Claude {}{suffix}",
+                    super::cells::ellipsize(name, available)
+                );
+                let mut spans = vec![ratatui::text::Span::styled(title, style)];
+                spans.extend(windows);
+                lines.push(Line::from(spans));
+            }
         }
         frame.render_widget(Paragraph::new(lines), self.rows);
         let detail_block = Block::default()
@@ -359,16 +394,24 @@ impl Accounts {
                 .as_ref()
                 .filter(|q| now.duration_since(q.observed_at).is_ok());
             detail.push(Line::from(quota_summary(quota, now)));
-            detail.push(super::usage_limits::codex(
-                "Primary",
-                quota.and_then(|q| q.primary.as_ref()),
-                now,
-            ));
-            detail.push(super::usage_limits::codex(
+            let primary =
+                super::usage_limits::codex("Primary", quota.and_then(|q| q.primary.as_ref()), now);
+            let secondary = super::usage_limits::codex(
                 "Secondary",
                 quota.and_then(|q| q.secondary.as_ref()),
                 now,
-            ));
+            );
+            if inner.height >= 3 {
+                detail.push(primary);
+                detail.push(secondary);
+            } else {
+                if inner.height < 2 {
+                    detail.clear();
+                }
+                let mut spans = super::usage_limits::compact("Primary", primary);
+                spans.extend(super::usage_limits::compact("Secondary", secondary));
+                detail.push(Line::from(spans));
+            }
             if self.local {
                 detail.push(Line::from(saved));
                 if self.overridden {
@@ -408,6 +451,99 @@ mod tests {
         let text = crate::tui::tests::buffer_text(&buffer);
         assert!(text.contains("Claude profiles: Unknown"));
         assert!(!text.contains("Claude example"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_limits_show_both_windows_for_two_profiles_and_subscription() {
+        let mut accounts = Accounts::new(true);
+        accounts.names = vec!["default".into(), "backup".into()];
+        accounts.selected = "default".into();
+        let mut state: crate::monitor::snapshot::MonitorSnapshot =
+            crate::monitor::mock_state().into();
+        let limits = crate::claude_accounts::limits::Limits {
+            five_hour: Some(crate::claude_accounts::limits::Window {
+                used: 0.2,
+                resets_at: None,
+            }),
+            seven_day: Some(crate::claude_accounts::limits::Window {
+                used: 0.4,
+                resets_at: None,
+            }),
+            observed_at: 1,
+        };
+        accounts.limits.insert("default".into(), limits);
+        accounts.limits.insert("backup".into(), limits);
+        state.codex_quota = Some(CodexQuotaSnapshot {
+            observed_at: SystemTime::now(),
+            primary: Some(CodexQuotaWindow {
+                used_percent: Some(42.0),
+                window_minutes: Some(300),
+                reset_at: None,
+            }),
+            secondary: Some(CodexQuotaWindow {
+                used_percent: Some(12.0),
+                window_minutes: Some(10080),
+                reset_at: None,
+            }),
+        });
+        let mut app = crate::tui::mouse_tests::app_for_accounts_test(accounts);
+        let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(80, 24, |f| {
+            crate::tui::render(f, &mut app, &state)
+        }));
+        assert!(
+            text.contains("default") && text.contains("backup"),
+            "{text}"
+        );
+        assert_eq!(text.matches("20%").count(), 2, "{text}");
+        assert_eq!(text.matches("40%").count(), 2, "{text}");
+        assert!(text.contains("42.0%") && text.contains("12.0%"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_profile_with_long_name_keeps_both_windows_visible() {
+        let mut accounts = Accounts::new(true);
+        accounts.names = vec!["abcdefghijklmnopqrstuvwxyz123456".into(), "backup".into()];
+        accounts.selected = accounts.names[0].clone();
+        accounts.limits.insert(
+            accounts.names[0].clone(),
+            crate::claude_accounts::limits::Limits {
+                five_hour: Some(crate::claude_accounts::limits::Window {
+                    used: 0.2,
+                    resets_at: None,
+                }),
+                seven_day: Some(crate::claude_accounts::limits::Window {
+                    used: 0.4,
+                    resets_at: None,
+                }),
+                observed_at: 1,
+            },
+        );
+        let state = crate::monitor::mock_state().into();
+        let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(90, 8, |f| {
+            accounts.render(f, f.area(), &state)
+        }));
+        assert!(text.contains("20%") && text.contains("40%"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confirmation_enter_requires_current_frame_size() {
+        let mut accounts = Accounts::new(true);
+        accounts.names = vec!["default".into(), "backup".into()];
+        accounts.selected = "default".into();
+        accounts.focus = 1;
+        let state = crate::monitor::mock_state().into();
+        let mut app = crate::tui::mouse_tests::app_for_accounts_test(accounts);
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_key(key, &state);
+        crate::tui::tests::draw(80, 24, |f| crate::tui::render(f, &mut app, &state));
+        app.handle_key_sized(key, &state, (79, 24), (80, 24));
+        assert!(app.accounts.confirming());
     }
 
     #[cfg(unix)]
@@ -574,11 +710,20 @@ mod tests {
         accounts.names = vec!["default".into(), "backup".into()];
         accounts.selected = "backup".into();
         accounts.overridden = true;
-        accounts.focus = accounts.names.len();
+        accounts.focus = 0;
         let state: crate::monitor::snapshot::MonitorSnapshot = crate::monitor::mock_state().into();
-        let buffer = crate::tui::tests::draw(100, 20, |frame| {
-            accounts.render(frame, frame.area(), &state)
-        });
+        let mut app = crate::tui::mouse_tests::app_for_accounts_test(accounts);
+        app.handle_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+        );
+        assert!(!app.accounts.confirming());
+        app.accounts.focus = app.accounts.names.len();
+        let buffer =
+            crate::tui::tests::draw(100, 20, |frame| crate::tui::render(frame, &mut app, &state));
         let text = crate::tui::tests::buffer_text(&buffer);
         assert!(text.contains("Saved: backup"));
         assert!(text.contains("CLAUDE_CONFIG_DIR overrides selection"));
@@ -649,12 +794,15 @@ mod event_tests {
     #[test]
     #[ignore]
     fn confirmation_event_probe() {
-        unsafe {
-            std::env::set_var(
-                "DUOLANE_CONFIG_DIR",
-                std::env::var_os("TEST_CONFIG").unwrap(),
-            );
+        let config = std::path::PathBuf::from(std::env::var_os("DUOLANE_CONFIG_DIR").unwrap());
+        let profile = config.join("claude-accounts/backup");
+        std::fs::create_dir_all(&profile).unwrap();
+        for path in [&config, &config.join("claude-accounts"), &profile] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
+        let marker = profile.join(".duolane-ready");
+        std::fs::write(&marker, b"ready\n").unwrap();
+        std::fs::set_permissions(marker, std::fs::Permissions::from_mode(0o600)).unwrap();
         let state = crate::monitor::mock_state().into();
         let mut accounts = Accounts::new(true);
         accounts.enter();
@@ -682,7 +830,15 @@ mod event_tests {
             targets = tui::render(frame, &mut app, &state)
         });
         let text = tui::tests::buffer_text(&screen);
-        assert!(text.contains("CLAUDE_CONFIG_DIR does not override selection"));
+        if std::env::var_os("CLAUDE_CONFIG_DIR").is_some() {
+            assert!(!app.accounts.confirming());
+            assert!(!text.contains("Select profile?"));
+            assert!(text.contains("CLAUDE_CONFIG_DIR overrides selection"));
+            println!("PROBE_COMPLETE");
+            return;
+        }
+        assert!(text.contains("Select profile?"));
+        assert!(!text.contains("CLAUDE_CONFIG_DIR"));
         for label in ["1 Overview", "?"] {
             let (column, row) = tui::tests::placeholder_position(&screen, label).unwrap();
             app.handle_mouse(
@@ -696,7 +852,12 @@ mod event_tests {
                 &targets,
             );
         }
-        assert!(app.usage_open && !app.show_help);
+        assert!(app.usage_open && !app.show_help && app.accounts.confirming());
+        app.handle_key(key(KeyCode::Char('1')), &state);
+        assert!(!app.usage_open && !app.accounts.confirming());
+        app.handle_key(key(KeyCode::Char('2')), &state);
+        app.accounts.focus = 1;
+        app.handle_key(key(KeyCode::Enter), &state);
         app.handle_key(key(KeyCode::Esc), &state);
         assert!(!app.accounts.confirming());
         assert_eq!(
@@ -705,38 +866,55 @@ mod event_tests {
         );
         app.handle_key(key(KeyCode::Enter), &state);
         tui::tests::draw(80, 24, |frame| tui::render(frame, &mut app, &state));
-        app.handle_key(key(KeyCode::Enter), &state);
+        app.handle_key_sized(key(KeyCode::Enter), &state, (79, 24), (80, 24));
+        assert!(app.accounts.confirming());
+        assert_eq!(
+            crate::claude_accounts::monitor_roster().unwrap().selected,
+            "default"
+        );
+        app.handle_key_sized(key(KeyCode::Enter), &state, (80, 24), (80, 24));
         assert_eq!(
             crate::claude_accounts::monitor_roster().unwrap().selected,
             "backup"
         );
+        println!("PROBE_COMPLETE");
     }
 
     #[test]
     fn confirmation_keys_and_clicks_work_at_80_by_24() {
         let root = tempfile::tempdir().unwrap();
-        let config = root.path().join("config");
-        let profile = config.join("claude-accounts/backup");
-        std::fs::create_dir_all(&profile).unwrap();
-        for path in [&config, &config.join("claude-accounts"), &profile] {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let marker = profile.join(".duolane-ready");
-        std::fs::write(&marker, b"ready\n").unwrap();
-        std::fs::set_permissions(marker, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .env_clear()
-                .env("HOME", root.path())
-                .env("TEST_CONFIG", config)
-                .args([
-                    "--exact",
-                    "--ignored",
-                    "tui::accounts::event_tests::confirmation_event_probe"
-                ])
-                .status()
-                .unwrap()
-                .success()
-        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env_clear()
+            .env("HOME", root.path())
+            .env("TMPDIR", root.path())
+            .args([
+                "--exact",
+                "--ignored",
+                "tui::accounts::event_tests::confirmation_event_probe",
+            ])
+            .arg("--nocapture")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("PROBE_COMPLETE"));
+    }
+    #[test]
+    fn environment_override_prevents_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env_clear()
+            .env("HOME", root.path())
+            .env("TMPDIR", root.path())
+            .env("CLAUDE_CONFIG_DIR", root.path().join("override"))
+            .args([
+                "--exact",
+                "--ignored",
+                "tui::accounts::event_tests::confirmation_event_probe",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("PROBE_COMPLETE"));
     }
 }
