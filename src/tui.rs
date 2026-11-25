@@ -10,7 +10,7 @@ mod mouse;
 #[cfg(test)]
 mod mouse_tests;
 mod overlay;
-mod profile_rows;
+mod profile_table;
 mod requests;
 mod sessions;
 mod subscription;
@@ -202,11 +202,7 @@ fn run_monitor_events(
 ) -> Result<MonitorExit, anyhow::Error> {
     loop {
         app.accounts.refresh_if_due();
-        if let Some(action) = app.accounts.take_handoff() {
-            let label = action.label();
-            let finished = actions::run_handoff(terminal, &label, &action.args())?;
-            app.accounts.finish(&label, &finished);
-        }
+        app.accounts.run_handoff(terminal)?;
         let update = snapshot();
         let state = update.snapshot();
         app.clamp_selection(state.sessions.len(), state.recent.len());
@@ -362,8 +358,15 @@ impl MonitorApp {
             );
         }
         if self.usage_open {
-            self.accounts.click(mouse.column, mouse.row);
-            return None;
+            return self
+                .accounts
+                .click(mouse.column, mouse.row)
+                .and_then(|code| {
+                    self.handle_key(
+                        crossterm::event::KeyEvent::new(code, KeyModifiers::NONE),
+                        state,
+                    )
+                });
         }
         match targets.hit(mouse.column, mouse.row) {
             Some(MouseTarget::Session(index)) => {

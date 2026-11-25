@@ -125,15 +125,6 @@ pub(super) fn render_chrome_footer(
             Rect::new(x, area.y, width, area.height),
         );
         x = x.saturating_add(width);
-        if key == KeyCode::Char('r') && app.accounts.local() {
-            let text = "a add  l sign in  d remove  s switch";
-            let width = (text.len() as u16).min(area.right().saturating_sub(x));
-            frame.render_widget(
-                Paragraph::new(text).style(Style::default().fg(DIM)),
-                Rect::new(x, area.y, width, area.height),
-            );
-            x = x.saturating_add(width);
-        }
         if key == KeyCode::Char('b') {
             let text = "arrows/j/k navigate  ";
             let width = (text.len() as u16).min(area.right().saturating_sub(x));

@@ -49,18 +49,22 @@ times, the speed of each model over the recent requests, and the tokens each
 session used. A limit that was not reported is `Unknown`, and the ChatGPT report
 is marked `Stale` after 15 minutes.
 
-In the local Unix monitor, each Claude profile also shows what
-`duolane accounts list` shows: its status, the age of its usage with `Stale`
-after 15 minutes, the account email, the plan, and the time left on the login. A
-login under 3 days is yellow. `Suggested` marks the available profile with the
-most room; duolane never switches on its own. The bottom border of the pane
-gives the total over all accounts.
+In the local Unix monitor, the Claude profiles form a table with the columns of
+`duolane accounts list`: account email, plan, both limit windows, the time left
+on the login, status, and the age of the usage, which reads `stale` after 15
+minutes. A login under 3 days is yellow. `●` marks the profile saved for the
+next launch and `★` the available profile with the most room; duolane never
+switches on its own. The bottom border of the pane gives the total over all
+accounts.
 
 Select a Claude profile with the arrow keys or a click, then press Enter to
 review and confirm the next-launch choice. Press `r` to reload the profile list,
 the limits, and the account details. The details come from `claude auth status`,
 checked in the background when Usage opens and kept for 5 minutes. The pane
 shows when they were last checked.
+
+Below the table, a line of buttons shows every action for the focused profile.
+Click a button or press its key. The line under the buttons shows the result.
 
 | Key | Action on the focused profile                                 |
 | --- | ------------------------------------------------------------- |

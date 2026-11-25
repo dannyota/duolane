@@ -13,8 +13,18 @@ pub(crate) enum Tone {
     Dim,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WindowView {
+    pub(crate) percent: u64,
+    pub(crate) reset: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ProfileState {
+    pub(crate) five_hour: Option<WindowView>,
+    pub(crate) seven_day: Option<WindowView>,
+    pub(crate) email: Option<String>,
+    pub(crate) plan: Option<String>,
     pub(crate) status: String,
     pub(crate) status_tone: Tone,
     pub(crate) seen: Option<String>,
@@ -66,6 +76,23 @@ mod unix {
     fn login_usable(entry: &Entry, now: jiff::Timestamp) -> bool {
         entry.account.as_ref().is_none_or(|account| {
             account.signed_in && account.expires.is_none_or(|expires| expires > now)
+        })
+    }
+
+    fn window_view(
+        limits: Option<&Limits>,
+        pick: fn(&Limits) -> Option<&super::super::limits::Window>,
+        length: u64,
+        now: u64,
+    ) -> Option<WindowView> {
+        let limits = limits?;
+        let window = pick(limits)?;
+        Some(WindowView {
+            percent: roster::percent(window, limits.observed_at, length, now),
+            reset: window
+                .resets_at
+                .filter(|reset| *reset > now)
+                .map(|reset| roster::span(reset - now)),
         })
     }
 
@@ -167,19 +194,22 @@ mod unix {
                 .map(|(index, entry)| {
                     let usage = roster::usage(&self.entries, entry, limits);
                     let status = roster::status(usage, now);
+                    let mut email = None;
+                    let mut plan = None;
                     let (account, login) = match &entry.account {
                         None => (None, None),
                         Some(account) if !account.signed_in => {
                             (None, Some(("not signed in".to_owned(), Tone::Bad)))
                         }
                         Some(account) => {
-                            let email = account
+                            let address = account
                                 .email
                                 .as_deref()
                                 .map(roster::clean)
                                 .filter(|email| !email.is_empty())
                                 .unwrap_or_else(|| "signed in".into());
-                            let plan = account
+                            email = Some(address.clone());
+                            plan = account
                                 .plan
                                 .as_deref()
                                 .map(roster::clean)
@@ -196,15 +226,19 @@ mod unix {
                                 (roster::remaining(expires, time), tone)
                             });
                             (
-                                Some(match plan {
-                                    Some(plan) => format!("{email} ({plan})"),
-                                    None => email,
+                                Some(match &plan {
+                                    Some(plan) => format!("{address} ({plan})"),
+                                    None => address,
                                 }),
                                 login,
                             )
                         }
                     };
                     ProfileState {
+                        five_hour: window_view(usage, |l| l.five_hour.as_ref(), 18_000, now),
+                        seven_day: window_view(usage, |l| l.seven_day.as_ref(), 604_800, now),
+                        email,
+                        plan,
                         status: roster::status_cell(status, now),
                         status_tone: match status {
                             Status::Available => Tone::Good,
@@ -328,6 +362,16 @@ mod unix {
                 states[0].account.as_deref(),
                 Some("First@Example.com (team)")
             );
+            assert_eq!(states[0].email.as_deref(), Some("First@Example.com"));
+            assert_eq!(states[0].plan.as_deref(), Some("team"));
+            assert_eq!(
+                states[0].five_hour,
+                Some(WindowView {
+                    percent: 50,
+                    reset: Some("2h46m".into())
+                })
+            );
+            assert_eq!(states[4].five_hour, None);
             assert_eq!(states[0].login, Some(("30d left".into(), Tone::Dim)));
             assert_eq!(states[0].limits, usage.get("twin").copied());
             assert_eq!(states[1].same_as.as_deref(), Some("default"));

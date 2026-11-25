@@ -81,8 +81,13 @@ pub(super) fn layout(
     now: std::time::SystemTime,
     zone: jiff::tz::TimeZone,
 ) -> [Rect; 3] {
-    let accounts = super::subscription::needed_height(area, state, account_count, now, zone)
-        .min(area.height / 2);
+    let accounts = super::subscription::needed_height(area, state, account_count, now, zone).min(
+        if account_count > 0 {
+            area.height / 3 * 2
+        } else {
+            area.height / 2
+        },
+    );
     let remaining = area.height.saturating_sub(accounts);
     let speed_rows = groups(&state.recent).len();
     let token_rows = state.sessions.len();

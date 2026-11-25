@@ -85,7 +85,7 @@ impl MonitorApp {
                 self.usage_open = true;
                 self.accounts.open();
             }
-            KeyCode::Char('r') if self.usage_open && !self.show_help && !self.show_setup => {
+            KeyCode::Char('r' | 'R') if self.usage_open && !self.show_help && !self.show_setup => {
                 self.accounts.reload();
             }
             KeyCode::Esc
@@ -99,10 +99,10 @@ impl MonitorApp {
             KeyCode::Enter if self.usage_open && !self.show_help && !self.show_setup => {
                 self.accounts.confirm()
             }
-            KeyCode::Char(action @ ('a' | 'l' | 'd' | 's'))
+            KeyCode::Char(action @ ('a' | 'l' | 'd' | 's' | 'A' | 'L' | 'D' | 'S'))
                 if self.usage_open && !self.show_help && !self.show_setup =>
             {
-                self.accounts.action_key(action)
+                self.accounts.action_key(action.to_ascii_lowercase())
             }
             KeyCode::Down
                 if self.usage_open

@@ -173,17 +173,16 @@ session. The in-process monitor adds the [profile state](#profile-state), the
 - The bars take the width the other columns leave. The two tables share the
   height below the limits by their row counts, and a table that does not fit
   shows the rows that fit and the number left out.
-- A profile takes four lines when the pane has room for every profile: its name
-  and state, its account details, and one line per window. Otherwise each
-  profile is one compact line, so a terminal of 80 by 24 still shows the limits.
-- A compact line gives its parts room in this order: the name, at least 12 cells
-  and ellipsized beyond its share; then for each window a short label, the
+- The in-process monitor shows the Claude profiles as the
+  [profile table](#profile-table), one line per profile.
+- The ChatGPT pane shows one line per window when it has room. Otherwise it uses
+  compact lines. A compact line gives for each window a short label, the
   percent, and the time left until the reset, such as `5h 42% 1h54m`; then a
   bar, only when cells remain. A window with no reset time shows `-` there, and
-  one whose reset has passed shows `passed`. The ChatGPT pane has its name in
-  its title, so its compact lines start at the windows, on one line or one line
-  per window. A non-standard ChatGPT window uses its length as the label, such
-  as `120m`. The stale marker is never dropped while a value shows.
+  one whose reset has passed shows `passed`. The pane has its name in its title,
+  so its compact lines start at the windows, on one line or one line per window.
+  A non-standard ChatGPT window uses its length as the label, such as `120m`.
+  The stale marker is never dropped while a value shows.
 - The confirmation for a profile change is an overlay, so it fits a terminal of
   80 by 24. `Enter` saves only when the terminal still has the size of the frame
   that showed the confirmation. The Claude pane keeps showing the saved profile
@@ -194,7 +193,9 @@ Arrow keys or a row click move the focus without changing the selected profile.
 and `Esc` cancels. Display both the focused row and the profile selected for the
 next launch. Keep the existing shutdown and help controls in both views. At
 narrow widths the Claude profiles and the ChatGPT subscription stack; at wide
-widths they sit side by side.
+widths they sit side by side. The read-only monitors sit side by side from 90
+cells. The in-process monitor does so from 180 cells, because its table needs
+the width, and gives the ChatGPT pane 52 cells.
 
 Only the in-process monitor on Unix can change the profile. It reuses the
 checked selector and locks from [`accounts use`](claude-accounts.md#commands)
@@ -210,28 +211,50 @@ local roster. These reads make no provider request. A registered profile is not
 evidence that its login is still valid; [account details](#account-details)
 report the login separately.
 
+### Profile table
+
+The in-process monitor lists the Claude profiles in a table with a header, so
+every value has a labeled column and nothing needs a key to appear.
+
+- The columns are the saved and suggested marks, `PROFILE`, `ACCOUNT`, `PLAN`,
+  `5H`, `WEEK`, `LOGIN`, `STATUS`, `SEEN`, and a note for a shared account. A
+  window is a bar of 6 cells, the percent used, and the time until its reset.
+- `●` marks the profile saved for the next launch and `★` the suggested one. The
+  top border names both marks and the saved profile.
+- When the pane is too narrow, columns give way in this order: the note, the
+  account beyond 16 cells, `SEEN`, `LOGIN`, the bars, `PLAN`, `ACCOUNT`, and the
+  profile name beyond 8 cells. The name, both windows, and the status always
+  show.
+- Below the rows, a button line shows every action for the focused profile:
+  `[Enter Use]`, `[L Sign in]`, `[D Remove]`, `[S Switch]`, `[A Add]`, and
+  `[R Refresh]`. A button that does not apply to the focused profile is dim. A
+  left click on a button acts as its key, and the keys work in either case.
+- The last line is the message line. It shows, first of those that apply: the
+  running action, the result of the last action in green or red, the result of a
+  selection, the `CLAUDE_CONFIG_DIR` override, and otherwise the focused profile
+  in full with its account, login time, and the age of the details.
+- When the pane is too short, the header goes first, then the message line. The
+  rows scroll to keep the focused profile in view above the buttons.
+
 ### Profile state
 
-The in-process monitor shows the state of each Claude profile beside its name,
-from the plan usage it already loads.
+The table shows the state of each Claude profile from the plan usage the monitor
+already loads.
 
 - The status follows the `STATUS` rules of
   [plan usage](claude-accounts.md#plan-usage): `available` in green, `limited`
   in red with the time until the reset, and `unknown` in dim text.
-- `seen` gives the age of the values. They are marked `Stale` after 15 minutes,
-  as the ChatGPT report is. A stale value is still shown, because an idle
-  account sends nothing new.
+- `SEEN` gives the age of the values. After 15 minutes it reads `stale` with the
+  age, in yellow, as the ChatGPT report is marked. A stale value is still shown,
+  because an idle account sends nothing new.
 - The bottom border of the pane gives the total over all accounts, with the text
   and the rules of the `accounts list` total.
-- One profile is marked `Suggested`: the available profile whose fuller window
-  has the lowest percent used. An earlier row wins a tie. A profile is skipped
-  when its status is not `available`, when it holds the same account as an
-  earlier row, or when its login is known to be signed out or expired. A roster
-  of one profile has no mark. The mark is advice only. It never changes the
-  selection and never starts a launch.
-- A compact line adds the status after the windows when cells remain, before any
-  bar. The line above the compact profiles gives the account details of the
-  focused profile.
+- One profile is marked `★` as suggested: the available profile whose fuller
+  window has the lowest percent used. An earlier row wins a tie. A profile is
+  skipped when its status is not `available`, when it holds the same account as
+  an earlier row, or when its login is known to be signed out or expired. A
+  roster of one profile has no mark. The mark is advice only. It never changes
+  the selection and never starts a launch.
 
 ### Account details
 
@@ -248,11 +271,11 @@ the same account share the newest plan usage, as in `accounts list`.
   and on `r`. Only one check runs at a time. An `r` or a finished action during
   a check starts one more check when it ends. The last result stays on screen
   while a check runs.
-- The pane states the age of the details, such as `Accounts checked 2m05s ago`,
-  or `Accounts checking`, apart from the plan usage, which reloads every 30
-  seconds. A profile with no details yet shows `account checking`.
-- The login time is yellow under 3 days and red when the login expired or the
-  profile is signed out. A failed check shows `account unknown`.
+- The message line states the age of the details, such as
+  `Accounts checked 2m05s ago`, or `Accounts checking`, apart from the plan
+  usage, which reloads every 30 seconds. A profile with no details shows `-`.
+- The login time is yellow under 3 days and red when the login expired. A
+  signed-out profile shows `not signed in` as its account.
 - The check installs no signal handler. Leaving the monitor cancels it, stops
   its status process groups, and waits for the thread.
 - The details stay in the memory of the monitor that read them. They are never
@@ -291,7 +314,7 @@ passes the profile name rule.
 - A captured action runs on a background thread with standard input closed, in
   its own process group. Its output is kept up to 64 KiB with control characters
   and escape sequences removed. After 60 seconds the monitor stops the process
-  group and reports a timeout. The status line shows the action while it runs,
+  group and reports a timeout. The message line shows the action while it runs,
   then the result with the last line of output.
 - A handoff action needs the terminal for a browser sign-in or for Claude Code.
   The monitor leaves the alternate screen, turns off raw mode and mouse capture,
@@ -302,11 +325,11 @@ passes the profile name rule.
   throughout.
 - After an action ends, however it ends, the monitor reloads the roster and the
   plan usage and starts an account details check. A failed action changes no
-  monitor state besides the status line.
-- The footer of Usage lists the action keys. They are not click targets, because
-  they act on the focused profile. While the new name is typed, every key goes
-  to the name, so `q`, `1`, and `r` do not act on the monitor.
-- The attached and demo monitors show no action hints and run nothing.
+  monitor state besides the message line.
+- A click on a button only opens the confirmation or the name entry, as its key
+  does. While the new name is typed, every key goes to the name, so `q`, `1`,
+  and `r` do not act on the monitor, and clicks are ignored.
+- The attached and demo monitors show no table, no buttons, and run nothing.
 
 ### Reported limits
 

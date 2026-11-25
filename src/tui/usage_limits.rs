@@ -25,45 +25,6 @@ fn bar(value: Option<f64>, lane: Color, decimals: bool) -> Vec<Span<'static>> {
     ]
 }
 
-#[cfg(unix)]
-pub(super) fn claude(
-    label: &str,
-    limits: Option<&crate::claude_accounts::limits::Limits>,
-    length: u64,
-    now: u64,
-) -> Line<'static> {
-    let window = limits.and_then(|limits| {
-        if length == 18_000 {
-            limits.five_hour.as_ref()
-        } else {
-            limits.seven_day.as_ref()
-        }
-    });
-    let valid = window.filter(|w| w.used.is_finite() && (0.0..=100.0).contains(&w.used));
-    let value = valid.zip(limits).map(|(w, l)| {
-        crate::claude_accounts::roster::percent(w, l.observed_at, length, now) as f64
-    });
-    let mut spans = vec![Span::raw(format!("  {label:<5} "))];
-    spans.extend(bar(value, PURPLE, false));
-    let reset = valid
-        .and_then(|w| w.resets_at)
-        .filter(|v| *v > now)
-        .map(|v| crate::claude_accounts::roster::span(v - now))
-        .unwrap_or_else(|| "Unknown".into());
-    spans.push(Span::raw(format!("  reset {reset}")));
-    Line::from(spans)
-}
-
-#[cfg(not(unix))]
-pub(super) fn claude(
-    label: &str,
-    _: Option<&crate::claude_accounts::limits::Limits>,
-    _: u64,
-    _: u64,
-) -> Line<'static> {
-    Line::from(format!("  {label:<5} Unknown"))
-}
-
 pub(super) fn codex_label(
     label: &str,
     window: Option<&crate::monitor::CodexQuotaWindow>,
@@ -279,38 +240,5 @@ mod tests {
             assert_eq!(bar(Some(value), TEAL, true)[0].style.fg, Some(expected));
         }
         assert_eq!(bar(Some(101.0), TEAL, true)[0].content, "Unknown");
-    }
-    #[cfg(unix)]
-    #[test]
-    fn expired_claude_window_is_zero() {
-        use crate::claude_accounts::limits::{Limits, Window};
-        let limits = Limits {
-            five_hour: Some(Window {
-                used: 0.8,
-                resets_at: Some(99),
-            }),
-            seven_day: None,
-            observed_at: 1,
-        };
-        let buffer = crate::tui::tests::draw(80, 2, |frame| {
-            frame.render_widget(
-                ratatui::widgets::Paragraph::new(vec![
-                    claude("5h", Some(&limits), 18_000, 100),
-                    codex(
-                        "Primary",
-                        Some(&crate::monitor::CodexQuotaWindow {
-                            used_percent: Some(42.0),
-                            window_minutes: Some(300),
-                            reset_at: None,
-                        }),
-                        SystemTime::now(),
-                    ),
-                ]),
-                frame.area(),
-            );
-        });
-        let text = crate::tui::tests::buffer_text(&buffer);
-        assert!(text.contains(" 0%"));
-        assert!(text.contains("42.0%"));
     }
 }

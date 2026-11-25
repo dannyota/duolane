@@ -5,11 +5,17 @@ pub(super) fn needed_height(
     now: std::time::SystemTime,
     zone: jiff::tz::TimeZone,
 ) -> u16 {
-    let claude = 4_u16.saturating_add((count.min(u16::MAX as usize / 4) * 4) as u16);
-    let width = if area.width >= 90 {
-        area.width / 2
+    let local = count > 0;
+    let claude = if local {
+        u16::try_from(count.saturating_add(5)).unwrap_or(u16::MAX)
     } else {
-        area.width
+        4
+    };
+    let horizontal = area.width >= if local { 180 } else { 90 };
+    let width = match (horizontal, local) {
+        (false, _) => area.width,
+        (true, true) => 52,
+        (true, false) => area.width / 2,
     }
     .saturating_sub(2);
     let quota = snapshot
@@ -32,7 +38,7 @@ pub(super) fn needed_height(
         ),
     ];
     let chatgpt = super::usage_limits::wrapped_height(&lines, width).saturating_add(2);
-    if area.width >= 90 {
+    if horizontal {
         claude.max(chatgpt)
     } else {
         claude.saturating_add(chatgpt)

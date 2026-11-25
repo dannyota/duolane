@@ -126,9 +126,6 @@ impl Accounts {
     pub(super) fn confirming(&self) -> bool {
         self.pending.is_some() || self.controls.active()
     }
-    pub(super) fn local(&self) -> bool {
-        self.local
-    }
     pub(super) fn cancel(&mut self) {
         self.controls.cancel();
         self.pending = None;
@@ -219,27 +216,23 @@ impl Accounts {
             popup,
         );
     }
-    pub(super) fn click(&mut self, x: u16, y: u16) {
-        if self.pending.is_none()
-            && self
-                .subscription
-                .contains(ratatui::layout::Position::new(x, y))
-        {
+    pub(super) fn click(&mut self, x: u16, y: u16) -> Option<crossterm::event::KeyCode> {
+        let at = ratatui::layout::Position::new(x, y);
+        if self.confirming() {
+            return None;
+        }
+        if let Some(key) = self.controls.button_at(at) {
+            return Some(key);
+        }
+        if self.subscription.contains(at) {
             self.focus = self.names.len();
-            return;
+        } else if self.rows.contains(at) {
+            let index = self.first + usize::from(y - self.rows.y) / self.row_height;
+            if index < self.names.len() {
+                self.focus = index;
+            }
         }
-        if self.pending.is_some()
-            || x < self.rows.x
-            || x >= self.rows.right()
-            || y < self.rows.y
-            || y >= self.rows.bottom()
-        {
-            return;
-        }
-        let index = self.first + usize::from(y - self.rows.y) / self.row_height;
-        if index < self.names.len() {
-            self.focus = index;
-        }
+        None
     }
 
     #[cfg(test)]
@@ -268,27 +261,35 @@ impl Accounts {
     ) {
         use ratatui::{
             layout::{Constraint, Direction, Layout},
-            style::{Modifier, Style},
+            style::Style,
             text::Line,
             widgets::{Block, Borders, Paragraph},
         };
-        let direction = if area.width >= 90 {
-            Direction::Horizontal
+        let horizontal = area.width >= if self.local { 180 } else { 90 };
+        let claude_height = if self.local {
+            let wanted = u16::try_from(self.names.len().saturating_add(5)).unwrap_or(u16::MAX);
+            wanted.min(
+                area.height
+                    .saturating_sub(if area.height >= wanted.saturating_add(5) {
+                        5
+                    } else {
+                        3
+                    }),
+            )
         } else {
-            Direction::Vertical
-        };
-        let claude_height = (3_u16
-            .saturating_add((self.names.len().min(u16::MAX as usize / 4) * 4) as u16)
-            .saturating_add(u16::from(self.overridden)))
-        .min(area.height.saturating_sub(5));
-        let constraints = if direction == Direction::Vertical {
-            [Constraint::Length(claude_height), Constraint::Min(0)]
-        } else {
-            [Constraint::Percentage(50), Constraint::Percentage(50)]
+            3.min(area.height.saturating_sub(5))
         };
         let panes = Layout::default()
-            .direction(direction)
-            .constraints(constraints)
+            .direction(if horizontal {
+                Direction::Horizontal
+            } else {
+                Direction::Vertical
+            })
+            .constraints(match (horizontal, self.local) {
+                (false, _) => [Constraint::Length(claude_height), Constraint::Min(0)],
+                (true, true) => [Constraint::Min(0), Constraint::Length(52)],
+                (true, false) => [Constraint::Percentage(50), Constraint::Percentage(50)],
+            })
             .split(area);
         let seconds = now
             .duration_since(std::time::UNIX_EPOCH)
@@ -300,138 +301,80 @@ impl Accounts {
             .title(" Claude profiles ")
             .borders(Borders::ALL)
             .style(Style::default().fg(super::SEPARATOR));
+        if self.local {
+            block = block.title_top(
+                Line::from(format!(
+                    " ● Saved: {}  ★ Suggested ",
+                    if self.selected.is_empty() {
+                        "Unknown"
+                    } else {
+                        &self.selected
+                    }
+                ))
+                .style(Style::default().fg(super::DIM_WHITE))
+                .right_aligned(),
+            );
+        }
         if !self.names.is_empty() {
             block = block.title_bottom(
                 Line::from(format!(" {} ", roster.total(&self.limits, seconds)))
                     .style(Style::default().fg(super::DIM_WHITE)),
             );
         }
-        self.rows = block.inner(panes[0]);
+        let inner = block.inner(panes[0]);
         frame.render_widget(block, panes[0]);
-        if self.local {
-            let info = ratatui::layout::Rect::new(
-                self.rows.x,
-                self.rows.y,
-                self.rows.width,
-                self.rows.height.min(1 + u16::from(self.overridden)),
-            );
-            let saved = if self.selected.is_empty() {
-                "Unknown"
-            } else {
-                &self.selected
-            };
-            let mut info_lines = vec![Line::from(format!(
-                "Saved: {saved}  {}",
-                self.controls
-                    .message()
-                    .unwrap_or_else(|| self.details.summary())
-            ))];
-            if self.overridden {
-                info_lines.push(Line::from("CLAUDE_CONFIG_DIR overrides selection"));
-            }
-            frame.render_widget(Paragraph::new(info_lines), info);
-            self.rows.y += info.height;
-            self.rows.height -= info.height;
-        }
-        let available = usize::from(self.rows.height);
-        self.row_height = if available >= self.names.len() * 4 {
-            4
+        self.rows = inner;
+        self.row_height = 1;
+        if !self.local {
+            frame.render_widget(Paragraph::new("Claude profiles: Unknown"), inner);
         } else {
-            1
-        };
-        if self.row_height == 1
-            && available > self.names.len()
-            && let Some((name, state)) = self.names.get(self.focus).zip(states.get(self.focus))
-        {
-            let mut spans = vec![ratatui::text::Span::raw(format!("{name}:"))];
-            spans.extend(super::profile_rows::detail_spans(
-                state,
-                self.details.checking(),
-            ));
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)),
-                ratatui::layout::Rect::new(self.rows.x, self.rows.y, self.rows.width, 1),
+            let rows: Vec<super::profile_table::Row<'_>> = self
+                .names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| super::profile_table::Row {
+                    name,
+                    saved: *name == self.selected,
+                    focused: index == self.focus,
+                    state: states.get(index),
+                })
+                .collect();
+            let columns = super::profile_table::Columns::fit(&rows, usize::from(inner.width));
+            let height = usize::from(inner.height);
+            let line = |y: u16| ratatui::layout::Rect::new(inner.x, y, inner.width, 1);
+            let (buttons, message, header) = (
+                height >= 2,
+                height >= rows.len() + 2,
+                height >= rows.len() + 3,
             );
-            self.rows.y += 1;
-            self.rows.height -= 1;
-        }
-        let count = usize::from(self.rows.height) / self.row_height;
-        self.first = self
-            .focus
-            .min(self.names.len().saturating_sub(1))
-            .saturating_add(1)
-            .saturating_sub(count.max(1));
-        let mut lines: Vec<Line<'_>> = Vec::new();
-        if !self.local && self.names.is_empty() {
-            lines.push(Line::from("Claude profiles: Unknown"));
-        }
-        for (index, name) in self.names.iter().enumerate().skip(self.first).take(count) {
-            let style = if index == self.focus {
-                Style::default()
-                    .fg(super::WHITE)
-                    .bg(super::SELECTED_BG)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(super::DIM_WHITE)
-            };
-            let title = format!(
-                "Claude {name}{}",
-                if *name == self.selected { " Saved" } else { "" }
-            );
-            let state = states.get(index);
-            let limits = state.and_then(|state| state.limits.as_ref());
-            let five = super::usage_limits::claude("5h", limits, 18_000, seconds);
-            let week = super::usage_limits::claude("week", limits, 604_800, seconds);
-            if self.row_height == 4 {
-                let mut spans = vec![ratatui::text::Span::styled(title, style)];
-                let mut detail = vec![ratatui::text::Span::raw(" ")];
-                if let Some(state) = state {
-                    spans.extend(super::profile_rows::state_spans(state));
-                    detail.extend(super::profile_rows::detail_spans(
-                        state,
-                        self.details.checking(),
-                    ));
-                }
-                lines.push(Line::from(spans));
-                lines.push(Line::from(detail));
-                lines.push(five);
-                lines.push(week);
-            } else {
-                let reset = |five: bool| {
-                    limits
-                        .and_then(|l| {
-                            if five {
-                                l.five_hour.as_ref()
-                            } else {
-                                l.seven_day.as_ref()
-                            }
-                        })
-                        .and_then(|w| w.resets_at)
-                };
-                let windows = || {
-                    [
-                        super::usage_limits::CompactWindow {
-                            label: "5h".into(),
-                            line: five.clone(),
-                            reset: reset(true),
-                        },
-                        super::usage_limits::CompactWindow {
-                            label: "week".into(),
-                            line: week.clone(),
-                            reset: reset(false),
-                        },
-                    ]
-                };
-                lines.push(super::profile_rows::compact_with_state(
-                    state,
-                    usize::from(self.rows.width),
-                    |width| {
-                        super::usage_limits::compact_line(name, style, windows(), width, seconds)
-                    },
-                ));
+            if header {
+                frame.render_widget(Paragraph::new(columns.header()), line(inner.y));
+                self.rows.y += 1;
+            }
+            self.rows.height = inner
+                .height
+                .saturating_sub(u16::from(header) + u16::from(buttons) + u16::from(message));
+            let count = usize::from(self.rows.height);
+            self.first = self
+                .focus
+                .min(rows.len().saturating_sub(1))
+                .saturating_add(1)
+                .saturating_sub(count.max(1));
+            let lines: Vec<Line<'_>> = rows
+                .iter()
+                .skip(self.first)
+                .take(count)
+                .map(|row| columns.line(row))
+                .collect();
+            frame.render_widget(Paragraph::new(lines), self.rows);
+            let note = self.note_line(rows.get(self.focus));
+            if message {
+                frame.render_widget(Paragraph::new(note), line(inner.bottom() - 1));
+            }
+            if buttons {
+                self.render_buttons(frame, line(inner.bottom() - 1 - u16::from(message)));
             }
         }
-        frame.render_widget(Paragraph::new(lines), self.rows);
         self.subscription = panes[1];
         self.confirmation_visible = false;
         super::subscription::render(
@@ -535,7 +478,7 @@ mod tests {
             );
         }
         let state = crate::monitor::mock_state().into();
-        let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(90, 8, |f| {
+        let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(90, 13, |f| {
             accounts.render(f, f.area(), &state)
         }));
         for name in ["abcdefghijkl", "mnopqrstuvwx", "yzabcdefghij"] {
@@ -749,34 +692,15 @@ mod tests {
                             let index = usize::from(rows.y) + i * app.accounts.row_height;
                             let line = lines[index];
                             assert!(line.contains(name), "{width}x{height}: {text}");
-                            if app.accounts.row_height == 1 {
-                                let reset = if i == 1 { ["-", "-"] } else { ["1h0m", "2h0m"] };
-                                assert!(
-                                    line.contains(&format!("5h 20% {}", reset[0]))
-                                        && line.contains(&format!("week 40% {}", reset[1])),
-                                    "{width}x{height}: {text}"
-                                );
+                            let (five, week) = if i == 1 {
+                                ("20%", "40%")
                             } else {
-                                let five = lines[index + 1];
-                                let week = lines[index + 2];
-                                let reset = if i == 1 {
-                                    ["Unknown", "Unknown"]
-                                } else {
-                                    ["1h0m", "2h0m"]
-                                };
-                                assert!(
-                                    five.contains("5h")
-                                        && five.contains("20%")
-                                        && five.contains(reset[0]),
-                                    "{width}x{height}: {text}"
-                                );
-                                assert!(
-                                    week.contains("week")
-                                        && week.contains("40%")
-                                        && week.contains(reset[1]),
-                                    "{width}x{height}: {text}"
-                                );
-                            }
+                                ("20% 1h0m", "40% 2h0m")
+                            };
+                            assert!(
+                                line.contains(five) && line.contains(week),
+                                "{width}x{height}: {text}"
+                            );
                         }
                     }
                     let pane = app.accounts.subscription;
@@ -985,18 +909,23 @@ mod tests {
         let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(120, 14, |f| {
             accounts.render_at(f, f.area(), &state, time, jiff::tz::TimeZone::UTC)
         }));
-        assert!(text.contains("Accounts checked "), "{text}");
-        assert!(text.contains("  first@example.com (team)"), "{text}");
-        assert!(text.contains("  not signed in"), "{text}");
+        assert!(text.contains("● Saved: default  ★ Suggested"), "{text}");
         assert!(
-            text.contains("Claude default Saved  limited 29m  seen now"),
+            text.contains("●  default  first@example.com  team  ██████ 100% 29m"),
+            "{text}"
+        );
+        assert!(text.contains("limited 29m  now"), "{text}");
+        assert!(text.contains("   backup   not signed in"), "{text}");
+        assert!(text.contains("available    stale 2h"), "{text}");
+        assert_eq!(text.matches('★').count(), 1, "{text}");
+        assert!(
+            text.contains("[Enter Use]  [L Sign in]  [D Remove]  [S Switch]  [A Add]  [R Refresh]"),
             "{text}"
         );
         assert!(
-            text.contains("Claude backup  available  seen 2h ago Stale"),
+            text.contains("default · first@example.com (team) · Accounts checked"),
             "{text}"
         );
-        assert_eq!(text.matches("Suggested").count(), 0, "{text}");
         assert!(
             text.contains("all accounts: 5H 60% used, 7D 10% used"),
             "{text}"
@@ -1030,10 +959,10 @@ mod tests {
         }));
         let row = text
             .lines()
-            .find(|line| line.contains("default 5h"))
+            .find(|line| line.contains(" default "))
             .unwrap();
         assert!(
-            row.contains("5h 20% 1h30m") && row.contains("week 40% 1d12h"),
+            row.contains("20% 1h30m") && row.contains("40% 1d12h"),
             "{text}"
         );
     }
@@ -1198,7 +1127,7 @@ mod tests {
             accounts.render(frame, frame.area(), &state)
         });
         let text = crate::tui::tests::buffer_text(&buffer);
-        assert!(text.contains("Selected for next launch"));
+        assert!(text.contains("●  profile-0 "), "{text}");
     }
 
     #[cfg(unix)]

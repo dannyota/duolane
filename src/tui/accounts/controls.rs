@@ -1,4 +1,5 @@
 use super::Accounts;
+use crate::claude_accounts::profile_state::Tone;
 use crate::tui::actions::{self, Finished};
 use crossterm::event::KeyCode;
 
@@ -70,6 +71,8 @@ pub(super) struct Controls {
     runner: actions::Runner,
     handoff: Option<Action>,
     message: String,
+    tone: Tone,
+    buttons: Vec<(ratatui::layout::Rect, KeyCode)>,
 }
 
 impl Controls {
@@ -91,6 +94,19 @@ impl Controls {
         self.message.clear();
     }
 
+    fn say(&mut self, tone: Tone, message: String) {
+        self.tone = tone;
+        self.message = message;
+    }
+
+    pub(super) fn button_at(&self, at: ratatui::layout::Position) -> Option<KeyCode> {
+        self.buttons
+            .iter()
+            .find(|(rect, _)| rect.contains(at))
+            .map(|(_, key)| *key)
+    }
+
+    #[cfg(test)]
     pub(super) fn message(&self) -> Option<String> {
         match self.runner.running() {
             Some(label) => Some(format!("Running: {label}")),
@@ -164,7 +180,8 @@ impl Accounts {
             return;
         }
         if let Some(label) = self.controls.runner.running() {
-            self.controls.message = format!("Busy: {label}");
+            let busy = format!("Busy: {label}");
+            self.controls.say(Tone::Warn, busy);
             return;
         }
         self.controls.message.clear();
@@ -173,7 +190,8 @@ impl Accounts {
             return;
         }
         let Some(name) = self.names.get(self.focus).cloned() else {
-            self.controls.message = "Focus a Claude profile first".into();
+            self.controls
+                .say(Tone::Warn, "Focus a Claude profile first".into());
             return;
         };
         let kind = match key {
@@ -193,7 +211,7 @@ impl Accounts {
             _ => None,
         };
         if let Some(refusal) = refusal {
-            self.controls.message = refusal;
+            self.controls.say(Tone::Warn, refusal);
             return;
         }
         let seconds = std::time::SystemTime::now()
@@ -252,7 +270,8 @@ impl Accounts {
             _ => None,
         };
         if let Some(refusal) = refusal {
-            self.controls.message = format!("{refusal}; nothing ran");
+            self.controls
+                .say(Tone::Warn, format!("{refusal}; nothing ran"));
             self.enter();
             return;
         }
@@ -266,7 +285,8 @@ impl Accounts {
             .runner
             .start(action.label(), move || capture(args))
         {
-            self.controls.message = format!("{}: could not start", action.label());
+            self.controls
+                .say(Tone::Bad, format!("{}: could not start", action.label()));
         }
     }
 
@@ -274,13 +294,121 @@ impl Accounts {
         self.controls.handoff.take()
     }
 
+    pub(in crate::tui) fn run_handoff(
+        &mut self,
+        terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    ) -> std::io::Result<()> {
+        if let Some(action) = self.take_handoff() {
+            let label = action.label();
+            let finished = actions::run_handoff(terminal, &label, &action.args())?;
+            self.finish(&label, &finished);
+        }
+        Ok(())
+    }
+
     pub(in crate::tui) fn finish(&mut self, label: &str, finished: &Finished) {
         self.reload();
-        self.controls.message = format!(
-            "{label}: {}{}",
-            if finished.ok { "" } else { "failed, " },
-            finished.summary
+        self.controls.say(
+            if finished.ok { Tone::Good } else { Tone::Bad },
+            format!(
+                "{label}: {}{}",
+                if finished.ok { "" } else { "failed, " },
+                finished.summary
+            ),
         );
+    }
+
+    pub(super) fn note_line(
+        &self,
+        focused: Option<&crate::tui::profile_table::Row<'_>>,
+    ) -> ratatui::text::Line<'static> {
+        use ratatui::style::Style;
+        use ratatui::text::Line;
+        let color = |tone| match tone {
+            Tone::Good => crate::tui::GREEN,
+            Tone::Bad => crate::tui::RED,
+            Tone::Warn | Tone::Dim => crate::tui::YELLOW,
+        };
+        if let Some(label) = self.controls.runner.running() {
+            return Line::from(format!(" … Running: {label}"))
+                .style(Style::default().fg(crate::tui::TEAL));
+        }
+        if !self.controls.message.is_empty() {
+            let mark = match self.controls.tone {
+                Tone::Good => "✓",
+                Tone::Bad => "✗",
+                Tone::Warn | Tone::Dim => "!",
+            };
+            return Line::from(format!(" {mark} {}", self.controls.message))
+                .style(Style::default().fg(color(self.controls.tone)));
+        }
+        if !self.status.is_empty() {
+            return Line::from(format!(" {}", self.status))
+                .style(Style::default().fg(crate::tui::DIM_WHITE));
+        }
+        if self.overridden {
+            return Line::from(" ! CLAUDE_CONFIG_DIR overrides selection")
+                .style(Style::default().fg(crate::tui::YELLOW));
+        }
+        match focused {
+            Some(row) => crate::tui::profile_table::summary(row, &self.details.summary()),
+            None => Line::from(format!(" {}", self.details.summary()))
+                .style(Style::default().fg(crate::tui::DIM)),
+        }
+    }
+
+    pub(super) fn render_buttons(
+        &mut self,
+        frame: &mut ratatui::Frame<'_>,
+        area: ratatui::layout::Rect,
+    ) {
+        use ratatui::style::{Modifier, Style};
+        use ratatui::text::{Line, Span};
+        let name = self.names.get(self.focus);
+        let named = name.is_some_and(|name| name != "default");
+        let other = name.is_some_and(|name| *name != self.selected) && !self.overridden;
+        let buttons = [
+            ("Enter", " Use", KeyCode::Enter, other),
+            ("L", " Sign in", KeyCode::Char('l'), named),
+            ("D", " Remove", KeyCode::Char('d'), named),
+            ("S", " Switch", KeyCode::Char('s'), other),
+            ("A", " Add", KeyCode::Char('a'), true),
+            ("R", " Refresh", KeyCode::Char('r'), true),
+        ];
+        self.controls.buttons.clear();
+        let mut spans = Vec::new();
+        let mut x = area.x.saturating_add(1);
+        spans.push(Span::raw(" "));
+        for (key, label, code, enabled) in buttons {
+            let width = (key.len() + label.len() + 2) as u16;
+            if x.saturating_add(width) > area.right() {
+                break;
+            }
+            let (edge, hot) = if enabled {
+                (
+                    Style::default().fg(crate::tui::WHITE),
+                    Style::default()
+                        .fg(crate::tui::TEAL)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                let dim = Style::default().fg(crate::tui::SEPARATOR);
+                (dim, dim)
+            };
+            spans.extend([
+                Span::styled("[", edge),
+                Span::styled(key, hot),
+                Span::styled(format!("{label}]"), edge),
+                Span::raw("  "),
+            ]);
+            if enabled {
+                self.controls
+                    .buttons
+                    .push((ratatui::layout::Rect::new(x, area.y, width, 1), code));
+            }
+            x = x.saturating_add(width + 2);
+        }
+        frame.render_widget(ratatui::widgets::Paragraph::new(Line::from(spans)), area);
     }
 
     pub(super) fn poll_action(&mut self) {
@@ -436,6 +564,57 @@ mod tests {
             assert!(!app.usage_open && !app.accounts.confirming());
             press(&mut app, KeyCode::Char('d'));
             assert!(!app.accounts.confirming());
+        }
+
+        #[test]
+        fn clicking_a_button_acts_as_its_key_and_a_disabled_button_does_nothing() {
+            use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+            let state: crate::monitor::snapshot::MonitorSnapshot =
+                crate::monitor::mock_state().into();
+            let mut app = crate::tui::mouse_tests::app_for_accounts_test(accounts());
+            let click = |app: &mut crate::tui::MonitorApp, label: &str| {
+                let mut targets = Default::default();
+                let screen = crate::tui::tests::draw(120, 30, |frame| {
+                    targets = crate::tui::render(frame, app, &state);
+                });
+                let (column, row) =
+                    crate::tui::tests::placeholder_position(&screen, label).unwrap();
+                app.handle_mouse(
+                    MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: column + 1,
+                        row,
+                        modifiers: KeyModifiers::NONE,
+                    },
+                    &state,
+                    &targets,
+                );
+            };
+            click(&mut app, "[D Remove]");
+            assert!(app.accounts.confirming());
+            assert_eq!(
+                app.accounts
+                    .controls
+                    .pending
+                    .as_ref()
+                    .map(|action| action.kind),
+                Some(Kind::Remove)
+            );
+            click(&mut app, "[L Sign in]");
+            assert_eq!(
+                app.accounts
+                    .controls
+                    .pending
+                    .as_ref()
+                    .map(|action| action.kind),
+                Some(Kind::Remove)
+            );
+            app.accounts.cancel();
+            app.accounts.focus = 0;
+            click(&mut app, "[D Remove]");
+            assert!(!app.accounts.confirming());
+            click(&mut app, "[A Add]");
+            assert!(app.accounts.typing());
         }
 
         #[test]
