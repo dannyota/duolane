@@ -40,8 +40,8 @@ pub(super) fn needed_height(
 }
 
 pub(super) struct Accounts {
-    local: bool,
-    limits: std::collections::BTreeMap<String, crate::claude_accounts::limits::Limits>,
+    pub(super) local: bool,
+    pub(super) limits: std::collections::BTreeMap<String, crate::claude_accounts::limits::Limits>,
     refreshed: Option<std::time::Instant>,
     names: Vec<String>,
     selected: String,

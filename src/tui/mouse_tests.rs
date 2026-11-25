@@ -4,7 +4,7 @@ use crate::monitor::{RequestStatus, mock_state};
 use crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::buffer::Buffer;
 
-fn app() -> MonitorApp {
+pub(super) fn app() -> MonitorApp {
     MonitorApp {
         accounts: accounts::Accounts::new(false),
         usage_open: false,

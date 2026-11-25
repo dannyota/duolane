@@ -37,7 +37,7 @@ fn groups(recent: &[CompletedSnapshot]) -> Vec<(GroupKey, Group)> {
         let group = groups.entry(key).or_default();
         group.count += 1;
         if let Some(wait) = row
-            .generation_started_at
+            .first_upstream_event_at
             .and_then(|started| started.duration_since(row.started_at).ok())
         {
             group.waits.push(wait.as_secs_f64());
@@ -66,6 +66,28 @@ fn groups(recent: &[CompletedSnapshot]) -> Vec<(GroupKey, Group)> {
             .then_with(|| a.0.cmp(&b.0))
     });
     groups
+}
+
+pub(super) fn lane_stats(
+    recent: &[CompletedSnapshot],
+    provider: &str,
+) -> (Option<f64>, Option<f64>) {
+    let rows: Vec<_> = recent
+        .iter()
+        .filter(|r| r.provider.as_deref() == Some(provider))
+        .cloned()
+        .collect();
+    let mut groups = groups(&rows);
+    let mut waits: Vec<_> = groups
+        .iter_mut()
+        .flat_map(|(_, group)| std::mem::take(&mut group.waits))
+        .collect();
+    let tokens: f64 = groups.iter().map(|(_, group)| group.rate_tokens).sum();
+    let seconds: f64 = groups.iter().map(|(_, group)| group.rate_seconds).sum();
+    (
+        median(&mut waits),
+        (seconds > 0.0).then_some(tokens / seconds),
+    )
 }
 
 fn number(value: Option<f64>, suffix: &str) -> String {
@@ -304,7 +326,7 @@ mod tests {
             row.provider = Some("lane".into());
             row.model = Some("model".into());
             row.effort = None;
-            row.generation_started_at = Some(row.started_at + Duration::from_secs(wait));
+            row.first_upstream_event_at = Some(row.started_at + Duration::from_secs(wait));
             row.generation_duration = Some(Duration::from_secs(duration));
             row.output_tokens = output;
             let snapshot: CompletedSnapshot = row.into();

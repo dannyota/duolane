@@ -418,6 +418,11 @@ impl CodexHttpClient {
                 return Ok(body);
             };
             evidence.push(&chunk);
+            if evidence.received_event
+                && let Some(monitor) = ctx.monitor.as_ref()
+            {
+                monitor.first_upstream_event(&ctx.req_id);
+            }
             *hosted_http |= evidence.hosted;
             if tracked && evidence.hosted {
                 ctx.recovery_budget.mark_hosted();

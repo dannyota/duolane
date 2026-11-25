@@ -1,7 +1,8 @@
 use super::client::CodexHttpClient;
 use super::client_sse::{
     append_live_metadata_payload, event_stream_response, record_live_stream_downstream_capture,
-    record_live_stream_progress, single_live_stream_response, translate_live_stream_payload,
+    record_live_stream_first_output, record_live_stream_progress, single_live_stream_response,
+    translate_live_stream_payload,
 };
 use super::compaction::CompactionAttempt;
 #[cfg(test)]
@@ -484,7 +485,7 @@ async fn live_stream_response_once(
                     compaction.compact_boundary,
                     echoed,
                 );
-                return LiveStreamStart::Response(single_live_stream_response(pending_chunk));
+                return LiveStreamStart::Response(single_live_stream_response(pending_chunk, ctx));
             }
             return LiveStreamStart::Response(remaining_live_stream_response(
                 upstream_events,
@@ -520,7 +521,7 @@ async fn live_stream_response_once(
             }
             record_live_stream_downstream_capture(&ctx, &pending_chunk);
             record_live_stream_progress(&ctx, &pending_chunk);
-            return LiveStreamStart::Response(single_live_stream_response(pending_chunk));
+            return LiveStreamStart::Response(single_live_stream_response(pending_chunk, ctx));
         }
     }
     let mut error = websocket::missing_terminal_error();
@@ -552,6 +553,7 @@ fn remaining_live_stream_response(
 ) -> Response {
     let is_http = upstream_events.is_http();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
+    let stream_ctx = ctx.clone();
     tokio::spawn(async move {
         if tx.send(Ok(Bytes::from(first_chunk))).await.is_err() {
             abort_request_state(
@@ -691,8 +693,13 @@ fn remaining_live_stream_response(
             let _ = tx.send(Ok(Bytes::from(chunk))).await;
         }
     });
-    let stream = futures_util::stream::unfold(rx, |mut rx| async {
-        rx.recv().await.map(|item| (item, rx))
+    let stream = futures_util::stream::unfold((rx, stream_ctx), |(mut rx, ctx)| async {
+        rx.recv().await.map(|item| {
+            if let Ok(chunk) = &item {
+                record_live_stream_first_output(&ctx, chunk);
+            }
+            (item, (rx, ctx))
+        })
     });
     event_stream_response(stream)
 }
@@ -1453,6 +1460,91 @@ mod tests {
         assert!(
             sse.contains("event: message_stop"),
             "delivered stream must terminate properly, got: {sse:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_output_is_recorded_only_when_body_is_polled() {
+        for poll in [false, true] {
+            let (tx, rx, mut ctx, request_body) = empty_terminal_fixture();
+            let monitor = crate::monitor::MonitorHandle::new(10);
+            monitor.request_started(
+                &ctx.req_id,
+                None,
+                None,
+                crate::monitor::EndpointKind::Messages,
+            );
+            ctx.monitor = Some(monitor.clone());
+            tx.send(Ok(serde_json::json!({"type":"response.output_text.delta", "delta":"hello", "output_index":0, "content_index":0}))).await.unwrap();
+            let LiveStreamStart::Response(response) = live_stream_response_once(
+                rx,
+                "msg_test".into(),
+                "gpt-5.6-sol",
+                ctx,
+                ContinuationReservation::for_owner_turn(None, None),
+                request_body,
+                LiveStreamCompaction {
+                    compact_boundary: false,
+                    attempt: None,
+                },
+                config::CodexTransport::WebSocket,
+                false,
+            )
+            .await
+            else {
+                panic!("expected stream")
+            };
+            assert!(monitor.snapshot().active[0].first_output_at.is_none());
+            if poll {
+                use http_body_util::BodyExt as _;
+                let mut body = response.into_body();
+                assert!(body.frame().await.is_some());
+                assert!(monitor.snapshot().active[0].first_output_at.is_some());
+            } else {
+                drop(response);
+                assert!(monitor.snapshot().active[0].first_output_at.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_body_reader_does_not_extend_generation_duration() {
+        let (tx, rx, mut ctx, request_body) = empty_terminal_fixture();
+        let monitor = crate::monitor::MonitorHandle::new(10);
+        monitor.request_started(
+            &ctx.req_id,
+            None,
+            None,
+            crate::monitor::EndpointKind::Messages,
+        );
+        ctx.monitor = Some(monitor.clone());
+        tx.send(Ok(serde_json::json!({"type":"response.output_text.delta", "delta":"hello", "output_index":0, "content_index":0}))).await.unwrap();
+        let LiveStreamStart::Response(response) = live_stream_response_once(
+            rx,
+            "msg_test".into(),
+            "gpt-5.6-sol",
+            ctx,
+            ContinuationReservation::for_owner_turn(None, None),
+            request_body,
+            LiveStreamCompaction {
+                compact_boundary: false,
+                attempt: None,
+            },
+            config::CodexTransport::WebSocket,
+            false,
+        )
+        .await
+        else {
+            panic!("expected stream")
+        };
+        tx.send(Ok(serde_json::json!({"type":"response.completed", "response":{"id":"r", "status":"completed", "usage":{"input_tokens":1,"output_tokens":2}}}))).await.unwrap();
+        drop(tx);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        response.into_body().collect().await.unwrap();
+        let duration = monitor.snapshot().active[0].generation_duration.unwrap();
+        assert!(
+            duration < Duration::from_secs(1),
+            "generation took {duration:?}"
         );
     }
 

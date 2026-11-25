@@ -22,6 +22,7 @@ pub(super) struct BufferedHttpSseEvidence {
     skip_lf: bool,
     pub(super) hosted: bool,
     pub(super) terminal: bool,
+    pub(super) received_event: bool,
 }
 
 impl BufferedHttpSseEvidence {
@@ -40,6 +41,7 @@ impl BufferedHttpSseEvidence {
                         && let Ok(Some(event)) = decode_http_sse_frame(&self.frame)
                         && let Some(payload) = event.payload
                     {
+                        self.received_event = true;
                         self.hosted |= payload_confirms_hosted(&payload);
                         self.terminal |= super::events::event_is_terminal(&payload);
                     }
@@ -412,6 +414,34 @@ pub(super) fn write_codex_sse_event_capture(traffic: &TrafficCapture, body: &[u8
     }
 }
 
+pub(super) fn record_live_stream_first_output(ctx: &crate::provider::RequestContext, chunk: &[u8]) {
+    if let Some(monitor) = ctx.monitor.as_ref() {
+        let output = chunk
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| line.strip_prefix(b"data: "))
+            .filter_map(|data| serde_json::from_slice::<serde_json::Value>(data).ok())
+            .any(|event| {
+                (event["type"] == "content_block_delta"
+                    && match event["delta"]["type"].as_str() {
+                        Some("text_delta") => event["delta"]["text"]
+                            .as_str()
+                            .is_some_and(|text| !text.is_empty()),
+                        Some("thinking_delta") => event["delta"]["thinking"]
+                            .as_str()
+                            .is_some_and(|text| !text.is_empty()),
+                        _ => false,
+                    })
+                    || (event["type"] == "content_block_start"
+                        && event["content_block"]["type"]
+                            .as_str()
+                            .is_some_and(|kind| kind == "tool_use" || kind.ends_with("_tool_use")))
+            });
+        if output {
+            monitor.first_output(&ctx.req_id);
+        }
+    }
+}
+
 pub(super) fn record_live_stream_progress(ctx: &crate::provider::RequestContext, chunk: &[u8]) {
     if let Some(monitor) = ctx.monitor.as_ref() {
         let (input_tokens, output_tokens) = crate::anthropic::sse::usage_from_anthropic_sse(chunk);
@@ -468,8 +498,12 @@ pub(super) fn translate_live_stream_payload(
     Ok((chunk, terminal))
 }
 
-pub(super) fn single_live_stream_response(chunk: Vec<u8>) -> axum::response::Response {
+pub(super) fn single_live_stream_response(
+    chunk: Vec<u8>,
+    ctx: crate::provider::RequestContext,
+) -> axum::response::Response {
     event_stream_response(futures_util::stream::once(async move {
+        record_live_stream_first_output(&ctx, &chunk);
         Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(chunk))
     }))
 }
@@ -489,6 +523,38 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delivered_content_records_first_output() {
+        let monitor = crate::monitor::MonitorHandle::default();
+        monitor.request_started("r", None, None, crate::monitor::EndpointKind::Messages);
+        let ctx = crate::provider::RequestContext {
+            recovery_budget: Default::default(),
+            req_id: "r".into(),
+            session_id: None,
+            traffic: None,
+            monitor: Some(monitor.clone()),
+            passthrough: None,
+        };
+        record_live_stream_first_output(
+            &ctx,
+            b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+        );
+        assert!(monitor.snapshot().active[0].first_output_at.is_none());
+        record_live_stream_first_output(&ctx, b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"\"}}\n\n");
+        record_live_stream_first_output(&ctx, b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"signature_delta\",\"signature\":\"x\"}}\n\n");
+        assert!(monitor.snapshot().active[0].first_output_at.is_none());
+        record_live_stream_first_output(&ctx, b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n");
+        assert!(monitor.snapshot().active[0].first_output_at.is_some());
+        let monitor = crate::monitor::MonitorHandle::default();
+        monitor.request_started("r", None, None, crate::monitor::EndpointKind::Messages);
+        let ctx = crate::provider::RequestContext {
+            monitor: Some(monitor.clone()),
+            ..ctx
+        };
+        record_live_stream_first_output(&ctx, b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\"}}\n\n");
+        assert!(monitor.snapshot().active[0].first_output_at.is_some());
+    }
 
     #[test]
     fn http_sse_decoder_handles_fragmented_crlf_and_done_marker() {

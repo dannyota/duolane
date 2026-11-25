@@ -157,6 +157,36 @@ static WS_POOL: once_cell::sync::Lazy<Mutex<HashMap<PoolKey, Arc<PoolEntry>>>> =
 #[cfg(test)]
 static WS_POOL_TEST_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 
+pub(super) static ORIGIN_403_COUNT: AtomicU64 = AtomicU64::new(0);
+pub(super) static HTTP_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
+static WEBSOCKET_REUSED_COUNT: AtomicU64 = AtomicU64::new(0);
+static WEBSOCKET_NEW_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub(super) fn record_websocket_send(reused: bool) {
+    let counter = if reused {
+        &WEBSOCKET_REUSED_COUNT
+    } else {
+        &WEBSOCKET_NEW_COUNT
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn codex_connection_counters() -> crate::monitor::snapshot::CodexConnections {
+    crate::monitor::snapshot::CodexConnections {
+        queued_attempts: WS_CONNECT_GATE.queued.load(Ordering::Relaxed),
+        handshakes_in_flight: WS_CONNECT_GATE.in_flight.load(Ordering::Relaxed),
+        handshake_spacing_ms: WS_CONNECT_GATE.spacing_ms.load(Ordering::Relaxed),
+        websocket_reused: WEBSOCKET_REUSED_COUNT.load(Ordering::Relaxed),
+        websocket_new: WEBSOCKET_NEW_COUNT.load(Ordering::Relaxed),
+        http_fallbacks: HTTP_FALLBACK_COUNT.load(Ordering::Relaxed),
+        origin_403: ORIGIN_403_COUNT.load(Ordering::Relaxed),
+    }
+}
+
+pub fn queued_codex_handshake_request_ids() -> Vec<String> {
+    WS_CONNECT_GATE.queued_request_ids()
+}
+
 pub(super) static WS_CONNECT_GATE: once_cell::sync::Lazy<WebSocketConnectGate> =
     once_cell::sync::Lazy::new(|| WebSocketConnectGate::new(WEBSOCKET_CONNECT_START_SPACING));
 
@@ -184,6 +214,10 @@ pub fn reset_codex_websocket_connect_gate_for_tests() {
     let mut state = WS_CONNECT_GATE.last_start.lock().unwrap();
     state.last_start = None;
     state.spacing = WS_CONNECT_GATE.floor;
+    WS_CONNECT_GATE.spacing_ms.store(
+        WS_CONNECT_GATE.floor.as_millis().min(u64::MAX as u128) as u64,
+        Ordering::Relaxed,
+    );
     state.cooldown_until = None;
     drop(state);
     WS_CONNECT_GATE.changed.notify_waiters();
@@ -475,6 +509,7 @@ struct ConnectGateState {
     spacing: Duration,
     cooldown_until: Option<tokio::time::Instant>,
     queue: std::collections::VecDeque<u64>,
+    waiting: std::collections::VecDeque<(u64, String)>,
     next_id: u64,
 }
 
@@ -483,6 +518,20 @@ pub(super) struct WebSocketConnectGate {
     floor: Duration,
     changed: tokio::sync::Notify,
     handshakes: tokio::sync::Semaphore,
+    queued: AtomicU64,
+    in_flight: AtomicU64,
+    spacing_ms: AtomicU64,
+}
+
+pub(super) struct HandshakePermit<'a> {
+    gate: &'a WebSocketConnectGate,
+    _permit: tokio::sync::SemaphorePermit<'a>,
+}
+
+impl Drop for HandshakePermit<'_> {
+    fn drop(&mut self) {
+        self.gate.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 struct ConnectWaiter<'a> {
@@ -494,12 +543,24 @@ impl Drop for ConnectWaiter<'_> {
     fn drop(&mut self) {
         let mut state = self.gate.last_start.lock().unwrap();
         state.queue.retain(|id| *id != self.id);
+        state.waiting.retain(|(id, _)| *id != self.id);
+        self.gate.queued.fetch_sub(1, Ordering::Relaxed);
         drop(state);
         self.gate.changed.notify_waiters();
     }
 }
 
 impl WebSocketConnectGate {
+    fn queued_request_ids(&self) -> Vec<String> {
+        self.last_start
+            .lock()
+            .unwrap()
+            .waiting
+            .iter()
+            .map(|(_, id)| id.clone())
+            .collect()
+    }
+
     pub(super) fn new(start_spacing: Duration) -> Self {
         Self {
             last_start: Mutex::new(ConnectGateState {
@@ -507,11 +568,15 @@ impl WebSocketConnectGate {
                 spacing: start_spacing,
                 cooldown_until: None,
                 queue: Default::default(),
+                waiting: Default::default(),
                 next_id: 0,
             }),
             floor: start_spacing,
             changed: tokio::sync::Notify::new(),
             handshakes: tokio::sync::Semaphore::new(4),
+            queued: AtomicU64::new(0),
+            in_flight: AtomicU64::new(0),
+            spacing_ms: AtomicU64::new(start_spacing.as_millis().min(u64::MAX as u128) as u64),
         }
     }
 
@@ -519,8 +584,9 @@ impl WebSocketConnectGate {
     pub(super) async fn wait_to_start(
         &self,
         before_start: impl std::future::Future<Output = ()>,
-    ) -> tokio::sync::SemaphorePermit<'_> {
+    ) -> HandshakePermit<'_> {
         self.wait_to_start_until(
+            "",
             before_start,
             tokio::time::Instant::now() + Duration::from_secs(3600),
         )
@@ -530,18 +596,33 @@ impl WebSocketConnectGate {
 
     pub(super) async fn wait_to_start_until(
         &self,
+        request_id: &str,
         before_start: impl std::future::Future<Output = ()>,
         queue_deadline: tokio::time::Instant,
-    ) -> Result<tokio::sync::SemaphorePermit<'_>, ()> {
+    ) -> Result<HandshakePermit<'_>, ()> {
         before_start.await;
-        let permit = self.handshakes.acquire().await.unwrap();
         let waiter = {
             let mut state = self.last_start.lock().unwrap();
             let id = state.next_id;
             state.next_id = state.next_id.wrapping_add(1);
+            state.waiting.push_back((id, request_id.to_owned()));
             state.queue.push_back(id);
+            self.queued.fetch_add(1, Ordering::Relaxed);
             ConnectWaiter { gate: self, id }
         };
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.last_start.lock().unwrap().queue.front() == Some(&waiter.id) {
+                break;
+            }
+            tokio::select! { _ = &mut notified => {}, _ = tokio::time::sleep_until(queue_deadline) => return Err(()) }
+        }
+        let permit = tokio::time::timeout_at(queue_deadline, self.handshakes.acquire())
+            .await
+            .map_err(|_| ())?
+            .map_err(|_| ())?;
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
@@ -564,7 +645,11 @@ impl WebSocketConnectGate {
                         state.queue.pop_front();
                         drop(state);
                         drop(waiter);
-                        return Ok(permit);
+                        self.in_flight.fetch_add(1, Ordering::Relaxed);
+                        return Ok(HandshakePermit {
+                            gate: self,
+                            _permit: permit,
+                        });
                     }
                     Some(deadline)
                 } else {
@@ -586,6 +671,10 @@ impl WebSocketConnectGate {
             state.spacing = state.spacing.saturating_mul(2).min(Duration::from_secs(8));
             state.cooldown_until = Some(now + cooldown);
         }
+        self.spacing_ms.store(
+            state.spacing.as_millis().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
         drop(state);
         self.changed.notify_waiters();
     }
@@ -603,6 +692,10 @@ impl WebSocketConnectGate {
     pub(super) fn record_success(&self) {
         let mut state = self.last_start.lock().unwrap();
         state.spacing = (state.spacing / 2).max(self.floor);
+        self.spacing_ms.store(
+            state.spacing.as_millis().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
         drop(state);
         self.changed.notify_waiters();
     }
@@ -694,6 +787,122 @@ mod tests {
         WebSocketStream::from_raw_socket(io, Role::Client, None).await
     }
 
+    #[tokio::test]
+    async fn queued_attempts_keep_arrival_order_and_remove_cancelled() {
+        let gate = Arc::new(WebSocketConnectGate::new(Duration::ZERO));
+        let mut permits = Vec::new();
+        for _ in 0..4 {
+            permits.push(gate.wait_to_start(async {}).await);
+        }
+        let first_gate = gate.clone();
+        let first = tokio::spawn(async move {
+            drop(
+                first_gate
+                    .wait_to_start_until(
+                        "first",
+                        async {},
+                        tokio::time::Instant::now() + Duration::from_secs(60),
+                    )
+                    .await,
+            );
+        });
+        tokio::task::yield_now().await;
+        let second_gate = gate.clone();
+        let second = tokio::spawn(async move {
+            drop(
+                second_gate
+                    .wait_to_start_until(
+                        "second",
+                        async {},
+                        tokio::time::Instant::now() + Duration::from_secs(60),
+                    )
+                    .await,
+            );
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(gate.queued_request_ids(), vec!["first", "second"]);
+        let (queue, waiting) = {
+            let state = gate.last_start.lock().unwrap();
+            (
+                state.queue.iter().copied().collect::<Vec<_>>(),
+                state.waiting.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(queue, waiting);
+        first.abort();
+        let _ = first.await;
+        assert_eq!(gate.queued_request_ids(), vec!["second"]);
+        drop(permits.pop());
+        second.await.unwrap();
+        assert!(gate.queued_request_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_queue_places_and_updates_after_cancel() {
+        let _lock = lock_codex_websocket_pool_for_tests().await;
+        let permits = WS_CONNECT_GATE.handshakes.acquire_many(4).await.unwrap();
+        let monitor = crate::monitor::MonitorHandle::default();
+        for id in ["first", "second", "http"] {
+            monitor.request_started(id, None, None, crate::monitor::EndpointKind::Messages);
+        }
+        let first = tokio::spawn(async {
+            drop(
+                WS_CONNECT_GATE
+                    .wait_to_start_until(
+                        "first",
+                        async {},
+                        tokio::time::Instant::now() + Duration::from_secs(60),
+                    )
+                    .await,
+            );
+        });
+        tokio::task::yield_now().await;
+        let second = tokio::spawn(async {
+            drop(
+                WS_CONNECT_GATE
+                    .wait_to_start_until(
+                        "second",
+                        async {},
+                        tokio::time::Instant::now() + Duration::from_secs(60),
+                    )
+                    .await,
+            );
+        });
+        tokio::task::yield_now().await;
+        let snapshot = monitor.snapshot();
+        assert_eq!(codex_connection_counters().queued_attempts, 2);
+        assert_eq!(
+            snapshot.codex_connections.as_ref().unwrap().queued_attempts,
+            2
+        );
+        let place = |id: &str| {
+            snapshot
+                .active
+                .iter()
+                .find(|r| r.request_id == id)
+                .unwrap()
+                .queue_place
+        };
+        assert_eq!(place("first"), Some(1));
+        assert_eq!(place("second"), Some(2));
+        assert_eq!(place("http"), None);
+        first.abort();
+        let _ = first.await;
+        let snapshot = monitor.snapshot();
+        assert_eq!(
+            snapshot
+                .active
+                .iter()
+                .find(|r| r.request_id == "second")
+                .unwrap()
+                .queue_place,
+            Some(1)
+        );
+        second.abort();
+        let _ = second.await;
+        drop(permits);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn waiting_for_start_does_not_hold_gate_lock() {
         let gate = Arc::new(WebSocketConnectGate::new(Duration::from_secs(1)));
@@ -743,7 +952,11 @@ mod tests {
     async fn expired_deadline_does_not_start_handshake() {
         let gate = WebSocketConnectGate::new(Duration::ZERO);
         let deadline = tokio::time::Instant::now();
-        assert!(gate.wait_to_start_until(async {}, deadline).await.is_err());
+        assert!(
+            gate.wait_to_start_until("", async {}, deadline)
+                .await
+                .is_err()
+        );
         assert!(gate.last_start.lock().unwrap().last_start.is_none());
     }
 
@@ -759,7 +972,7 @@ mod tests {
         let waiter_gate = gate.clone();
         let waiter = tokio::spawn(async move {
             waiter_gate
-                .wait_to_start_until(async {}, deadline)
+                .wait_to_start_until("", async {}, deadline)
                 .await
                 .is_err()
         });
@@ -779,6 +992,7 @@ mod tests {
             gate.last_start.lock().unwrap().spacing,
             Duration::from_secs(2)
         );
+        assert_eq!(gate.spacing_ms.load(Ordering::Relaxed), 2000);
         for _ in 0..4 {
             tokio::time::advance(Duration::from_secs(3)).await;
             gate.record_forbidden(Duration::from_secs(3));
@@ -794,6 +1008,7 @@ mod tests {
             gate.last_start.lock().unwrap().spacing,
             Duration::from_secs(1)
         );
+        assert_eq!(gate.spacing_ms.load(Ordering::Relaxed), 1000);
     }
 
     #[tokio::test(start_paused = true)]
@@ -803,12 +1018,17 @@ mod tests {
         for _ in 0..4 {
             permits.push(gate.wait_to_start(async {}).await);
         }
+        assert_eq!(gate.in_flight.load(Ordering::Relaxed), 4);
         let other = gate.clone();
         let task = tokio::spawn(async move { drop(other.wait_to_start(async {}).await) });
         tokio::task::yield_now().await;
         assert!(!task.is_finished());
+        assert_eq!(gate.last_start.lock().unwrap().waiting.len(), 1);
         permits.pop();
         task.await.unwrap();
+        assert_eq!(gate.in_flight.load(Ordering::Relaxed), 3);
+        drop(permits);
+        assert_eq!(gate.in_flight.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1205,6 +1425,7 @@ mod tests {
         );
 
         let error = match prepare_codex_websocket(
+            "",
             &test_websocket_client(),
             &WebSocketProxyConfig::direct(),
             "ws://127.0.0.1:9/responses",
@@ -1280,6 +1501,7 @@ mod tests {
             .await
         });
         let error = match prepare_codex_websocket(
+            "",
             &test_websocket_client(),
             &WebSocketProxyConfig::direct(),
             "ws://127.0.0.1:9/responses",
@@ -1473,6 +1695,7 @@ mod tests {
         let headers = HeaderMap::new();
         let body = serde_json::json!({"type":"response.create","input":[]});
         let ready = prepare_codex_websocket(
+            "",
             &test_websocket_client(),
             &WebSocketProxyConfig::direct(),
             &format!("http://{addr}/responses"),
@@ -1494,6 +1717,7 @@ mod tests {
             &headers,
             Some(&continuation),
             Arc::default(),
+            None,
         );
 
         request_seen_rx.await.unwrap();
@@ -1789,6 +2013,7 @@ mod tests {
         let url = format!("ws://{addr}/");
         let client = test_websocket_client();
         connect_with_timeout(
+            "",
             &client,
             &WebSocketProxyConfig::direct(),
             &url,

@@ -200,6 +200,7 @@ impl CodexHttpClient {
             let headers = build_codex_headers(&auth, ctx, body.client_metadata.is_some())?;
             let headers = super::websocket::codex_websocket_headers(&headers);
             match super::websocket::prepare_codex_websocket(
+                &ctx.req_id,
                 &self.websocket_client,
                 &self.websocket_proxy_config,
                 &self.base_url,
@@ -226,6 +227,8 @@ impl CodexHttpClient {
                             return Err(CodexError::recovery_exhausted());
                         }
                         super::client_live::invalidate_live_continuation_pool(continuation);
+                        super::websocket_pool::HTTP_FALLBACK_COUNT
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         http_body
                             .size_http_selected
                             .store(true, std::sync::atomic::Ordering::Release);
@@ -259,6 +262,8 @@ impl CodexHttpClient {
                     return Err(CodexError::recovery_exhausted());
                 }
                 super::client_live::invalidate_live_continuation_pool(continuation);
+                super::websocket_pool::HTTP_FALLBACK_COUNT
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.stream_codex_http_events_for_owner_tracked(body, ctx, http_body)
                     .await
             }
@@ -478,6 +483,9 @@ impl CodexHttpClient {
                         let Some(mut payload) = event.payload else {
                             continue;
                         };
+                        if let Some(monitor) = ctx.monitor.as_ref() {
+                            monitor.first_upstream_event(&ctx.req_id);
+                        }
                         if let Some(quota) = &quota {
                             quota.observe(&payload);
                         }
@@ -1225,6 +1233,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (created_tx, created_rx) = tokio::sync::oneshot::channel();
+        let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0_u8; 16 * 1024];
@@ -1235,6 +1245,9 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            write_http_chunk(&mut stream, b"data: {\"type\":\"response.created\"}\n\n").await;
+            created_tx.send(()).unwrap();
+            continue_rx.await.unwrap();
             write_http_chunk(
                 &mut stream,
                 b"data: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":25,\"window_minutes\":300}}}\n\n",
@@ -1268,11 +1281,26 @@ mod tests {
             .await
             .unwrap();
 
+        created_rx.await.unwrap();
+        tokio::time::timeout(Duration::from_millis(200), async {
+            while monitor.snapshot().active[0]
+                .first_upstream_event_at
+                .is_none()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("held upstream event must be recorded");
+        let first = monitor.snapshot().active[0].first_upstream_event_at;
+        continue_tx.send(()).unwrap();
         let synthetic = events.recv().await.unwrap().unwrap();
         assert_eq!(
             synthetic.get("type").and_then(|value| value.as_str()),
             Some("keepalive")
         );
+        let created = events.recv().await.unwrap().unwrap();
+        assert_eq!(created["type"], "response.created");
         let quota_event = events.recv().await.unwrap().unwrap();
         assert_eq!(quota_event["type"], "codex.rate_limits");
         assert_eq!(
@@ -1296,6 +1324,7 @@ mod tests {
         );
 
         release_tx.send(()).unwrap();
+        assert_eq!(monitor.snapshot().active[0].first_upstream_event_at, first);
         let terminal = events.recv().await.unwrap().unwrap();
         assert_eq!(
             terminal.get("type").and_then(|value| value.as_str()),
@@ -1416,6 +1445,7 @@ mod tests {
             Ok(_) => panic!("exhausted continuation recovery must stop"),
         };
         assert!(error.is_recovery_exhausted());
+        let before = super::super::websocket::codex_connection_counters().http_fallbacks;
         let mut events = client
             .stream_codex_auto_events_for_owner(
                 &request,
@@ -1427,6 +1457,10 @@ mod tests {
             .await
             .unwrap();
         assert!(events.is_http());
+        assert_eq!(
+            super::super::websocket::codex_connection_counters().http_fallbacks,
+            before + 1
+        );
         while let Some(event) = events.recv().await {
             event.unwrap();
         }
@@ -1734,6 +1768,7 @@ mod tests {
     async fn tracked_auto_transient_upgrade_falls_back_for_both_modes() {
         use super::super::sources::{ReplayGate, SourceAttempt};
         for live in [false, true] {
+            let before = super::super::websocket::codex_connection_counters().http_fallbacks;
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let server = tokio::spawn(async move {
@@ -1791,6 +1826,10 @@ mod tests {
                 assert_eq!(response.status, 200);
             }
             server.await.unwrap();
+            assert_eq!(
+                super::super::websocket::codex_connection_counters().http_fallbacks,
+                before + 1
+            );
         }
     }
 

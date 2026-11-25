@@ -53,7 +53,29 @@ pub(super) struct CodexHttpBody {
     capture_json: Option<Bytes>,
 }
 
+pub(super) fn record_size_fallback(missing_socket: &mut bool) {
+    if std::mem::take(missing_socket) {
+        super::websocket_pool::HTTP_FALLBACK_COUNT
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl CodexHttpClient {
+    pub(super) async fn auto_size_http_selected(
+        &self,
+        body: &super::translate::request::ResponsesRequest,
+        ctx: &crate::provider::RequestContext,
+        continuation: Option<&super::continuation::ContinuationReservation>,
+        cache: &CodexHttpBodyCache,
+    ) -> Result<bool, CodexError> {
+        Ok(cache
+            .size_http_selected
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self
+                .auto_large_full_context(body, ctx, continuation, cache)
+                .await?)
+    }
+
     pub(super) async fn auto_large_full_context(
         &self,
         body: &super::translate::request::ResponsesRequest,
