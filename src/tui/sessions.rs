@@ -24,9 +24,11 @@ pub(super) enum SessionColumn {
     Id,
     Project,
     Active,
+    Queue,
     Requests,
     Failures,
     Counts,
+    CompletedCounts,
     Provider,
     Model,
     Target,
@@ -49,6 +51,7 @@ pub(super) fn session_columns(
             ColumnSpec::fixed(C::Id, "ID", Alignment::Left, ID_WIDTH),
             ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_WIDE_WIDTH),
             ColumnSpec::fixed(C::Active, "A", Alignment::Right, COUNT_WIDTH),
+            ColumnSpec::fixed(C::Queue, "Queue", Alignment::Right, 5),
             ColumnSpec::fixed(C::Requests, "R", Alignment::Right, COUNT_WIDTH),
             ColumnSpec::fixed(C::Failures, "F", Alignment::Right, COUNT_WIDTH),
             ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
@@ -64,7 +67,9 @@ pub(super) fn session_columns(
             ColumnSpec::fixed(C::Marker, "", Alignment::Left, 1),
             ColumnSpec::fixed(C::Id, "ID", Alignment::Left, ID_WIDTH),
             ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_MEDIUM_WIDTH),
-            ColumnSpec::fixed(C::Counts, "A/R/F", Alignment::Right, 7),
+            ColumnSpec::fixed(C::Active, "A", Alignment::Right, COUNT_WIDTH),
+            ColumnSpec::fixed(C::Queue, "Queue", Alignment::Right, 5),
+            ColumnSpec::fixed(C::CompletedCounts, "R/F", Alignment::Right, 4),
             ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
             ColumnSpec::fixed(C::Model, "Model", Alignment::Left, MODEL_NARROW_WIDTH),
             ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
@@ -104,10 +109,23 @@ pub(super) fn session_columns(
     }
 }
 
+#[cfg(test)]
 pub(super) fn render_sessions(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     sessions: &[SessionSnapshot],
+    selected: usize,
+    focused: bool,
+    snapshot_at: SystemTime,
+) -> VisibleRows {
+    render_sessions_with_queue(frame, area, sessions, &[], selected, focused, snapshot_at)
+}
+
+pub(super) fn render_sessions_with_queue(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    sessions: &[SessionSnapshot],
+    active: &[crate::monitor::snapshot::ActiveSnapshot],
     selected: usize,
     focused: bool,
     snapshot_at: SystemTime,
@@ -174,8 +192,21 @@ pub(super) fn render_sessions(
                         text_cell(ellipsize(session.project.as_deref().unwrap_or("-"), width))
                     }
                     SessionColumn::Active => number_cell(session.active_count.to_string()),
+                    SessionColumn::Queue => number_cell(
+                        active
+                            .iter()
+                            .filter(|r| {
+                                r.session_id == session.session_id && r.queue_place.is_some()
+                            })
+                            .count()
+                            .to_string(),
+                    ),
                     SessionColumn::Requests => number_cell(session.request_count.to_string()),
                     SessionColumn::Failures => number_cell(session.failure_count.to_string()),
+                    SessionColumn::CompletedCounts => number_cell(format!(
+                        "{}/{}",
+                        session.request_count, session.failure_count
+                    )),
                     SessionColumn::Counts => number_cell(format!(
                         "{}/{}/{}",
                         session.active_count, session.request_count, session.failure_count

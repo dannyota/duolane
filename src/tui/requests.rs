@@ -444,6 +444,19 @@ pub(super) fn event_columns(tier: LayoutTier) -> Vec<ColumnSpec<EventColumn>> {
     }
 }
 
+pub(super) fn event_count(recent: &[CompletedSnapshot]) -> usize {
+    recent
+        .iter()
+        .filter(|r| {
+            !r.retry_requested
+                && (r.status == crate::monitor::RequestStatus::Failed
+                    || r.http_status.is_some_and(|s| s >= 400)
+                    || r.error.is_some())
+        })
+        .take(12)
+        .count()
+}
+
 pub(super) fn render_events(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -469,6 +482,10 @@ pub(super) fn render_events(
         })
         .take(12)
         .collect::<Vec<_>>();
+    if events.is_empty() && area.height == 1 {
+        frame.render_widget(ratatui::widgets::Paragraph::new("Events 0  none"), area);
+        return VisibleRows::default();
+    }
     if events.is_empty() {
         render_empty_table_state(frame, area, &title, false, "No events");
         return VisibleRows::default();

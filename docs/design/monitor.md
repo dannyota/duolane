@@ -82,7 +82,10 @@ Events.
 - Sessions shows a Queue count after the active count. The row for requests
   without a session counts them too.
 - Below the expanded width each summary cell is one line without bars, and the
-  tables omit Queue, the timeline, Wait, First, and the bars.
+  tables omit Queue, the timeline, Wait, First, and the bars. A one-line lane
+  cell shows `active A queued Q` and the pooled rate, without the profile name.
+  A one-line Connections cell shows `queue Q reuse R%`, and appends `fallback N`
+  and `403 N` only when they are not zero.
 
 A pooled rate is the output tokens counted during generation, summed over the
 requests that report both tokens and a generation time, divided by the sum of

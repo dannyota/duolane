@@ -68,6 +68,28 @@ fn groups(recent: &[CompletedSnapshot]) -> Vec<(GroupKey, Group)> {
     groups
 }
 
+pub(super) fn lane_stats(
+    recent: &[CompletedSnapshot],
+    provider: &str,
+) -> (Option<f64>, Option<f64>) {
+    let rows: Vec<_> = recent
+        .iter()
+        .filter(|r| r.provider.as_deref() == Some(provider))
+        .cloned()
+        .collect();
+    let mut groups = groups(&rows);
+    let mut waits: Vec<_> = groups
+        .iter_mut()
+        .flat_map(|(_, group)| std::mem::take(&mut group.waits))
+        .collect();
+    let tokens: f64 = groups.iter().map(|(_, group)| group.rate_tokens).sum();
+    let seconds: f64 = groups.iter().map(|(_, group)| group.rate_seconds).sum();
+    (
+        median(&mut waits),
+        (seconds > 0.0).then_some(tokens / seconds),
+    )
+}
+
 fn number(value: Option<f64>, suffix: &str) -> String {
     value
         .map(|n| format!("{n:.1}{suffix}"))
