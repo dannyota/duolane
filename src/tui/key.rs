@@ -76,11 +76,10 @@ impl MonitorApp {
             }
             KeyCode::Char('2') => {
                 self.usage_open = true;
-                self.accounts.enter();
+                self.accounts.open();
             }
             KeyCode::Char('r') if self.usage_open && !self.show_help && !self.show_setup => {
-                self.accounts.enter();
-                self.accounts.refresh_limits();
+                self.accounts.reload();
             }
             KeyCode::Esc
                 if self.usage_open

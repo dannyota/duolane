@@ -1,6 +1,7 @@
 pub(super) struct Accounts {
     local: bool,
     limits: std::collections::BTreeMap<String, crate::claude_accounts::limits::Limits>,
+    details: super::account_details::Details,
     refreshed: Option<std::time::Instant>,
     names: Vec<String>,
     selected: String,
@@ -20,6 +21,7 @@ impl Accounts {
         Self {
             local: local && cfg!(unix),
             limits: Default::default(),
+            details: Default::default(),
             refreshed: None,
             names: Vec::new(),
             selected: String::new(),
@@ -54,7 +56,23 @@ impl Accounts {
         }
     }
 
+    pub(super) fn open(&mut self) {
+        self.enter();
+        if self.local {
+            self.details.request(false);
+        }
+    }
+
+    pub(super) fn reload(&mut self) {
+        self.enter();
+        self.refresh_limits();
+        if self.local {
+            self.details.request(true);
+        }
+    }
+
     pub(super) fn refresh_if_due(&mut self) {
+        self.details.poll();
         if self.local
             && self
                 .refreshed
@@ -247,7 +265,7 @@ impl Accounts {
             Direction::Vertical
         };
         let claude_height = (3_u16
-            .saturating_add((self.names.len().min(u16::MAX as usize / 3) * 3) as u16)
+            .saturating_add((self.names.len().min(u16::MAX as usize / 4) * 4) as u16)
             .saturating_add(u16::from(self.overridden))
             .saturating_add(u16::from(!self.names.is_empty())))
         .min(area.height.saturating_sub(5));
@@ -278,7 +296,10 @@ impl Accounts {
             } else {
                 &self.selected
             };
-            let mut info_lines = vec![Line::from(format!("Saved: {saved}"))];
+            let mut info_lines = vec![Line::from(format!(
+                "Saved: {saved}  {}",
+                self.details.summary()
+            ))];
             if self.overridden {
                 info_lines.push(Line::from("CLAUDE_CONFIG_DIR overrides selection"));
             }
@@ -287,8 +308,8 @@ impl Accounts {
             self.rows.height -= info.height;
         }
         let available = usize::from(self.rows.height);
-        self.row_height = if available >= self.names.len() * 3 {
-            3
+        self.row_height = if available >= self.names.len() * 4 {
+            4
         } else {
             1
         };
@@ -296,8 +317,24 @@ impl Accounts {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let roster = crate::claude_accounts::profile_state::Roster::unknown(&self.names);
+        let roster = self.details.roster(&self.names);
         let states = roster.states(&self.limits, seconds);
+        if self.row_height == 1
+            && available > self.names.len() + 1
+            && let Some((name, state)) = self.names.get(self.focus).zip(states.get(self.focus))
+        {
+            let mut spans = vec![ratatui::text::Span::raw(format!("{name}:"))];
+            spans.extend(super::profile_rows::detail_spans(
+                state,
+                self.details.checking(),
+            ));
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)),
+                ratatui::layout::Rect::new(self.rows.x, self.rows.y, self.rows.width, 1),
+            );
+            self.rows.y += 1;
+            self.rows.height -= 1;
+        }
         if !self.names.is_empty() && available > self.names.len() * self.row_height {
             self.rows.height -= 1;
             frame.render_widget(
@@ -333,12 +370,18 @@ impl Accounts {
             let limits = state.and_then(|state| state.limits.as_ref());
             let five = super::usage_limits::claude("5h", limits, 18_000, seconds);
             let week = super::usage_limits::claude("week", limits, 604_800, seconds);
-            if self.row_height == 3 {
+            if self.row_height == 4 {
                 let mut spans = vec![ratatui::text::Span::styled(title, style)];
+                let mut detail = vec![ratatui::text::Span::raw(" ")];
                 if let Some(state) = state {
                     spans.extend(super::profile_rows::state_spans(state));
+                    detail.extend(super::profile_rows::detail_spans(
+                        state,
+                        self.details.checking(),
+                    ));
                 }
                 lines.push(Line::from(spans));
+                lines.push(Line::from(detail));
                 lines.push(five);
                 lines.push(week);
             } else {
@@ -875,9 +918,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_only_monitor_never_checks_account_details() {
+        let mut accounts = Accounts::new(false);
+        accounts.open();
+        accounts.reload();
+        assert!(!accounts.details.checking());
+        assert_eq!(accounts.details.summary(), "Accounts not checked");
+    }
+
     #[cfg(unix)]
     #[test]
-    fn full_rows_show_status_age_staleness_suggestion_and_total() {
+    fn full_rows_show_status_age_staleness_account_details_and_total() {
         use crate::claude_accounts::limits::{Limits, Window};
         let now = 1_700_000_000;
         let time = SystemTime::UNIX_EPOCH + Duration::from_secs(now);
@@ -899,19 +951,40 @@ mod tests {
         accounts
             .limits
             .insert("backup".into(), limits(0.2, now - 7_200));
+        accounts.details.request_with(false, |_| {
+            Some(
+                crate::claude_accounts::profile_state::Roster::from_status(&[
+                    (
+                        "default",
+                        r#"{"loggedIn":true,"email":"first@example.com","subscriptionType":"team"}"#,
+                    ),
+                    ("backup", r#"{"loggedIn":false}"#),
+                ]),
+            )
+        });
+        for _ in 0..500 {
+            accounts.details.poll();
+            if !accounts.details.checking() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let state: crate::monitor::snapshot::MonitorSnapshot = crate::monitor::mock_state().into();
         let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(120, 14, |f| {
             accounts.render_at(f, f.area(), &state, time, jiff::tz::TimeZone::UTC)
         }));
+        assert!(text.contains("Accounts checked "), "{text}");
+        assert!(text.contains("  first@example.com (team)"), "{text}");
+        assert!(text.contains("  not signed in"), "{text}");
         assert!(
             text.contains("Claude default Saved  limited 29m  seen now"),
             "{text}"
         );
         assert!(
-            text.contains("Claude backup  available  seen 2h ago Stale  Suggested"),
+            text.contains("Claude backup  available  seen 2h ago Stale"),
             "{text}"
         );
-        assert_eq!(text.matches("Suggested").count(), 1, "{text}");
+        assert_eq!(text.matches("Suggested").count(), 0, "{text}");
         assert!(
             text.contains("all accounts: 5H 60% used, 7D 10% used"),
             "{text}"
@@ -943,7 +1016,10 @@ mod tests {
         let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(100, 8, |f| {
             accounts.render_at(f, f.area(), &state, time, jiff::tz::TimeZone::UTC)
         }));
-        let row = text.lines().find(|line| line.contains("default")).unwrap();
+        let row = text
+            .lines()
+            .find(|line| line.contains("default 5h"))
+            .unwrap();
         assert!(
             row.contains("5h 20% 1h30m") && row.contains("week 40% 1d12h"),
             "{text}"

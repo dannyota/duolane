@@ -1,3 +1,4 @@
+mod account_details;
 mod accounts;
 mod cells;
 mod chrome;

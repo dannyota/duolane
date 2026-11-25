@@ -47,6 +47,43 @@ pub(super) fn state_spans(state: &ProfileState) -> Vec<Span<'static>> {
     spans
 }
 
+pub(super) fn detail_spans(state: &ProfileState, checking: bool) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(DIM_WHITE);
+    let mut spans = Vec::new();
+    match (&state.account, &state.login) {
+        (None, None) => spans.push(Span::styled(
+            if checking {
+                " account checking"
+            } else {
+                " account unknown"
+            },
+            Style::default().fg(DIM),
+        )),
+        (account, login) => {
+            if let Some(account) = account {
+                spans.push(Span::styled(format!(" {account}"), dim));
+            }
+            if let Some((login, tone)) = login {
+                spans.push(Span::styled(
+                    format!("  {login}"),
+                    if *tone == Tone::Dim {
+                        dim
+                    } else {
+                        Style::default().fg(color(*tone))
+                    },
+                ));
+            }
+        }
+    }
+    if let Some(other) = &state.same_as {
+        spans.push(Span::styled(
+            format!("  same account as {other}"),
+            Style::default().fg(YELLOW),
+        ));
+    }
+    spans
+}
+
 fn width(spans: &[Span<'_>]) -> usize {
     spans
         .iter()
@@ -108,6 +145,32 @@ mod tests {
         assert_eq!(text, "  limited 29m  seen 2h ago Stale  Suggested");
         assert_eq!(spans[0].style.fg, Some(RED));
         assert_eq!(spans[2].style.fg, Some(YELLOW));
+    }
+
+    #[test]
+    fn detail_line_colors_a_login_that_needs_attention() {
+        let text = |spans: &[Span<'_>]| -> String {
+            spans.iter().map(|span| span.content.as_ref()).collect()
+        };
+        let mut state = ProfileState {
+            account: Some("first@example.com (team)".into()),
+            login: Some(("2d left".into(), Tone::Warn)),
+            same_as: Some("default".into()),
+            ..Default::default()
+        };
+        let spans = detail_spans(&state, false);
+        assert_eq!(
+            text(&spans),
+            " first@example.com (team)  2d left  same account as default"
+        );
+        assert_eq!(spans[1].style.fg, Some(YELLOW));
+        state.login = Some(("28d left".into(), Tone::Dim));
+        assert_eq!(detail_spans(&state, false)[1].style.fg, Some(DIM_WHITE));
+        state.login = Some(("expired".into(), Tone::Bad));
+        assert_eq!(detail_spans(&state, false)[1].style.fg, Some(RED));
+        let unknown = ProfileState::default();
+        assert_eq!(text(&detail_spans(&unknown, true)), " account checking");
+        assert_eq!(text(&detail_spans(&unknown, false)), " account unknown");
     }
 
     #[test]

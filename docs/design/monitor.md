@@ -247,8 +247,9 @@ the same account share the newest plan usage, as in `accounts list`.
 - A check starts when Usage opens and the last result is older than 5 minutes,
   and on `r`. Only one check runs at a time, and a request made during a check
   is dropped. The last result stays on screen while a check runs.
-- The pane states the age of the details as `Accounts checked 2m ago`, or
-  `checking`, apart from the plan usage, which reloads every 30 seconds.
+- The pane states the age of the details, such as `Accounts checked 2m05s ago`,
+  or `Accounts checking`, apart from the plan usage, which reloads every 30
+  seconds. A profile with no details yet shows `account checking`.
 - The login time is yellow under 3 days and red when the login expired or the
   profile is signed out. A failed check shows `account unknown`.
 - The check installs no signal handler. Leaving the monitor cancels it, stops

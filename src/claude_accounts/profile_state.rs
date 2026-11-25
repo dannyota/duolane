@@ -38,6 +38,10 @@ impl Roster {
         Self {}
     }
 
+    pub(crate) fn aligned(&self, _: &[String]) -> Self {
+        Self {}
+    }
+
     pub(crate) fn states(&self, _: &BTreeMap<String, Limits>, _: u64) -> Vec<ProfileState> {
         Vec::new()
     }
@@ -89,6 +93,45 @@ mod unix {
                     })
                     .collect(),
             }
+        }
+
+        pub(crate) fn check(
+            profiles: &[(String, std::path::PathBuf)],
+            cancelled: &std::sync::atomic::AtomicBool,
+        ) -> Option<Self> {
+            let entries = roster::collect(profiles, cancelled);
+            (!cancelled.load(std::sync::atomic::Ordering::Relaxed)).then_some(Self { entries })
+        }
+
+        pub(crate) fn aligned(&self, names: &[String]) -> Self {
+            let mut entries: Vec<Entry> = names
+                .iter()
+                .map(|name| Entry {
+                    name: name.clone(),
+                    account: self
+                        .entries
+                        .iter()
+                        .find(|entry| entry.name == *name)
+                        .and_then(|entry| entry.account.clone()),
+                    same_as: None,
+                })
+                .collect();
+            roster::mark_duplicates(&mut entries);
+            Self { entries }
+        }
+
+        #[cfg(test)]
+        pub(crate) fn from_status(profiles: &[(&str, &str)]) -> Self {
+            let mut entries: Vec<Entry> = profiles
+                .iter()
+                .map(|(name, json)| Entry {
+                    name: (*name).to_owned(),
+                    account: roster::parse(json.as_bytes()),
+                    same_as: None,
+                })
+                .collect();
+            roster::mark_duplicates(&mut entries);
+            Self { entries }
         }
 
         fn suggested(&self, limits: &BTreeMap<String, Limits>, now: u64) -> Option<usize> {
@@ -251,6 +294,66 @@ mod unix {
                 .map(|state| state.suggested)
                 .collect();
             assert_eq!(marks, [false, false, true, false, false]);
+        }
+
+        #[test]
+        fn account_details_show_email_plan_login_and_shared_accounts() {
+            let now = 1_700_000_000;
+            let at = |seconds: i64| {
+                jiff::Timestamp::from_second(now as i64 + seconds)
+                    .unwrap()
+                    .to_string()
+            };
+            let signed = |email: &str, left: i64| {
+                format!(
+                    r#"{{"loggedIn":true,"email":"{email}","orgId":"org","subscriptionType":"team","loginExpiresAt":"{}"}}"#,
+                    at(left)
+                )
+            };
+            let checked = Roster::from_status(&[
+                ("default", &signed("First@Example.com", 30 * 86_400)),
+                ("twin", &signed("first@example.com", 2 * 86_400)),
+                ("old", &signed("old@example.com\\u001b[31m", -5)),
+                ("out", r#"{"loggedIn":false}"#),
+                ("gone", &signed("gone@example.com", 86_400)),
+            ]);
+            let roster = checked.aligned(&names(&["default", "twin", "old", "out", "new"]));
+            let usage = BTreeMap::from([
+                ("twin".to_owned(), limits(0.5, 0.5, now)),
+                ("old".to_owned(), limits(0.0, 0.0, now)),
+                ("out".to_owned(), limits(0.0, 0.0, now)),
+            ]);
+            let states = roster.states(&usage, now);
+            assert_eq!(
+                states[0].account.as_deref(),
+                Some("First@Example.com (team)")
+            );
+            assert_eq!(states[0].login, Some(("30d left".into(), Tone::Dim)));
+            assert_eq!(states[0].limits, usage.get("twin").copied());
+            assert_eq!(states[1].same_as.as_deref(), Some("default"));
+            assert_eq!(states[1].login, Some(("2d left".into(), Tone::Warn)));
+            assert_eq!(
+                states[2].account.as_deref(),
+                Some("old@example.com[31m (team)")
+            );
+            assert_eq!(states[2].login, Some(("expired".into(), Tone::Bad)));
+            assert_eq!(states[3].account, None);
+            assert_eq!(states[3].login, Some(("not signed in".into(), Tone::Bad)));
+            assert_eq!(
+                states[4],
+                ProfileState {
+                    status: "unknown".into(),
+                    ..Default::default()
+                }
+            );
+            let marks: Vec<bool> = states.iter().map(|state| state.suggested).collect();
+            assert_eq!(marks, [true, false, false, false, false]);
+        }
+
+        #[test]
+        fn cancelled_check_returns_nothing_and_starts_no_status_process() {
+            let cancelled = std::sync::atomic::AtomicBool::new(true);
+            assert!(crate::claude_accounts::monitor_details(&cancelled).is_none());
         }
 
         #[test]

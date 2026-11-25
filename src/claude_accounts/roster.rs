@@ -93,6 +93,7 @@ pub(super) struct Account {
     pub(super) expires: Option<jiff::Timestamp>,
 }
 
+#[derive(Clone)]
 pub(super) struct Entry {
     pub(super) name: String,
     pub(super) account: Option<Account>,
@@ -120,7 +121,7 @@ pub(super) fn clean(text: &str) -> String {
         .collect()
 }
 
-fn parse(bytes: &[u8]) -> Option<Account> {
+pub(super) fn parse(bytes: &[u8]) -> Option<Account> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let field = |name: &str| {
         value
@@ -141,8 +142,8 @@ fn parse(bytes: &[u8]) -> Option<Account> {
     })
 }
 
-fn query(config: Option<&Path>) -> Option<Account> {
-    if CANCELLED.load(Ordering::Relaxed) {
+fn query(config: Option<&Path>, cancelled: &AtomicBool) -> Option<Account> {
+    if cancelled.load(Ordering::Relaxed) {
         return None;
     }
     let mut child = super::claude_command(config)
@@ -161,7 +162,7 @@ fn query(config: Option<&Path>) -> Option<Account> {
         let mut bytes = Vec::new();
         let mut buffer = [0; 4096];
         loop {
-            if CANCELLED.load(Ordering::Relaxed) || Instant::now() >= deadline {
+            if cancelled.load(Ordering::Relaxed) || Instant::now() >= deadline {
                 return None;
             }
             match stdout.read(&mut buffer) {
@@ -180,7 +181,7 @@ fn query(config: Option<&Path>) -> Option<Account> {
             }
         }
         loop {
-            if CANCELLED.load(Ordering::Relaxed) || Instant::now() >= deadline {
+            if cancelled.load(Ordering::Relaxed) || Instant::now() >= deadline {
                 return None;
             }
             match child.try_wait() {
@@ -212,7 +213,7 @@ fn identity(account: &Account) -> Option<(String, Option<&str>)> {
         .map(|email| (email.to_lowercase(), account.org.as_deref()))
 }
 
-fn mark_duplicates(entries: &mut [Entry]) {
+pub(super) fn mark_duplicates(entries: &mut [Entry]) {
     for index in 1..entries.len() {
         let (earlier, rest) = entries.split_at_mut(index);
         let Some(key) = rest[0].account.as_ref().and_then(identity) else {
@@ -227,6 +228,16 @@ fn mark_duplicates(entries: &mut [Entry]) {
 
 pub(super) fn entries(profiles: &[(String, PathBuf)]) -> anyhow::Result<Vec<Entry>> {
     let mut signals = Signals::install()?;
+    let entries = collect(profiles, &CANCELLED);
+    signals.restore();
+    anyhow::ensure!(
+        !CANCELLED.load(Ordering::Relaxed),
+        "account status interrupted"
+    );
+    Ok(entries)
+}
+
+pub(super) fn collect(profiles: &[(String, PathBuf)], cancelled: &AtomicBool) -> Vec<Entry> {
     let mut targets: Vec<(String, Option<&Path>)> = vec![("default".into(), None)];
     targets.extend(
         profiles
@@ -235,13 +246,13 @@ pub(super) fn entries(profiles: &[(String, PathBuf)]) -> anyhow::Result<Vec<Entr
     );
     let mut entries = Vec::with_capacity(targets.len());
     for chunk in targets.chunks(PARALLEL_QUERIES) {
-        if CANCELLED.load(Ordering::Relaxed) {
+        if cancelled.load(Ordering::Relaxed) {
             break;
         }
         let accounts: Vec<Option<Account>> = std::thread::scope(|scope| {
             let handles: Vec<_> = chunk
                 .iter()
-                .map(|(_, config)| scope.spawn(|| query(*config)))
+                .map(|(_, config)| scope.spawn(|| query(*config, cancelled)))
                 .collect();
             handles
                 .into_iter()
@@ -256,13 +267,8 @@ pub(super) fn entries(profiles: &[(String, PathBuf)]) -> anyhow::Result<Vec<Entr
             });
         }
     }
-    signals.restore();
-    anyhow::ensure!(
-        !CANCELLED.load(Ordering::Relaxed),
-        "account status interrupted"
-    );
     mark_duplicates(&mut entries);
-    Ok(entries)
+    entries
 }
 
 pub(super) fn remaining(expires: jiff::Timestamp, now: jiff::Timestamp) -> String {

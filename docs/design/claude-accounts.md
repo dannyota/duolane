@@ -96,6 +96,10 @@ as signed in or unknown.
   active status process groups and waits for the children before returning an
   error. The Unix roster uses the locked `libc` version to restore the previous
   signal handlers when collection finishes.
+- The monitor reads the same details for its
+  [Usage view](monitor.md#account-details) on a background thread. That reader
+  installs no signal handler, because the proxy owns the signals of its process.
+  A cancel flag stops its status process groups instead.
 - Displayed fields drop control and bidirectional formatting characters and keep
   at most 64 characters, so status text cannot rewrite the terminal.
 - Two signed-in profiles are the same account when their full email, compared

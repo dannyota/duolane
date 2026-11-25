@@ -291,6 +291,13 @@ mod unix {
         })
     }
 
+    pub(crate) fn monitor_details(
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Option<super::profile_state::Roster> {
+        let profiles = registered_with_warnings(false).ok()?;
+        super::profile_state::Roster::check(&profiles, cancelled)
+    }
+
     fn color() -> bool {
         std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
     }
@@ -625,7 +632,7 @@ pub use switch::switch;
 #[cfg(unix)]
 use unix::claude_command;
 #[cfg(unix)]
-pub(crate) use unix::{Profile, monitor_roster, prepare_launch, save_selection};
+pub(crate) use unix::{Profile, monitor_details, monitor_roster, prepare_launch, save_selection};
 #[cfg(unix)]
 pub use unix::{announce, list, login, remove, select};
 
