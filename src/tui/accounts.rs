@@ -1,44 +1,3 @@
-pub(super) fn needed_height(
-    area: ratatui::layout::Rect,
-    snapshot: &crate::monitor::snapshot::MonitorSnapshot,
-    count: usize,
-    now: std::time::SystemTime,
-    zone: jiff::tz::TimeZone,
-) -> u16 {
-    let claude = 4_u16.saturating_add((count.min(u16::MAX as usize / 3) * 3) as u16);
-    let width = if area.width >= 90 {
-        area.width / 2
-    } else {
-        area.width
-    }
-    .saturating_sub(2);
-    let quota = snapshot
-        .codex_quota
-        .as_ref()
-        .filter(|q| now.duration_since(q.observed_at).is_ok());
-    let lines = vec![
-        ratatui::text::Line::from(quota_summary(quota, now)),
-        super::usage_limits::codex_in_zone(
-            "Primary",
-            quota.and_then(|q| q.primary.as_ref()),
-            now,
-            zone.clone(),
-        ),
-        super::usage_limits::codex_in_zone(
-            "Secondary",
-            quota.and_then(|q| q.secondary.as_ref()),
-            now,
-            zone,
-        ),
-    ];
-    let chatgpt = super::usage_limits::wrapped_height(&lines, width).saturating_add(2);
-    if area.width >= 90 {
-        claude.max(chatgpt)
-    } else {
-        claude.saturating_add(chatgpt)
-    }
-}
-
 pub(super) struct Accounts {
     local: bool,
     limits: std::collections::BTreeMap<String, crate::claude_accounts::limits::Limits>,
@@ -192,36 +151,6 @@ impl Accounts {
     }
 }
 
-fn quota_summary(
-    quota: Option<&crate::monitor::CodexQuotaSnapshot>,
-    now: std::time::SystemTime,
-) -> String {
-    use std::time::{Duration, UNIX_EPOCH};
-    let Some(quota) = quota else {
-        return "Last reported: Unknown".into();
-    };
-    let Ok(age) = now.duration_since(quota.observed_at) else {
-        return "Last reported: Unknown".into();
-    };
-    let now_secs = now.duration_since(UNIX_EPOCH).ok().map(|v| v.as_secs());
-    let stale = age >= Duration::from_secs(900)
-        || [quota.primary.as_ref(), quota.secondary.as_ref()]
-            .into_iter()
-            .flatten()
-            .any(|window| {
-                window
-                    .reset_at
-                    .filter(|v| (1..=253_402_300_799).contains(v))
-                    .zip(now_secs)
-                    .is_some_and(|(reset, now)| reset <= now)
-            });
-    format!(
-        "Last reported: {} ago{}",
-        super::cells::format_duration(age),
-        if stale { "  Stale" } else { "" }
-    )
-}
-
 impl Accounts {
     pub(super) fn render_confirmation(
         &mut self,
@@ -306,7 +235,6 @@ impl Accounts {
         now: std::time::SystemTime,
         zone: jiff::tz::TimeZone,
     ) {
-        use super::usage_limits::{QuotaLayout, quota_layout};
         use ratatui::{
             layout::{Constraint, Direction, Layout},
             style::{Modifier, Style},
@@ -320,7 +248,8 @@ impl Accounts {
         };
         let claude_height = (3_u16
             .saturating_add((self.names.len().min(u16::MAX as usize / 3) * 3) as u16)
-            .saturating_add(u16::from(self.overridden)))
+            .saturating_add(u16::from(self.overridden))
+            .saturating_add(u16::from(!self.names.is_empty())))
         .min(area.height.saturating_sub(5));
         let constraints = if direction == Direction::Vertical {
             [Constraint::Length(claude_height), Constraint::Min(0)]
@@ -357,21 +286,32 @@ impl Accounts {
             self.rows.y += info.height;
             self.rows.height -= info.height;
         }
-        self.row_height = if usize::from(self.rows.height) >= self.names.len() * 3 {
+        let available = usize::from(self.rows.height);
+        self.row_height = if available >= self.names.len() * 3 {
             3
         } else {
             1
         };
+        let seconds = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let roster = crate::claude_accounts::profile_state::Roster::unknown(&self.names);
+        let states = roster.states(&self.limits, seconds);
+        if !self.names.is_empty() && available > self.names.len() * self.row_height {
+            self.rows.height -= 1;
+            frame.render_widget(
+                Paragraph::new(roster.total(&self.limits, seconds))
+                    .style(Style::default().fg(super::DIM_WHITE)),
+                ratatui::layout::Rect::new(self.rows.x, self.rows.bottom(), self.rows.width, 1),
+            );
+        }
         let count = usize::from(self.rows.height) / self.row_height;
         self.first = self
             .focus
             .min(self.names.len().saturating_sub(1))
             .saturating_add(1)
             .saturating_sub(count.max(1));
-        let seconds = now
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         let mut lines: Vec<Line<'_>> = Vec::new();
         if !self.local && self.names.is_empty() {
             lines.push(Line::from("Claude profiles: Unknown"));
@@ -389,11 +329,16 @@ impl Accounts {
                 "Claude {name}{}",
                 if *name == self.selected { " Saved" } else { "" }
             );
-            let limits = self.limits.get(name);
+            let state = states.get(index);
+            let limits = state.and_then(|state| state.limits.as_ref());
             let five = super::usage_limits::claude("5h", limits, 18_000, seconds);
             let week = super::usage_limits::claude("week", limits, 604_800, seconds);
             if self.row_height == 3 {
-                lines.push(Line::from(title).style(style));
+                let mut spans = vec![ratatui::text::Span::styled(title, style)];
+                if let Some(state) = state {
+                    spans.extend(super::profile_rows::state_spans(state));
+                }
+                lines.push(Line::from(spans));
                 lines.push(five);
                 lines.push(week);
             } else {
@@ -408,157 +353,46 @@ impl Accounts {
                         })
                         .and_then(|w| w.resets_at)
                 };
-                lines.push(super::usage_limits::compact_line(
-                    name,
-                    style,
+                let windows = || {
                     [
                         super::usage_limits::CompactWindow {
                             label: "5h".into(),
-                            line: five,
+                            line: five.clone(),
                             reset: reset(true),
                         },
                         super::usage_limits::CompactWindow {
                             label: "week".into(),
-                            line: week,
+                            line: week.clone(),
                             reset: reset(false),
                         },
-                    ],
+                    ]
+                };
+                lines.push(super::profile_rows::compact_with_state(
+                    state,
                     usize::from(self.rows.width),
-                    seconds,
+                    |width| {
+                        super::usage_limits::compact_line(name, style, windows(), width, seconds)
+                    },
                 ));
             }
         }
         frame.render_widget(Paragraph::new(lines), self.rows);
-        let quota = snapshot
-            .codex_quota
-            .as_ref()
-            .filter(|q| now.duration_since(q.observed_at).is_ok());
-        let title = if quota_summary(quota, now).contains("Stale") {
-            " Stale ChatGPT subscription "
-        } else {
-            " ChatGPT subscription "
-        };
-        let detail_block = Block::default()
-            .title(title)
-            .title_style(if self.focus == self.names.len() {
-                Style::default()
-                    .fg(super::WHITE)
-                    .bg(super::SELECTED_BG)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(super::DIM_WHITE)
-            })
-            .borders(Borders::ALL)
-            .style(Style::default().fg(super::DIM_WHITE));
         self.subscription = panes[1];
-        let inner = detail_block.inner(panes[1]);
-        frame.render_widget(detail_block, panes[1]);
         self.confirmation_visible = false;
-        let saved = format!(
-            "Saved: {}",
-            if self.selected.is_empty() {
-                "Unknown"
-            } else {
-                &self.selected
-            }
-        );
-        let mut detail: Vec<Line<'_>> = Vec::new();
-        {
-            let quota = snapshot
-                .codex_quota
-                .as_ref()
-                .filter(|q| now.duration_since(q.observed_at).is_ok());
-            detail.push(Line::from(quota_summary(quota, now)));
-            let primary = super::usage_limits::codex_in_zone(
-                "Primary",
-                quota.and_then(|q| q.primary.as_ref()),
-                now,
-                zone.clone(),
-            );
-            let secondary = super::usage_limits::codex_in_zone(
-                "Secondary",
-                quota.and_then(|q| q.secondary.as_ref()),
-                now,
-                zone.clone(),
-            );
-            let layout = quota_layout(
-                super::usage_limits::wrapped_height(
-                    &[detail[0].clone(), primary.clone(), secondary.clone()],
-                    inner.width,
-                ),
-                inner.height,
-            );
-            if layout == QuotaLayout::Full {
-                detail.push(primary);
-                detail.push(secondary);
-            } else {
-                if inner.height <= 2 {
-                    detail.clear();
-                }
-                let window = |primary: bool| {
-                    quota.and_then(|q| {
-                        if primary {
-                            q.primary.as_ref()
-                        } else {
-                            q.secondary.as_ref()
-                        }
-                    })
-                };
-                let compact =
-                    |fallback: &str, w: Option<&crate::monitor::CodexQuotaWindow>, line| {
-                        let label = match w.and_then(|w| w.window_minutes) {
-                            Some(300) => "5h".into(),
-                            Some(10080) => "week".into(),
-                            Some(n) if (1..=525_600_000).contains(&n) => format!("{n}m"),
-                            _ => fallback.into(),
-                        };
-                        super::usage_limits::CompactWindow {
-                            label,
-                            line,
-                            reset: w.and_then(|w| w.reset_at),
-                        }
-                    };
-                let windows = [
-                    compact("Primary", window(true), primary),
-                    compact("Secondary", window(false), secondary),
-                ];
-                if layout == QuotaLayout::TwoLines {
-                    for window in windows {
-                        detail.push(super::usage_limits::compact_line(
-                            "",
-                            Style::default(),
-                            [window],
-                            usize::from(inner.width),
-                            seconds,
-                        ));
-                    }
-                } else {
-                    detail.push(super::usage_limits::compact_line(
-                        "",
-                        Style::default(),
-                        windows,
-                        usize::from(inner.width),
-                        seconds,
-                    ));
-                }
-            }
-            if self.local {
-                detail.push(Line::from(saved));
-                if self.overridden {
-                    detail.push(Line::from("CLAUDE_CONFIG_DIR overrides selection"));
-                } else if self.names.get(self.focus) == Some(&self.selected) {
-                    detail.push(Line::from("Selected for next launch"));
-                }
-                if !self.status.is_empty() {
-                    detail.push(Line::from(self.status.clone()));
-                }
-            } else {
-                detail.push(Line::from("Read-only monitor"));
-            }
-        }
-        frame.render_widget(
-            Paragraph::new(detail).wrap(ratatui::widgets::Wrap { trim: false }),
-            inner,
+        super::subscription::render(
+            frame,
+            panes[1],
+            snapshot,
+            now,
+            zone,
+            super::subscription::Notes {
+                focused: self.focus == self.names.len(),
+                local: self.local,
+                saved: &self.selected,
+                overridden: self.overridden,
+                focus_is_saved: self.names.get(self.focus) == Some(&self.selected),
+                status: &self.status,
+            },
         );
     }
 }
@@ -895,7 +729,10 @@ mod tests {
                     let inner_height = pane.height.saturating_sub(2);
                     let quota = state.codex_quota.as_ref().unwrap();
                     let full = [
-                        ratatui::text::Line::from(quota_summary(Some(quota), now)),
+                        ratatui::text::Line::from(crate::tui::subscription::quota_summary(
+                            Some(quota),
+                            now,
+                        )),
                         super::super::usage_limits::codex_in_zone(
                             "Primary",
                             quota.primary.as_ref(),
@@ -1029,9 +866,56 @@ mod tests {
             text.contains("default") && text.contains("backup"),
             "{text}"
         );
-        assert_eq!(text.matches("20%").count(), 2, "{text}");
-        assert_eq!(text.matches("40%").count(), 2, "{text}");
+        assert_eq!(text.matches("20%").count(), 3, "{text}");
+        assert_eq!(text.matches("40%").count(), 3, "{text}");
         assert!(text.contains("42.0%") && text.contains("12.0%"), "{text}");
+        assert!(
+            text.contains("all accounts: 5H 20% used, 7D 40% used"),
+            "{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_rows_show_status_age_staleness_suggestion_and_total() {
+        use crate::claude_accounts::limits::{Limits, Window};
+        let now = 1_700_000_000;
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(now);
+        let limits = |five, observed_at| Limits {
+            five_hour: Some(Window {
+                used: five,
+                resets_at: Some(now + 1_740),
+            }),
+            seven_day: Some(Window {
+                used: 0.1,
+                resets_at: Some(now + 86_400),
+            }),
+            observed_at,
+        };
+        let mut accounts = Accounts::new(true);
+        accounts.names = vec!["default".into(), "backup".into()];
+        accounts.selected = "default".into();
+        accounts.limits.insert("default".into(), limits(1.0, now));
+        accounts
+            .limits
+            .insert("backup".into(), limits(0.2, now - 7_200));
+        let state: crate::monitor::snapshot::MonitorSnapshot = crate::monitor::mock_state().into();
+        let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(120, 14, |f| {
+            accounts.render_at(f, f.area(), &state, time, jiff::tz::TimeZone::UTC)
+        }));
+        assert!(
+            text.contains("Claude default Saved  limited 29m  seen now"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Claude backup  available  seen 2h ago Stale  Suggested"),
+            "{text}"
+        );
+        assert_eq!(text.matches("Suggested").count(), 1, "{text}");
+        assert!(
+            text.contains("all accounts: 5H 60% used, 7D 10% used"),
+            "{text}"
+        );
     }
 
     #[cfg(unix)]

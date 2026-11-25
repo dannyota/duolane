@@ -151,7 +151,9 @@ header, account, or conversation value.
 
 `1` opens Overview and `2` opens Usage. The view shows the Claude profiles and
 the ChatGPT subscription with their limits, then Speed by model and Tokens by
-session.
+session. The in-process monitor adds the [profile state](#profile-state), the
+[account details](#account-details), and the
+[account actions](#account-actions).
 
 - A limit window is a bar with its percent used and reset time. The bar is
   yellow from 50% and red from 80%.
@@ -171,9 +173,9 @@ session.
 - The bars take the width the other columns leave. The two tables share the
   height below the limits by their row counts, and a table that does not fit
   shows the rows that fit and the number left out.
-- A profile takes three lines, its name and one per window, when the pane has
-  room for every profile. Otherwise each profile is one compact line, so a
-  terminal of 80 by 24 still shows the limits.
+- A profile takes four lines when the pane has room for every profile: its name
+  and state, its account details, and one line per window. Otherwise each
+  profile is one compact line, so a terminal of 80 by 24 still shows the limits.
 - A compact line gives its parts room in this order: the name, at least 12 cells
   and ellipsized beyond its share; then for each window a short label, the
   percent, and the time left until the reset, such as `5h 42% 1h54m`; then a
@@ -204,8 +206,102 @@ do not read or modify the local account store. They do not receive profile names
 or selection state over HTTP.
 
 `r` reloads the local names and saved choice. Entering Usage also reads the
-local roster. These reads do not run a login/status command or make a provider
-request. A registered profile is not evidence that its login is still valid.
+local roster. These reads make no provider request. A registered profile is not
+evidence that its login is still valid; [account details](#account-details)
+report the login separately.
+
+### Profile state
+
+The in-process monitor shows the state of each Claude profile beside its name,
+from the plan usage it already loads.
+
+- The status follows the `STATUS` rules of
+  [plan usage](claude-accounts.md#plan-usage): `available` in green, `limited`
+  in red with the time until the reset, and `unknown` in dim text.
+- `seen` gives the age of the values. They are marked `Stale` after 15 minutes,
+  as the ChatGPT report is. A stale value is still shown, because an idle
+  account sends nothing new.
+- A line below the profiles gives the total over all accounts, with the text and
+  the rules of the `accounts list` total.
+- One profile is marked `Suggested`: the available profile whose fuller window
+  has the lowest percent used. An earlier row wins a tie. A profile is skipped
+  when its status is not `available`, when it holds the same account as an
+  earlier row, or when its login is known to be signed out or expired. A roster
+  of one profile has no mark. The mark is advice only. It never changes the
+  selection and never starts a launch.
+- A compact line adds the status after the windows when cells remain, before any
+  bar. The line above the compact profiles gives the account details of the
+  focused profile.
+
+### Account details
+
+The in-process monitor on Unix shows what `accounts list` shows for each
+profile: the account email, the plan, the time left on the stored login, and a
+note when a profile holds the same account as an earlier row. Profiles that hold
+the same account share the newest plan usage, as in `accounts list`.
+
+- The details come from the
+  [account details](claude-accounts.md#account-details) reader, with its limits
+  on time, output, and displayed text. Each check runs `claude auth status` once
+  per profile, so it runs on a background thread and never blocks drawing.
+- A check starts when Usage opens and the last result is older than 5 minutes,
+  and on `r`. Only one check runs at a time, and a request made during a check
+  is dropped. The last result stays on screen while a check runs.
+- The pane states the age of the details as `Accounts checked 2m ago`, or
+  `checking`, apart from the plan usage, which reloads every 30 seconds.
+- The login time is yellow under 3 days and red when the login expired or the
+  profile is signed out. A failed check shows `account unknown`.
+- The check installs no signal handler. Leaving the monitor cancels it, stops
+  its status process groups, and waits for the thread.
+- The details stay in the memory of the monitor that read them. They are never
+  written to a file, the log, or the monitor snapshot. The attached and demo
+  monitors never run the check and never show an account email.
+
+### Account actions
+
+The in-process monitor on Unix can run the account commands for the focused
+profile. Each action runs the `duolane` program itself as a child process with
+fixed arguments, so it keeps the checks, locks, and prompts of the
+[command](claude-accounts.md#commands). The monitor builds no shell command. The
+only text taken from the keyboard is a new profile name, accepted only when it
+passes the profile name rule.
+
+| Key | Action            | Command                        | Mode     |
+| --- | ----------------- | ------------------------------ | -------- |
+| `a` | Add a profile     | `accounts login <name>`        | handoff  |
+| `l` | Sign in again     | `accounts login <name>`        | handoff  |
+| `d` | Remove a profile  | `accounts remove <name> --yes` | captured |
+| `s` | Switch and resume | `accounts switch <name>`       | handoff  |
+
+- Every action asks for confirmation in an overlay that names the action, the
+  profile, and the account last seen for it. `Enter` confirms under the size
+  rule of the profile confirmation and `Esc` cancels. `a` first asks for the new
+  name and refuses a name that is already registered.
+- On confirmation the monitor reads the roster again. It runs the action only
+  when the profile is still registered, or still absent for `a`. The command
+  itself checks the name again under its locks.
+- `l` and `d` are refused for `default`, which Claude Code manages. `s` is
+  refused for the saved profile and when `CLAUDE_CONFIG_DIR` overrides the
+  selection. `s` resumes in the directory where `duolane serve` started, and the
+  confirmation names that directory.
+- Only one action runs at a time. Another action key during a run reports that
+  the monitor is busy.
+- A captured action runs on a background thread with standard input closed, in
+  its own process group. Its output is kept up to 64 KiB with control characters
+  and escape sequences removed. After 60 seconds the monitor stops the process
+  group and reports a timeout. The status line shows the action while it runs,
+  then the result with the last line of output.
+- A handoff action needs the terminal for a browser sign-in or for Claude Code.
+  The monitor leaves the alternate screen, turns off raw mode and mouse capture,
+  and runs the child in its own process group as the foreground group of the
+  terminal. `Ctrl-C` therefore reaches only the child, never the proxy. A child
+  stopped with `Ctrl-Z` is continued at once. When the child exits, the monitor
+  takes the terminal back, waits for `Enter`, and redraws. The proxy serves
+  throughout.
+- After an action ends, however it ends, the monitor reloads the roster and the
+  plan usage and starts an account details check. A failed action changes no
+  monitor state besides the status line.
+- The attached and demo monitors show no action hints and run nothing.
 
 ### Reported limits
 

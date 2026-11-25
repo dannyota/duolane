@@ -1,6 +1,7 @@
 pub(crate) mod limits;
 #[cfg(unix)]
 mod picker;
+pub(crate) mod profile_state;
 #[cfg(unix)]
 pub(crate) mod roster;
 #[cfg(unix)]

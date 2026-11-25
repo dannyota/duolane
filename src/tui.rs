@@ -8,8 +8,10 @@ mod mouse;
 #[cfg(test)]
 mod mouse_tests;
 mod overlay;
+mod profile_rows;
 mod requests;
 mod sessions;
+mod subscription;
 mod usage_limits;
 mod usage_stats;
 
