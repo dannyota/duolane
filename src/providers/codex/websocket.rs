@@ -117,11 +117,48 @@ impl CodexWebSocketEventStream {
         self.receiver
     }
 
-    pub(crate) fn replace_receiver(
-        &mut self,
-        receiver: CodexWebSocketEventReceiver,
-    ) -> CodexWebSocketEventReceiver {
-        std::mem::replace(&mut self.receiver, receiver)
+    pub(super) fn forward_auto(
+        mut self,
+        first: Result<serde_json::Value, CodexError>,
+        continuation: Option<super::continuation::ContinuationReservation>,
+    ) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let mut source = Self {
+            receiver: std::mem::replace(&mut self.receiver, rx),
+            is_http: self.is_http,
+            socket_id: self.socket_id.clone(),
+            return_id: self.return_id.clone(),
+            full_context_retry: self.full_context_retry.clone(),
+            provider_retry_handoff: self.provider_retry_handoff.clone(),
+        };
+        tokio::spawn(async move {
+            if continuation.is_none() {
+                if tx.send(first).await.is_ok() {
+                    super::client_sse::forward_codex_events(source.into_receiver(), tx).await;
+                }
+                return;
+            }
+            let mut item = Some(first);
+            loop {
+                let next = match item.take() {
+                    Some(item) => Some(item),
+                    None => tokio::select! {
+                        biased;
+                        _ = tx.closed() => break,
+                        item = source.recv() => item,
+                    },
+                };
+                let Some(next) = next else { return };
+                if tx.send(next).await.is_err() {
+                    break;
+                }
+            }
+            let return_id = source.close_and_return_id();
+            if let Some(reservation) = continuation.as_ref() {
+                invalidate_codex_websocket_pool_return(reservation, return_id);
+            }
+        });
+        self
     }
 }
 

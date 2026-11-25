@@ -254,16 +254,7 @@ impl CodexHttpClient {
                 self.stream_codex_http_events_for_owner_tracked(body, ctx, http_body)
                     .await
             }
-            Some(item) => {
-                let (tx, rx) = tokio::sync::mpsc::channel(64);
-                let receiver = websocket.replace_receiver(rx);
-                tokio::spawn(async move {
-                    if tx.send(item).await.is_ok() {
-                        forward_codex_events(receiver, tx).await;
-                    }
-                });
-                Ok(websocket)
-            }
+            Some(item) => Ok(websocket.forward_auto(item, continuation.cloned())),
             None => Err(CodexError {
                 status: 0,
                 message: "WebSocket connection closed before the first Codex event".to_string(),

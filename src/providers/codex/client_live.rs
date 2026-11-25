@@ -500,6 +500,12 @@ impl CodexHttpClient {
                     }
                 }
                 if terminal {
+                    #[cfg(test)]
+                    if continuation.as_ref().and_then(|r| r.owner())
+                        == Some(&ConversationIdentity::Main("auto-terminal-drop".into()))
+                    {
+                        tests::AUTO_TERMINAL_QUEUED.add_permits(1);
+                    }
                     return;
                 }
             }
@@ -596,6 +602,7 @@ pub(crate) mod tests {
     }
 
     static RACE_HOOK: Mutex<Option<Arc<RaceHook>>> = Mutex::new(None);
+    pub(super) static AUTO_TERMINAL_QUEUED: Semaphore = Semaphore::const_new(0);
 
     pub(crate) fn race_hook(
         reservation: Option<&super::super::continuation::ContinuationReservation>,
@@ -756,6 +763,121 @@ pub(crate) mod tests {
         .await
         .unwrap();
         server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
+
+    #[tokio::test]
+    async fn auto_disconnect_after_terminal_queued_removes_socket() {
+        use futures_util::SinkExt;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let owner = ConversationIdentity::Main("auto-terminal-drop".into());
+        let request = buffered_test_request();
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server =
+            tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _ = next_websocket_json(&mut ws).await;
+                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                    r#"{"type":"response.created","response":{"id":"first"}}"#,
+                ))
+                .await
+                .unwrap();
+                for _ in 0..70 {
+                    ws.send(tokio_tungstenite::tungstenite::Message::text(
+                        r#"{"type":"response.in_progress"}"#,
+                    ))
+                    .await
+                    .unwrap();
+                }
+                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                r#"{"type":"response.completed","response":{"id":"first","status":"completed"}}"#,
+            )).await.unwrap();
+            });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let events = client
+            .stream_codex_auto_events_for_owner(
+                &request,
+                &http_test_context(),
+                &super::super::client_body::CodexHttpBodyCache::new(),
+                Some(&reservation),
+                false,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            AUTO_TERMINAL_QUEUED.acquire().await.unwrap().forget();
+        })
+        .await
+        .unwrap();
+        assert!(events.return_id().is_some());
+        assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_some());
+        drop(events);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while super::super::websocket::pooled_socket_id_for_tests(&owner).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
+
+    #[tokio::test]
+    async fn auto_delivered_terminal_keeps_socket_pooled() {
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let owner = ConversationIdentity::Main("auto-terminal-delivered".into());
+        let request = buffered_test_request();
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            send_completed_websocket_response(&mut ws, "first").await;
+        });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let mut events = client
+            .stream_codex_auto_events_for_owner(
+                &request,
+                &http_test_context(),
+                &super::super::client_body::CodexHttpBodyCache::new(),
+                Some(&reservation),
+                false,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap().unwrap();
+                if super::super::websocket::is_terminal_event(&event) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        drop(events);
+        server.await.unwrap();
+        assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_some());
         super::super::websocket::clear_codex_websocket_pool_for_tests();
     }
 
