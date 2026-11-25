@@ -145,9 +145,10 @@ writes to one transcript.
 
 `duolane accounts switch [name] [--next] [-- <claude arguments>]` changes the
 selection and starts `duolane claude` under it. It is a manual step for a login
-that has run out of usage. It never runs on its own, never inspects quota, and
-never changes an open session. It is available on Unix, like the other accounts
-commands.
+that has run out of usage. It never runs on its own and never changes an open
+session. Its menu shows the stored [plan usage](#plan-usage), but neither the
+menu nor `--next` uses it to pick a profile. It is available on Unix, like the
+other accounts commands.
 
 1. Refuse when `CLAUDE_CONFIG_DIR` is set, because the launch would ignore the
    selection. When `CLAUDECODE` is set, ask for confirmation on a terminal and
