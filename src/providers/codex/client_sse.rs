@@ -414,7 +414,7 @@ pub(super) fn write_codex_sse_event_capture(traffic: &TrafficCapture, body: &[u8
     }
 }
 
-pub(super) fn record_live_stream_progress(ctx: &crate::provider::RequestContext, chunk: &[u8]) {
+pub(super) fn record_live_stream_first_output(ctx: &crate::provider::RequestContext, chunk: &[u8]) {
     if let Some(monitor) = ctx.monitor.as_ref() {
         let output = chunk
             .split(|byte| *byte == b'\n')
@@ -439,6 +439,11 @@ pub(super) fn record_live_stream_progress(ctx: &crate::provider::RequestContext,
         if output {
             monitor.first_output(&ctx.req_id);
         }
+    }
+}
+
+pub(super) fn record_live_stream_progress(ctx: &crate::provider::RequestContext, chunk: &[u8]) {
+    if let Some(monitor) = ctx.monitor.as_ref() {
         let (input_tokens, output_tokens) = crate::anthropic::sse::usage_from_anthropic_sse(chunk);
         monitor.stream_progress(
             &ctx.req_id,
@@ -498,7 +503,7 @@ pub(super) fn single_live_stream_response(
     ctx: crate::provider::RequestContext,
 ) -> axum::response::Response {
     event_stream_response(futures_util::stream::once(async move {
-        record_live_stream_progress(&ctx, &chunk);
+        record_live_stream_first_output(&ctx, &chunk);
         Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(chunk))
     }))
 }
@@ -531,15 +536,15 @@ mod tests {
             monitor: Some(monitor.clone()),
             passthrough: None,
         };
-        record_live_stream_progress(
+        record_live_stream_first_output(
             &ctx,
             b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
         );
         assert!(monitor.snapshot().active[0].first_output_at.is_none());
-        record_live_stream_progress(&ctx, b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"\"}}\n\n");
-        record_live_stream_progress(&ctx, b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"signature_delta\",\"signature\":\"x\"}}\n\n");
+        record_live_stream_first_output(&ctx, b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"\"}}\n\n");
+        record_live_stream_first_output(&ctx, b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"signature_delta\",\"signature\":\"x\"}}\n\n");
         assert!(monitor.snapshot().active[0].first_output_at.is_none());
-        record_live_stream_progress(&ctx, b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n");
+        record_live_stream_first_output(&ctx, b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n");
         assert!(monitor.snapshot().active[0].first_output_at.is_some());
         let monitor = crate::monitor::MonitorHandle::default();
         monitor.request_started("r", None, None, crate::monitor::EndpointKind::Messages);
@@ -547,7 +552,7 @@ mod tests {
             monitor: Some(monitor.clone()),
             ..ctx
         };
-        record_live_stream_progress(&ctx, b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\"}}\n\n");
+        record_live_stream_first_output(&ctx, b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\"}}\n\n");
         assert!(monitor.snapshot().active[0].first_output_at.is_some());
     }
 

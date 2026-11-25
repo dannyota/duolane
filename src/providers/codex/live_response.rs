@@ -1,7 +1,8 @@
 use super::client::CodexHttpClient;
 use super::client_sse::{
     append_live_metadata_payload, event_stream_response, record_live_stream_downstream_capture,
-    record_live_stream_progress, single_live_stream_response, translate_live_stream_payload,
+    record_live_stream_first_output, record_live_stream_progress, single_live_stream_response,
+    translate_live_stream_payload,
 };
 use super::compaction::CompactionAttempt;
 #[cfg(test)]
@@ -473,6 +474,7 @@ async fn live_stream_response_once(
                 ctx.recovery_budget.mark_committed();
             }
             record_live_stream_downstream_capture(&ctx, &pending_chunk);
+            record_live_stream_progress(&ctx, &pending_chunk);
             if terminal {
                 update_continuation_from_upstream(
                     ctx.session_id.as_deref(),
@@ -515,10 +517,10 @@ async fn live_stream_response_once(
                 ));
             }
             record_live_stream_downstream_capture(&ctx, &pending_chunk);
+            record_live_stream_progress(&ctx, &pending_chunk);
             return LiveStreamStart::Response(single_live_stream_response(pending_chunk, ctx));
         }
     }
-
     let mut error = websocket::missing_terminal_error();
     if tracked_http && !is_http {
         ctx.recovery_budget.body_uncertain();
@@ -534,7 +536,6 @@ async fn live_stream_response_once(
     }
     provider_retry(&upstream_events, error)
 }
-
 #[allow(clippy::too_many_arguments)]
 fn remaining_live_stream_response(
     mut upstream_events: websocket::CodexWebSocketEventStream,
@@ -575,13 +576,16 @@ fn remaining_live_stream_response(
                 item = upstream_events.recv() => item,
                 _ = heartbeat.tick() => {
                     let chunk = translator.ping_chunk(ctx.traffic.as_deref());
-                    if !chunk.is_empty() && tx.send(Ok(Bytes::from(chunk))).await.is_err() {
-                        abort_request_state(
-                            ctx.session_id.as_deref(),
-                            &request_continuation,
-                            compaction.attempt,
-                        );
-                        return;
+                    if !chunk.is_empty() {
+                        record_live_stream_progress(&ctx, &chunk);
+                        if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
+                            abort_request_state(
+                                ctx.session_id.as_deref(),
+                                &request_continuation,
+                                compaction.attempt,
+                            );
+                            return;
+                        }
                     }
                     continue;
                 }
@@ -618,18 +622,22 @@ fn remaining_live_stream_response(
                                 ctx.traffic.as_deref(),
                             );
                             if !chunk.is_empty() {
+                                record_live_stream_progress(&ctx, &chunk);
                                 let _ = tx.send(Ok(Bytes::from(chunk))).await;
                             }
                             return;
                         }
                     };
-                    if !chunk.is_empty() && tx.send(Ok(Bytes::from(chunk))).await.is_err() {
-                        abort_request_state(
-                            ctx.session_id.as_deref(),
-                            &request_continuation,
-                            compaction.attempt,
-                        );
-                        return;
+                    if !chunk.is_empty() {
+                        record_live_stream_progress(&ctx, &chunk);
+                        if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
+                            abort_request_state(
+                                ctx.session_id.as_deref(),
+                                &request_continuation,
+                                compaction.attempt,
+                            );
+                            return;
+                        }
                     }
                     if terminal {
                         update_continuation_from_upstream(
@@ -657,13 +665,13 @@ fn remaining_live_stream_response(
                         ctx.traffic.as_deref(),
                     );
                     if !chunk.is_empty() {
+                        record_live_stream_progress(&ctx, &chunk);
                         let _ = tx.send(Ok(Bytes::from(chunk))).await;
                     }
                     return;
                 }
             }
         }
-
         abort_request_state(
             ctx.session_id.as_deref(),
             &request_continuation,
@@ -675,14 +683,14 @@ fn remaining_live_stream_response(
             ctx.traffic.as_deref(),
         );
         if !chunk.is_empty() {
+            record_live_stream_progress(&ctx, &chunk);
             let _ = tx.send(Ok(Bytes::from(chunk))).await;
         }
     });
-
     let stream = futures_util::stream::unfold((rx, stream_ctx), |(mut rx, ctx)| async {
         rx.recv().await.map(|item| {
             if let Ok(chunk) = &item {
-                record_live_stream_progress(&ctx, chunk);
+                record_live_stream_first_output(&ctx, chunk);
             }
             (item, (rx, ctx))
         })
@@ -1492,6 +1500,47 @@ mod tests {
                 assert!(monitor.snapshot().active[0].first_output_at.is_none());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn slow_body_reader_does_not_extend_generation_duration() {
+        let (tx, rx, mut ctx, request_body) = empty_terminal_fixture();
+        let monitor = crate::monitor::MonitorHandle::new(10);
+        monitor.request_started(
+            &ctx.req_id,
+            None,
+            None,
+            crate::monitor::EndpointKind::Messages,
+        );
+        ctx.monitor = Some(monitor.clone());
+        tx.send(Ok(serde_json::json!({"type":"response.output_text.delta", "delta":"hello", "output_index":0, "content_index":0}))).await.unwrap();
+        let LiveStreamStart::Response(response) = live_stream_response_once(
+            rx,
+            "msg_test".into(),
+            "gpt-5.6-sol",
+            ctx,
+            ContinuationReservation::for_owner_turn(None, None),
+            request_body,
+            LiveStreamCompaction {
+                compact_boundary: false,
+                attempt: None,
+            },
+            config::CodexTransport::WebSocket,
+            false,
+        )
+        .await
+        else {
+            panic!("expected stream")
+        };
+        tx.send(Ok(serde_json::json!({"type":"response.completed", "response":{"id":"r", "status":"completed", "usage":{"input_tokens":1,"output_tokens":2}}}))).await.unwrap();
+        drop(tx);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        response.into_body().collect().await.unwrap();
+        let duration = monitor.snapshot().active[0].generation_duration.unwrap();
+        assert!(
+            duration < Duration::from_secs(1),
+            "generation took {duration:?}"
+        );
     }
 
     #[tokio::test]
