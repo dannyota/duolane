@@ -76,10 +76,20 @@ pub(super) fn codex_label(
     }
 }
 
+#[cfg(test)]
 pub(super) fn codex(
     label: &str,
     window: Option<&crate::monitor::CodexQuotaWindow>,
     now: SystemTime,
+) -> Line<'static> {
+    codex_in_zone(label, window, now, jiff::tz::TimeZone::system())
+}
+
+pub(super) fn codex_in_zone(
+    label: &str,
+    window: Option<&crate::monitor::CodexQuotaWindow>,
+    now: SystemTime,
+    zone: jiff::tz::TimeZone,
 ) -> Line<'static> {
     let label = codex_label(label, window);
     let mut spans = vec![Span::raw(format!("  {label:<9} "))];
@@ -89,7 +99,7 @@ pub(super) fn codex(
         .filter(|v| (1..=253_402_300_799).contains(v))
         .and_then(|v| UNIX_EPOCH.checked_add(Duration::from_secs(v)))
         .map(|time| {
-            let date = cells::format_system_time(time);
+            let date = cells::format_system_time_in_zone(time, zone.clone());
             match time.duration_since(now) {
                 Ok(left) => format!("{date} (in {})", cells::format_duration(left)),
                 Err(_) => format!("{date} (passed)"),
@@ -114,36 +124,74 @@ pub(super) fn compact(label: &str, line: Line<'static>) -> Vec<Span<'static>> {
     spans
 }
 
-pub(super) fn compact_pair(
-    first: Line<'static>,
-    second: Line<'static>,
-    width: usize,
-) -> Vec<Span<'static>> {
-    let windows = [first, second];
-    let build = |bars: bool| {
-        let mut spans = Vec::new();
-        for line in &windows {
-            let label = line.spans[0].content.trim().to_owned();
-            let mut window = compact(&label, line.clone());
-            if !bars && window.len() >= 4 {
-                window.drain(1..3);
-            }
-            if line.spans.len() > 1
-                && let Some(reset) = line.spans.last()
-            {
-                let text = reset.content.split(" (").next().unwrap_or(&reset.content);
-                window.push(Span::raw(text.replace("reset ", "")));
-            }
-            spans.extend(window);
-        }
-        spans
-    };
-    let spans = build(true);
-    if Line::from(spans.clone()).width() <= width {
-        spans
-    } else {
-        build(false)
+#[cfg(unix)]
+fn relative_span(seconds: u64) -> String {
+    crate::claude_accounts::roster::span(seconds)
+}
+
+#[cfg(not(unix))]
+fn relative_span(seconds: u64) -> String {
+    match seconds {
+        0..60 => "<1m".into(),
+        60..3600 => format!("{}m", seconds / 60),
+        3600..86400 => format!("{}h{}m", seconds / 3600, seconds % 3600 / 60),
+        _ => format!("{}d{}h", seconds / 86400, seconds % 86400 / 3600),
     }
+}
+
+pub(super) struct CompactWindow {
+    pub label: String,
+    pub line: Line<'static>,
+    pub reset: Option<u64>,
+}
+
+pub(super) fn compact_line(
+    name: &str,
+    style: Style,
+    windows: [CompactWindow; 2],
+    width: usize,
+    now: u64,
+) -> Line<'static> {
+    let mut parts = Vec::new();
+    let mut bars = Vec::new();
+    for window in windows {
+        let spans = compact(&window.label, window.line);
+        let value = if spans.len() >= 4 {
+            spans[3].content.trim().to_owned()
+        } else {
+            "Unknown".into()
+        };
+        let reset = window
+            .reset
+            .filter(|v| (1..=253_402_300_799).contains(v))
+            .map(|v| relative_span(v.saturating_sub(now)))
+            .unwrap_or_else(|| "-".into());
+        parts.push(format!(" {} {} {}", window.label, value, reset));
+        bars.push(if spans.len() >= 4 {
+            spans[1..3].to_vec()
+        } else {
+            Vec::new()
+        });
+    }
+    let required: usize = parts.iter().map(|part| cells::display_width(part)).sum();
+    let name_width = cells::display_width(name);
+    let minimum = if name_width > 12 { 13 } else { name_width };
+    let available = width
+        .saturating_sub(required)
+        .max(minimum.min(width))
+        .min(name_width);
+    let mut result = vec![Span::styled(cells::ellipsize(name, available), style)];
+    let add_bars = available == name_width
+        && width.saturating_sub(required + available) >= 10
+        && bars.iter().all(|bar| !bar.is_empty());
+    for (part, bar) in parts.into_iter().zip(bars) {
+        result.push(Span::raw(part));
+        if add_bars {
+            result.push(Span::raw(" "));
+            result.extend(bar);
+        }
+    }
+    Line::from(result)
 }
 
 pub(super) fn wrapped_height(lines: &[Line<'_>], width: u16) -> u16 {

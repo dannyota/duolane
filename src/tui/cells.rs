@@ -185,7 +185,7 @@ pub(super) fn content_constraint<'a, K: PartialEq>(
         Constraint::Length(desired.min(current + available.saturating_sub(minimum_flex)) as u16);
 }
 
-fn display_width(value: &str) -> usize {
+pub(super) fn display_width(value: &str) -> usize {
     Span::raw(value)
         .styled_graphemes(Style::default())
         .map(|grapheme| usize::from(grapheme.symbol.cell_width()))

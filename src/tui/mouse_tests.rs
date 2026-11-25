@@ -407,8 +407,8 @@ pub(super) fn app_for_accounts_test(accounts: accounts::Accounts) -> MonitorApp 
 #[test]
 fn attached_usage_shows_both_reset_times_at_90_by_24() {
     use crate::monitor::{CodexQuotaSnapshot, CodexQuotaWindow};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now();
+    use std::time::{Duration, UNIX_EPOCH};
+    let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let reset = now.duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600;
     let mut state: MonitorSnapshot = mock_state().into();
     state.codex_quota = Some(CodexQuotaSnapshot {
@@ -426,9 +426,25 @@ fn attached_usage_shows_both_reset_times_at_90_by_24() {
     });
     let mut app = app();
     app.usage_open = true;
-    let text = buffer_text(&draw(90, 24, |frame| render(frame, &mut app, &state)));
-    let second_reset = cells::format_system_time(UNIX_EPOCH + Duration::from_secs(reset + 3600));
-    assert!(text.contains(&second_reset), "{text}");
+    let text = buffer_text(&draw(90, 24, |frame| {
+        render_at(frame, &mut app, &state, now, jiff::tz::TimeZone::UTC)
+    }));
+    let first = cells::format_system_time_in_zone(
+        UNIX_EPOCH + Duration::from_secs(reset),
+        jiff::tz::TimeZone::UTC,
+    );
+    let second = cells::format_system_time_in_zone(
+        UNIX_EPOCH + Duration::from_secs(reset + 3600),
+        jiff::tz::TimeZone::UTC,
+    );
+    let lines: Vec<_> = text.lines().collect();
+    for (label, reset) in [("5h", first), ("week", second)] {
+        assert!(
+            lines.windows(2).any(|rows| rows[0].contains(label)
+                && (rows[0].contains(&reset) || rows[1].contains(&reset))),
+            "{text}"
+        );
+    }
 }
 
 #[test]
@@ -514,37 +530,30 @@ fn stale_subscription_remains_marked_when_summary_does_not_fit() {
 #[test]
 fn single_line_subscription_keeps_both_reset_times() {
     use crate::monitor::{CodexQuotaSnapshot, CodexQuotaWindow};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now();
-    let reset = now.duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600;
+    use std::time::{Duration, UNIX_EPOCH};
+    let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let reset = 1_700_003_600;
     let mut state: MonitorSnapshot = mock_state().into();
     state.codex_quota = Some(CodexQuotaSnapshot {
         observed_at: now,
         primary: Some(CodexQuotaWindow {
             used_percent: Some(42.0),
-            window_minutes: Some(300),
+            window_minutes: Some(120),
             reset_at: Some(reset),
         }),
         secondary: Some(CodexQuotaWindow {
             used_percent: Some(12.0),
-            window_minutes: Some(10080),
+            window_minutes: Some(240),
             reset_at: Some(reset + 3600),
         }),
     });
     let mut app = app();
     app.usage_open = true;
-    let text = buffer_text(&draw(100, 8, |frame| render(frame, &mut app, &state)));
-    let first = cells::format_system_time(UNIX_EPOCH + Duration::from_secs(reset));
-    let second = cells::format_system_time(UNIX_EPOCH + Duration::from_secs(reset + 3600));
-    assert!(
-        text.contains("5h")
-            && text.contains("42.0%")
-            && text.contains(&first)
-            && text.contains("week")
-            && text.contains("12.0%")
-            && text.contains(&second),
-        "{text}"
-    );
+    let text = buffer_text(&draw(100, 8, |frame| {
+        render_at(frame, &mut app, &state, now, jiff::tz::TimeZone::UTC)
+    }));
+    assert!(text.contains("120m 42.0% 1h0m"), "{text}");
+    assert!(text.contains("240m 12.0% 2h0m"), "{text}");
 }
 
 #[test]

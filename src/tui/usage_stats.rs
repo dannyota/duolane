@@ -74,8 +74,15 @@ fn number(value: Option<f64>, suffix: &str) -> String {
         .unwrap_or_else(|| "-".into())
 }
 
-pub(super) fn layout(area: Rect, state: &MonitorSnapshot, account_count: usize) -> [Rect; 3] {
-    let accounts = super::accounts::needed_height(area, state, account_count).min(area.height / 2);
+pub(super) fn layout(
+    area: Rect,
+    state: &MonitorSnapshot,
+    account_count: usize,
+    now: std::time::SystemTime,
+    zone: jiff::tz::TimeZone,
+) -> [Rect; 3] {
+    let accounts =
+        super::accounts::needed_height(area, state, account_count, now, zone).min(area.height / 2);
     let remaining = area.height.saturating_sub(accounts);
     let speed_rows = groups(&state.recent).len();
     let token_rows = state.sessions.len();

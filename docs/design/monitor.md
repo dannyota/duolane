@@ -172,9 +172,14 @@ session.
   height below the limits by their row counts, and a table that does not fit
   shows the rows that fit and the number left out.
 - A profile takes three lines, its name and one per window, when the pane has
-  room for every profile. Otherwise each profile is one line with both windows
-  as a percent and a short bar, so a terminal of 80 by 24 still shows the
-  limits.
+  room for every profile. Otherwise each profile is one compact line, so a
+  terminal of 80 by 24 still shows the limits.
+- A compact line gives its parts room in this order: the name, at least 12 cells
+  and ellipsized beyond its share; then for each window a short label, the
+  percent, and the time left until the reset, such as `5h 42% 1h54m`; then a
+  bar, only when cells remain. A window with no reset time shows `-` there. A
+  non-standard ChatGPT window uses its length as the label, such as `120m`. The
+  stale marker is never dropped while a value shows.
 - The confirmation for a profile change is an overlay, so it fits a terminal of
   80 by 24. `Enter` saves only when the terminal still has the size of the frame
   that showed the confirmation. The Claude pane keeps showing the saved profile

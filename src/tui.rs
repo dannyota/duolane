@@ -540,6 +540,22 @@ fn render(
     app: &mut MonitorApp,
     state: &MonitorSnapshot,
 ) -> MouseTargets {
+    render_at(
+        frame,
+        app,
+        state,
+        std::time::SystemTime::now(),
+        jiff::tz::TimeZone::system(),
+    )
+}
+
+fn render_at(
+    frame: &mut ratatui::Frame<'_>,
+    app: &mut MonitorApp,
+    state: &MonitorSnapshot,
+    now: std::time::SystemTime,
+    zone: jiff::tz::TimeZone,
+) -> MouseTargets {
     let area = frame.area();
     let terminal_state = &cells::dashboard_snapshot(state);
     frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
@@ -568,8 +584,9 @@ fn render(
             area.width,
             root[5].y.saturating_sub(root[1].y),
         );
-        let panes = usage_stats::layout(body, state, app.accounts.count());
-        app.accounts.render(frame, panes[0], terminal_state);
+        let panes = usage_stats::layout(body, state, app.accounts.count(), now, zone.clone());
+        app.accounts
+            .render_at(frame, panes[0], terminal_state, now, zone);
         usage_stats::render(frame, panes[1], panes[2], terminal_state, &state.recent);
         chrome::render_chrome_footer(frame, root[5], app, &mut targets);
         app.accounts.render_confirmation(frame, area);

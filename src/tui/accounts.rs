@@ -2,6 +2,8 @@ pub(super) fn needed_height(
     area: ratatui::layout::Rect,
     snapshot: &crate::monitor::snapshot::MonitorSnapshot,
     count: usize,
+    now: std::time::SystemTime,
+    zone: jiff::tz::TimeZone,
 ) -> u16 {
     let claude = 4_u16.saturating_add((count.min(u16::MAX as usize / 3) * 3) as u16);
     let width = if area.width >= 90 {
@@ -10,15 +12,24 @@ pub(super) fn needed_height(
         area.width
     }
     .saturating_sub(2);
-    let now = std::time::SystemTime::now();
     let quota = snapshot
         .codex_quota
         .as_ref()
         .filter(|q| now.duration_since(q.observed_at).is_ok());
     let lines = vec![
         ratatui::text::Line::from(quota_summary(quota, now)),
-        super::usage_limits::codex("Primary", quota.and_then(|q| q.primary.as_ref()), now),
-        super::usage_limits::codex("Secondary", quota.and_then(|q| q.secondary.as_ref()), now),
+        super::usage_limits::codex_in_zone(
+            "Primary",
+            quota.and_then(|q| q.primary.as_ref()),
+            now,
+            zone.clone(),
+        ),
+        super::usage_limits::codex_in_zone(
+            "Secondary",
+            quota.and_then(|q| q.secondary.as_ref()),
+            now,
+            zone,
+        ),
     ];
     let chatgpt = super::usage_limits::wrapped_height(&lines, width).saturating_add(2);
     if area.width >= 90 {
@@ -271,11 +282,29 @@ impl Accounts {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn render(
         &mut self,
         frame: &mut ratatui::Frame<'_>,
         area: ratatui::layout::Rect,
         snapshot: &crate::monitor::snapshot::MonitorSnapshot,
+    ) {
+        self.render_at(
+            frame,
+            area,
+            snapshot,
+            std::time::SystemTime::now(),
+            jiff::tz::TimeZone::system(),
+        );
+    }
+
+    pub(super) fn render_at(
+        &mut self,
+        frame: &mut ratatui::Frame<'_>,
+        area: ratatui::layout::Rect,
+        snapshot: &crate::monitor::snapshot::MonitorSnapshot,
+        now: std::time::SystemTime,
+        zone: jiff::tz::TimeZone,
     ) {
         use ratatui::{
             layout::{Constraint, Direction, Layout},
@@ -338,7 +367,6 @@ impl Accounts {
             .min(self.names.len().saturating_sub(1))
             .saturating_add(1)
             .saturating_sub(count.max(1));
-        let now = std::time::SystemTime::now();
         let seconds = now
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -368,19 +396,35 @@ impl Accounts {
                 lines.push(five);
                 lines.push(week);
             } else {
-                let suffix = if *name == self.selected { " Saved" } else { "" };
-                let width =
-                    usize::from(self.rows.width).saturating_sub(7 + suffix.len() + name.len());
-                let windows = super::usage_limits::compact_pair(five, week, width);
-                let available = usize::from(self.rows.width)
-                    .saturating_sub(Line::from(windows.clone()).width() + 7 + suffix.len());
-                let title = format!(
-                    "Claude {}{suffix}",
-                    super::cells::ellipsize(name, available)
-                );
-                let mut spans = vec![ratatui::text::Span::styled(title, style)];
-                spans.extend(windows);
-                lines.push(Line::from(spans));
+                let reset = |five: bool| {
+                    limits
+                        .and_then(|l| {
+                            if five {
+                                l.five_hour.as_ref()
+                            } else {
+                                l.seven_day.as_ref()
+                            }
+                        })
+                        .and_then(|w| w.resets_at)
+                };
+                lines.push(super::usage_limits::compact_line(
+                    name,
+                    style,
+                    [
+                        super::usage_limits::CompactWindow {
+                            label: "5h".into(),
+                            line: five,
+                            reset: reset(true),
+                        },
+                        super::usage_limits::CompactWindow {
+                            label: "week".into(),
+                            line: week,
+                            reset: reset(false),
+                        },
+                    ],
+                    usize::from(self.rows.width),
+                    seconds,
+                ));
             }
         }
         frame.render_widget(Paragraph::new(lines), self.rows);
@@ -424,12 +468,17 @@ impl Accounts {
                 .as_ref()
                 .filter(|q| now.duration_since(q.observed_at).is_ok());
             detail.push(Line::from(quota_summary(quota, now)));
-            let primary =
-                super::usage_limits::codex("Primary", quota.and_then(|q| q.primary.as_ref()), now);
-            let secondary = super::usage_limits::codex(
+            let primary = super::usage_limits::codex_in_zone(
+                "Primary",
+                quota.and_then(|q| q.primary.as_ref()),
+                now,
+                zone.clone(),
+            );
+            let secondary = super::usage_limits::codex_in_zone(
                 "Secondary",
                 quota.and_then(|q| q.secondary.as_ref()),
                 now,
+                zone.clone(),
             );
             if super::usage_limits::wrapped_height(
                 &[detail[0].clone(), primary.clone(), secondary.clone()],
@@ -454,9 +503,41 @@ impl Accounts {
                 if inner.height < 2 {
                     detail.clear();
                 }
-                detail.push(Line::from(super::usage_limits::compact_pair(
-                    primary, secondary, 0,
-                )));
+                let window = |primary: bool| {
+                    quota.and_then(|q| {
+                        if primary {
+                            q.primary.as_ref()
+                        } else {
+                            q.secondary.as_ref()
+                        }
+                    })
+                };
+                let label = |fallback: &str, w: Option<&crate::monitor::CodexQuotaWindow>| match w
+                    .and_then(|w| w.window_minutes)
+                {
+                    Some(300) => "5h".into(),
+                    Some(10080) => "week".into(),
+                    Some(n) if (1..=525_600_000).contains(&n) => format!("{n}m"),
+                    _ => fallback.into(),
+                };
+                detail.push(super::usage_limits::compact_line(
+                    "ChatGPT",
+                    Style::default(),
+                    [
+                        super::usage_limits::CompactWindow {
+                            label: label("Primary", window(true)),
+                            line: primary,
+                            reset: window(true).and_then(|w| w.reset_at),
+                        },
+                        super::usage_limits::CompactWindow {
+                            label: label("Secondary", window(false)),
+                            line: secondary,
+                            reset: window(false).and_then(|w| w.reset_at),
+                        },
+                    ],
+                    usize::from(inner.width),
+                    seconds,
+                ));
             }
             if self.local {
                 detail.push(Line::from(saved));
@@ -501,7 +582,7 @@ mod tests {
 
     #[test]
     fn narrow_compact_windows_keep_reset_times_on_their_rows() {
-        let now = SystemTime::now();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let reset = now
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
@@ -524,12 +605,194 @@ mod tests {
         });
         let mut accounts = Accounts::new(false);
         let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(40, 7, |f| {
+            accounts.render_at(f, f.area(), &state, now, jiff::tz::TimeZone::UTC)
+        }));
+        let first = super::super::cells::format_system_time_in_zone(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(reset),
+            jiff::tz::TimeZone::UTC,
+        );
+        let second = super::super::cells::format_system_time_in_zone(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(reset + 3600),
+            jiff::tz::TimeZone::UTC,
+        );
+        assert!(
+            text.lines()
+                .any(|line| line.contains("5h") && line.contains(&first)),
+            "{text}"
+        );
+        assert!(
+            text.lines()
+                .any(|line| line.contains("120m") && line.contains(&second)),
+            "{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_profiles_reserve_names_with_missing_resets() {
+        let mut accounts = Accounts::new(true);
+        accounts.names = vec![
+            "abcdefghijkl-one".into(),
+            "mnopqrstuvwx-two".into(),
+            "yzabcdefghij-three".into(),
+        ];
+        for name in &accounts.names {
+            accounts.limits.insert(
+                name.clone(),
+                crate::claude_accounts::limits::Limits {
+                    five_hour: Some(crate::claude_accounts::limits::Window {
+                        used: 0.2,
+                        resets_at: None,
+                    }),
+                    seven_day: Some(crate::claude_accounts::limits::Window {
+                        used: 0.4,
+                        resets_at: None,
+                    }),
+                    observed_at: 1,
+                },
+            );
+        }
+        let state = crate::monitor::mock_state().into();
+        let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(90, 8, |f| {
             accounts.render(f, f.area(), &state)
         }));
-        let second = super::super::cells::format_system_time(
-            SystemTime::UNIX_EPOCH + Duration::from_secs(reset + 3600),
+        for name in ["abcdefghijkl", "mnopqrstuvwx", "yzabcdefghij"] {
+            assert!(text.contains(name), "{text}");
+        }
+    }
+
+    #[test]
+    fn compact_nonstandard_windows_keep_both_relative_resets() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let reset = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        let mut state: crate::monitor::snapshot::MonitorSnapshot =
+            crate::monitor::mock_state().into();
+        state.codex_quota = Some(CodexQuotaSnapshot {
+            observed_at: now,
+            primary: Some(CodexQuotaWindow {
+                used_percent: Some(42.0),
+                window_minutes: Some(120),
+                reset_at: Some(reset),
+            }),
+            secondary: Some(CodexQuotaWindow {
+                used_percent: Some(12.0),
+                window_minutes: Some(240),
+                reset_at: Some(reset + 3600),
+            }),
+        });
+        let mut accounts = Accounts::new(false);
+        let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(100, 3, |f| {
+            accounts.render_at(f, f.area(), &state, now, jiff::tz::TimeZone::UTC)
+        }));
+        assert!(
+            text.contains("120m 42.0% 1h0m") && text.contains("240m 12.0% 2h0m"),
+            "{text}"
         );
-        assert!(text.contains(&second), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn usage_size_sweep_preserves_names_windows_resets_and_staleness() {
+        use crate::claude_accounts::limits::{Limits, Window};
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let seconds = 1_700_000_000;
+        let mut accounts = Accounts::new(true);
+        accounts.names = vec![
+            "abcdefghijkl-profile".into(),
+            "mnopqrstuvwx-profile".into(),
+            "yzabcdefghij-profile".into(),
+        ];
+        for (i, name) in accounts.names.iter().enumerate() {
+            accounts.limits.insert(
+                name.clone(),
+                Limits {
+                    five_hour: Some(Window {
+                        used: 0.2,
+                        resets_at: (i != 1).then_some(seconds + 3600),
+                    }),
+                    seven_day: Some(Window {
+                        used: 0.4,
+                        resets_at: (i != 1).then_some(seconds + 7200),
+                    }),
+                    observed_at: seconds,
+                },
+            );
+        }
+        let mut state: crate::monitor::snapshot::MonitorSnapshot =
+            crate::monitor::mock_state().into();
+        state.codex_quota = Some(CodexQuotaSnapshot {
+            observed_at: now - Duration::from_secs(901),
+            primary: Some(CodexQuotaWindow {
+                used_percent: Some(42.0),
+                window_minutes: Some(120),
+                reset_at: Some(seconds + 3600),
+            }),
+            secondary: Some(CodexQuotaWindow {
+                used_percent: Some(12.0),
+                window_minutes: Some(240),
+                reset_at: Some(seconds + 7200),
+            }),
+        });
+        let mut app = crate::tui::mouse_tests::app_for_accounts_test(accounts);
+        for width in (60..=140).step_by(5) {
+            for height in 8..=30 {
+                let text =
+                    crate::tui::tests::buffer_text(&crate::tui::tests::draw(width, height, |f| {
+                        crate::tui::render_at(f, &mut app, &state, now, jiff::tz::TimeZone::UTC);
+                    }));
+                if app.accounts.rows.height >= 3 {
+                    for name in ["abcdefghijkl", "mnopqrstuvwx", "yzabcdefghij"] {
+                        assert!(text.contains(name), "{width}x{height}: {text}");
+                    }
+                    for line in text
+                        .lines()
+                        .filter(|line| line.contains("20%") || line.contains("40%"))
+                    {
+                        if line.contains("20%") {
+                            assert!(line.contains("5h"), "{width}x{height}: {text}");
+                        }
+                        if line.contains("40%") {
+                            assert!(line.contains("week"), "{width}x{height}: {text}");
+                        }
+                    }
+                    let five = text
+                        .lines()
+                        .filter(|line| {
+                            line.contains("20%")
+                                && line.split("week").next().unwrap_or("").contains("1h0m")
+                        })
+                        .count();
+                    let week = text
+                        .lines()
+                        .filter(|line| {
+                            line.contains("40%")
+                                && line.split("week").nth(1).unwrap_or("").contains("2h0m")
+                        })
+                        .count();
+                    assert!(five >= 2 && week >= 2, "{width}x{height}: {text}");
+                }
+                let lines: Vec<_> = text.lines().collect();
+                for (value, label, relative, date) in [
+                    ("42.0%", "120m", "1h0m", "23:13:20"),
+                    ("12.0%", "240m", "2h0m", "00:13:20"),
+                ] {
+                    if let Some(index) = lines.iter().position(|line| line.contains(value)) {
+                        let line = lines[index];
+                        let next = lines.get(index + 1).copied().unwrap_or("");
+                        assert!(line.contains(label), "{width}x{height}: {text}");
+                        assert!(
+                            line.contains(relative) || line.contains(date) || next.contains(date),
+                            "{width}x{height}: {text}"
+                        );
+                        assert!(text.contains("Stale"), "{width}x{height}: {text}");
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -582,10 +845,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn compact_profile_prioritizes_resets_over_bars() {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let now = 1_700_000_000;
         let mut accounts = Accounts::new(true);
         accounts.names = vec!["default".into(), "backup".into()];
         accounts.limits.insert(
@@ -604,11 +865,11 @@ mod tests {
         );
         let state = crate::monitor::mock_state().into();
         let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(100, 8, |f| {
-            accounts.render(f, f.area(), &state)
+            accounts.render_at(f, f.area(), &state, time, jiff::tz::TimeZone::UTC)
         }));
         let row = text.lines().find(|line| line.contains("default")).unwrap();
         assert!(
-            row.contains("20%") && row.contains("40%") && row.contains("1h") && row.contains("1d"),
+            row.contains("5h 20% 1h30m") && row.contains("week 40% 1d12h"),
             "{text}"
         );
     }
