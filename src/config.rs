@@ -1306,6 +1306,7 @@ mod tests {
         let config = tempfile::TempDir::new().unwrap();
         let _env = isolated_env(&config);
         for (setting, expected) in [
+            (r#""baseInstructions":true,"baseInstructions":false"#, false),
             (r#""baseInstructions":false,"baseInstructions":true"#, true),
             (r#""baseInstructions":"off""#, true),
             (r#""baseInstructions":false"#, false),

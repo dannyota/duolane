@@ -893,10 +893,15 @@ mod tests {
         let after = serde_json::to_value(with).unwrap();
         let old = before["input"].as_array().unwrap();
         let input = after["input"].as_array().unwrap();
-        assert_eq!(input.len(), old.len() + 1);
-        assert_eq!(input[0]["type"], "additional_tools");
-        assert!(input[1]["content"][0]["text"] == "SYNTHETIC BASE");
-        assert_eq!(input[2..], old[1..]);
+        let template = "SYNTHETIC BASE";
+        let has_extra_item = input.len() == old.len() + 1;
+        assert!(has_extra_item, "base adds one input item");
+        let tools_first = input[0]["type"] == "additional_tools";
+        assert!(tools_first, "tools precede base instructions");
+        let template_matches = input[1]["content"][0]["text"] == template;
+        assert!(template_matches, "base instructions match template");
+        let remaining_matches = input[2..] == old[1..];
+        assert!(remaining_matches, "remaining input is unchanged");
     }
 
     #[test]
@@ -915,17 +920,20 @@ mod tests {
             translate_request_with_base(&req, options(), Some("SYNTHETIC BASE")).unwrap(),
         )
         .unwrap();
-        assert!(before == after);
+        let unchanged = before == after;
+        assert!(unchanged, "request is unchanged");
         req.extra
             .insert("tool_choice".into(), json!({"type":"tool"}));
         let before = translate_request(&req, options()).unwrap();
         let after = translate_request_with_base(&req, options(), Some("SYNTHETIC BASE")).unwrap();
-        assert_eq!(before.input.len(), after.input.len());
+        let unchanged_length = before.input.len() == after.input.len();
+        assert!(unchanged_length, "input length is unchanged");
         req.extra
             .insert("tool_choice".into(), json!({"type":"tool", "name":"Bash"}));
         let without = translate_request(&req, options()).unwrap();
         let with = translate_request_with_base(&req, options(), Some("SYNTHETIC BASE")).unwrap();
-        assert_eq!(with.input.len(), without.input.len() + 1);
+        let has_extra_item = with.input.len() == without.input.len() + 1;
+        assert!(has_extra_item, "base adds one input item");
     }
 
     #[test]
@@ -965,7 +973,8 @@ mod tests {
                 translate_request_with_base(&req, options(), Some("SYNTHETIC BASE")).unwrap(),
             )
             .unwrap();
-            assert!(before == after);
+            let unchanged = before == after;
+            assert!(unchanged, "request is unchanged");
         }
     }
 
@@ -986,7 +995,9 @@ mod tests {
         )
         .unwrap();
         let wire = serde_json::to_value(translated).unwrap();
-        assert!(wire["input"][0]["content"][0]["text"] == "SYNTHETIC BASE");
+        let template = "SYNTHETIC BASE";
+        let template_matches = wire["input"][0]["content"][0]["text"] == template;
+        assert!(template_matches, "base instructions match template");
     }
 
     fn additional_tool_names(item: &Value) -> Vec<String> {

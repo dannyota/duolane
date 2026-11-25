@@ -17,10 +17,10 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn account_retry_keeps_selected_template_after_catalog_changes() {
-    assert_ne!(
-        "SYNTHETIC BASE ONE".len(),
-        "SYNTHETIC BASE TWO LONGER".len()
-    );
+    let first_template = "SYNTHETIC BASE ONE";
+    let second_template = "SYNTHETIC BASE TWO LONGER";
+    let lengths_differ = first_template.len() != second_template.len();
+    assert!(lengths_differ, "template lengths differ");
     let dir = tempfile::tempdir().unwrap();
     let auth = dir.path().join("auth.json");
     let catalog = dir.path().join("models_cache.json");

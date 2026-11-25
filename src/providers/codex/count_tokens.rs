@@ -245,10 +245,10 @@ mod tests {
             };
             count_translated_tokens(&translate_request_with_base(&req, options, base).unwrap())
         };
-        assert_eq!(
-            count(AuthSource::ChatGpt),
-            count(AuthSource::ApiKey) + approx_token_count("SYNTHETIC BASE") + 4
-        );
+        let template = "SYNTHETIC BASE";
+        let count_matches = count(AuthSource::ChatGpt)
+            == count(AuthSource::ApiKey) + approx_token_count(template) + 4;
+        assert!(count_matches, "base template is counted once");
     }
 
     #[test]
