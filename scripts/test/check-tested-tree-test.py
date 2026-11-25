@@ -82,14 +82,20 @@ class ProofTests(unittest.TestCase):
     def test_pages(self):
         with patch.object(m, "command", return_value='{"total_count":0,"jobs":[]}'):
             self.assertEqual(m.pages("jobs?per_page=100", "jobs"), [])
-        for malformed in ("null", "[]", '{}', '{"total_count":2,"jobs":[{}]}', "not json"):
+        for malformed in ("null", "[]", '{}', '{"jobs":[]}', '{"total_count":true,"jobs":[]}', '{"total_count":-1,"jobs":[]}', '{"total_count":2,"jobs":[{}]}', "not json"):
             with patch.object(m, "command", return_value=malformed):
                 with self.assertRaises((ValueError, KeyError, TypeError)):
                     m.pages("jobs?per_page=100", "jobs")
+        for second in ({"jobs": [JOB]}, {"total_count": 102, "jobs": [JOB]}):
+            with patch.object(m, "api", side_effect=[{"total_count": 101, "jobs": [JOB] * 100}, second]):
+                with self.assertRaises((ValueError, KeyError)):
+                    m.pages("jobs?per_page=100", "jobs")
+        with patch.object(m, "api", side_effect=[{"total_count": 101, "jobs": [JOB] * 100}, {"total_count": 101, "jobs": [JOB]}]):
+            self.assertEqual(len(m.pages("jobs?per_page=100", "jobs")), 101)
         clock = [0]
         def first_page(*args, **kwargs):
             clock[0] = 11
-            return m.subprocess.CompletedProcess(args, 0, stdout=b'{"jobs":[' + b'{},' * 99 + b'{}]}')
+            return m.subprocess.CompletedProcess(args, 0, stdout=b'{"total_count":101,"jobs":[' + b'{},' * 99 + b'{}]}')
         with patch.object(m.time, "monotonic", lambda: clock[0]), patch.object(m.subprocess, "run", side_effect=first_page) as run:
             with self.assertRaises(TimeoutError):
                 m.pages("jobs?per_page=100", "jobs", deadline=10)
@@ -128,8 +134,12 @@ class ProofTests(unittest.TestCase):
         for index, step in enumerate(steps):
             body = block[step.start():steps[index + 1].start() if index + 1 < len(steps) else len(block)]
             self.assertRegex(body, r"(?m)^\s*continue-on-error:\s*true\s*$")
+            if index == 0:
+                self.assertRegex(body, r"(?m)^\s*id:\s*checkout\s*$")
+                self.assertRegex(body, r"(?m)^\s*timeout-minutes:\s*1\s*$")
             if step.group(2) == "proof":
-                self.assertRegex(body, r"(?m)^\s*timeout-minutes:\s*\d+\s*$")
+                self.assertRegex(body, r"(?m)^\s*timeout-minutes:\s*6\s*$")
+                self.assertRegex(body, r"(?m)^\s*if:\s*\$\{\{\s*steps\.checkout\.outcome\s*==\s*'success'\s*\}\}\s*$")
         self.assertEqual(steps[1].group(2), "proof")
 
     def test_structure_rejects_missing_lines(self):
@@ -137,8 +147,8 @@ class ProofTests(unittest.TestCase):
         ci = (root / "ci.yml").read_text()
         release = (root / "release.yml").read_text()
         lines = release.splitlines(keepends=True)
-        targets = [i for i, line in enumerate(lines) if line.lstrip().startswith("if: ${{ !cancelled() && needs.") or "needs.tested.result != 'success'" in line or line.strip() == "continue-on-error: true" or line.strip() == "timeout-minutes: 6"]
-        self.assertEqual(len(targets), 7)
+        targets = [i for i, line in enumerate(lines) if line.lstrip().startswith("if: ${{ !cancelled() && needs.") or "needs.tested.result != 'success'" in line or line.strip() == "continue-on-error: true" or line.strip() in ("timeout-minutes: 6", "timeout-minutes: 1", "id: checkout", "if: ${{ steps.checkout.outcome == 'success' }}")]
+        self.assertEqual(len(targets), 10)
         for index in targets:
             changed = "".join(lines[:index] + lines[index + 1:])
             def read(path, *args, **kwargs):

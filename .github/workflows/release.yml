@@ -21,10 +21,13 @@ jobs:
       tested: ${{ steps.proof.outputs.tested }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
         continue-on-error: true
+        timeout-minutes: 1
         with:
           persist-credentials: false
       - id: proof
+        if: ${{ steps.checkout.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 6
         env:

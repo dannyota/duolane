@@ -129,8 +129,8 @@ def pages(path, key, deadline=None):
         entries = page[key]
         if not isinstance(entries, list) or len(entries) > 100:
             raise ValueError("invalid page")
-        if key == "jobs" and "total_count" in page:
-            total = page["total_count"]
+        if key == "jobs":
+            total = page.get("total_count")
             if type(total) is not int or total < 0:
                 raise ValueError("invalid total count")
             totals.append(total)
