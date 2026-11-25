@@ -67,6 +67,13 @@ impl MonitorApp {
                 self.cancel_shutdown_confirmation()
             }
             _ if self.phase == MonitorPhase::ConfirmingShutdown => {}
+            _ if self.usage_open
+                && !self.show_help
+                && !self.show_setup
+                && self.accounts.typing() =>
+            {
+                self.accounts.type_key(key.code)
+            }
             KeyCode::Char('q') => self.request_shutdown_confirmation(),
             KeyCode::Char('?') => self.show_help = !self.show_help,
             KeyCode::Char('b') => self.show_setup = !self.show_setup,
@@ -91,6 +98,11 @@ impl MonitorApp {
             }
             KeyCode::Enter if self.usage_open && !self.show_help && !self.show_setup => {
                 self.accounts.confirm()
+            }
+            KeyCode::Char(action @ ('a' | 'l' | 'd' | 's'))
+                if self.usage_open && !self.show_help && !self.show_setup =>
+            {
+                self.accounts.action_key(action)
             }
             KeyCode::Down
                 if self.usage_open

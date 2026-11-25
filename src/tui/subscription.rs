@@ -5,9 +5,7 @@ pub(super) fn needed_height(
     now: std::time::SystemTime,
     zone: jiff::tz::TimeZone,
 ) -> u16 {
-    let claude = 4_u16
-        .saturating_add((count.min(u16::MAX as usize / 4) * 4) as u16)
-        .saturating_add(u16::from(count > 0));
+    let claude = 4_u16.saturating_add((count.min(u16::MAX as usize / 4) * 4) as u16);
     let width = if area.width >= 90 {
         area.width / 2
     } else {

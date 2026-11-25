@@ -109,6 +109,7 @@ pub(super) fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, at
         ("b", "toggle setup"),
         ("1 / 2", "Overview / Usage"),
         ("r", "reload local accounts"),
+        ("a l d s", "add / sign in / remove / switch"),
         ("arrows", "navigate rows and panes"),
         ("j / k", "previous / next row"),
         ("Tab", "switch pane"),

@@ -98,8 +98,8 @@ as signed in or unknown.
   signal handlers when collection finishes.
 - The monitor reads the same details for its
   [Usage view](monitor.md#account-details) on a background thread. That reader
-  installs no signal handler, because the proxy owns the signals of its process.
-  A cancel flag stops its status process groups instead.
+  installs no signal handler, because a handler would swallow a signal meant to
+  stop the proxy. A cancel flag stops its status process groups instead.
 - Displayed fields drop control and bidirectional formatting characters and keep
   at most 64 characters, so status text cannot rewrite the terminal.
 - Two signed-in profiles are the same account when their full email, compared

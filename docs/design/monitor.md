@@ -221,8 +221,8 @@ from the plan usage it already loads.
 - `seen` gives the age of the values. They are marked `Stale` after 15 minutes,
   as the ChatGPT report is. A stale value is still shown, because an idle
   account sends nothing new.
-- A line below the profiles gives the total over all accounts, with the text and
-  the rules of the `accounts list` total.
+- The bottom border of the pane gives the total over all accounts, with the text
+  and the rules of the `accounts list` total.
 - One profile is marked `Suggested`: the available profile whose fuller window
   has the lowest percent used. An earlier row wins a tie. A profile is skipped
   when its status is not `available`, when it holds the same account as an
@@ -245,8 +245,9 @@ the same account share the newest plan usage, as in `accounts list`.
   on time, output, and displayed text. Each check runs `claude auth status` once
   per profile, so it runs on a background thread and never blocks drawing.
 - A check starts when Usage opens and the last result is older than 5 minutes,
-  and on `r`. Only one check runs at a time, and a request made during a check
-  is dropped. The last result stays on screen while a check runs.
+  and on `r`. Only one check runs at a time. An `r` or a finished action during
+  a check starts one more check when it ends. The last result stays on screen
+  while a check runs.
 - The pane states the age of the details, such as `Accounts checked 2m05s ago`,
   or `Accounts checking`, apart from the plan usage, which reloads every 30
   seconds. A profile with no details yet shows `account checking`.
@@ -302,6 +303,9 @@ passes the profile name rule.
 - After an action ends, however it ends, the monitor reloads the roster and the
   plan usage and starts an account details check. A failed action changes no
   monitor state besides the status line.
+- The footer of Usage lists the action keys. They are not click targets, because
+  they act on the focused profile. While the new name is typed, every key goes
+  to the name, so `q`, `1`, and `r` do not act on the monitor.
 - The attached and demo monitors show no action hints and run nothing.
 
 ### Reported limits

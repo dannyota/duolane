@@ -15,6 +15,7 @@ struct Job {
 pub(super) struct Details {
     checked: Option<(Roster, Instant)>,
     job: Option<Job>,
+    again: bool,
 }
 
 impl Details {
@@ -34,7 +35,11 @@ impl Details {
             .checked
             .as_ref()
             .is_some_and(|(_, at)| at.elapsed() < REUSE);
-        if self.job.is_some() || (fresh && !force) {
+        if self.job.is_some() {
+            self.again |= force;
+            return;
+        }
+        if fresh && !force {
             return;
         }
         let (sender, receiver) = mpsc::channel();
@@ -68,6 +73,9 @@ impl Details {
         }
         if let Some(roster) = result {
             self.checked = Some((roster, Instant::now()));
+        }
+        if std::mem::take(&mut self.again) {
+            self.request(true);
         }
     }
 
@@ -128,9 +136,13 @@ mod tests {
             Some(Roster::default())
         });
         assert_eq!(details.summary(), "Accounts checking");
+        details.request_with(false, |_| panic!("second check started during a check"));
+        assert!(!details.again);
         details.request_with(true, |_| panic!("second check started during a check"));
+        assert!(details.again);
         release.send(()).unwrap();
         wait(&mut details);
+        assert!(!details.again);
         assert!(details.summary().starts_with("Accounts checked "));
         details.request_with(false, |_| panic!("fresh result was not reused"));
         assert!(!details.checking());

@@ -1,5 +1,6 @@
 mod account_details;
 mod accounts;
+mod actions;
 mod cells;
 mod chrome;
 mod detail;
@@ -201,6 +202,11 @@ fn run_monitor_events(
 ) -> Result<MonitorExit, anyhow::Error> {
     loop {
         app.accounts.refresh_if_due();
+        if let Some(action) = app.accounts.take_handoff() {
+            let label = action.label();
+            let finished = actions::run_handoff(terminal, &label, &action.args())?;
+            app.accounts.finish(&label, &finished);
+        }
         let update = snapshot();
         let state = update.snapshot();
         app.clamp_selection(state.sessions.len(), state.recent.len());
@@ -593,6 +599,7 @@ fn render_at(
         usage_stats::render(frame, panes[1], panes[2], terminal_state, &state.recent);
         chrome::render_chrome_footer(frame, root[5], app, &mut targets);
         app.accounts.render_confirmation(frame, area);
+        app.accounts.render_action(frame, area);
         if app.show_setup {
             render_setup_overlay(frame, area, &app.setup_text);
         }

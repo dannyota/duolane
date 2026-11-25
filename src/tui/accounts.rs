@@ -1,4 +1,7 @@
+mod controls;
+
 pub(super) struct Accounts {
+    controls: controls::Controls,
     local: bool,
     limits: std::collections::BTreeMap<String, crate::claude_accounts::limits::Limits>,
     details: super::account_details::Details,
@@ -20,6 +23,7 @@ impl Accounts {
     pub(super) fn new(local: bool) -> Self {
         Self {
             local: local && cfg!(unix),
+            controls: Default::default(),
             limits: Default::default(),
             details: Default::default(),
             refreshed: None,
@@ -64,6 +68,7 @@ impl Accounts {
     }
 
     pub(super) fn reload(&mut self) {
+        self.controls.clear_message();
         self.enter();
         self.refresh_limits();
         if self.local {
@@ -73,6 +78,7 @@ impl Accounts {
 
     pub(super) fn refresh_if_due(&mut self) {
         self.details.poll();
+        self.poll_action();
         if self.local
             && self
                 .refreshed
@@ -115,12 +121,16 @@ impl Accounts {
         &self.names
     }
     pub(super) fn confirmation_visible(&self) -> bool {
-        self.pending.is_some() && self.confirmation_visible
+        (self.pending.is_some() && self.confirmation_visible) || self.controls.visible()
     }
     pub(super) fn confirming(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.controls.active()
+    }
+    pub(super) fn local(&self) -> bool {
+        self.local
     }
     pub(super) fn cancel(&mut self) {
+        self.controls.cancel();
         self.pending = None;
         self.confirmation_visible = false;
     }
@@ -131,6 +141,9 @@ impl Accounts {
         self.focus = self.focus.saturating_sub(1);
     }
     pub(super) fn confirm(&mut self) {
+        if self.controls.active() {
+            return self.confirm_action();
+        }
         self.confirm_with(|name, expected| {
             #[cfg(unix)]
             {
@@ -266,8 +279,7 @@ impl Accounts {
         };
         let claude_height = (3_u16
             .saturating_add((self.names.len().min(u16::MAX as usize / 4) * 4) as u16)
-            .saturating_add(u16::from(self.overridden))
-            .saturating_add(u16::from(!self.names.is_empty())))
+            .saturating_add(u16::from(self.overridden)))
         .min(area.height.saturating_sub(5));
         let constraints = if direction == Direction::Vertical {
             [Constraint::Length(claude_height), Constraint::Min(0)]
@@ -278,10 +290,22 @@ impl Accounts {
             .direction(direction)
             .constraints(constraints)
             .split(area);
-        let block = Block::default()
+        let seconds = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let roster = self.details.roster(&self.names);
+        let states = roster.states(&self.limits, seconds);
+        let mut block = Block::default()
             .title(" Claude profiles ")
             .borders(Borders::ALL)
             .style(Style::default().fg(super::SEPARATOR));
+        if !self.names.is_empty() {
+            block = block.title_bottom(
+                Line::from(format!(" {} ", roster.total(&self.limits, seconds)))
+                    .style(Style::default().fg(super::DIM_WHITE)),
+            );
+        }
         self.rows = block.inner(panes[0]);
         frame.render_widget(block, panes[0]);
         if self.local {
@@ -298,7 +322,9 @@ impl Accounts {
             };
             let mut info_lines = vec![Line::from(format!(
                 "Saved: {saved}  {}",
-                self.details.summary()
+                self.controls
+                    .message()
+                    .unwrap_or_else(|| self.details.summary())
             ))];
             if self.overridden {
                 info_lines.push(Line::from("CLAUDE_CONFIG_DIR overrides selection"));
@@ -313,14 +339,8 @@ impl Accounts {
         } else {
             1
         };
-        let seconds = now
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let roster = self.details.roster(&self.names);
-        let states = roster.states(&self.limits, seconds);
         if self.row_height == 1
-            && available > self.names.len() + 1
+            && available > self.names.len()
             && let Some((name, state)) = self.names.get(self.focus).zip(states.get(self.focus))
         {
             let mut spans = vec![ratatui::text::Span::raw(format!("{name}:"))];
@@ -334,14 +354,6 @@ impl Accounts {
             );
             self.rows.y += 1;
             self.rows.height -= 1;
-        }
-        if !self.names.is_empty() && available > self.names.len() * self.row_height {
-            self.rows.height -= 1;
-            frame.render_widget(
-                Paragraph::new(roster.total(&self.limits, seconds))
-                    .style(Style::default().fg(super::DIM_WHITE)),
-                ratatui::layout::Rect::new(self.rows.x, self.rows.bottom(), self.rows.width, 1),
-            );
         }
         let count = usize::from(self.rows.height) / self.row_height;
         self.first = self
