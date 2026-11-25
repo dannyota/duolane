@@ -25,6 +25,45 @@ fn bar(value: Option<f64>, lane: Color, decimals: bool) -> Vec<Span<'static>> {
     ]
 }
 
+#[cfg(unix)]
+pub(super) fn claude(
+    label: &str,
+    limits: Option<&crate::claude_accounts::limits::Limits>,
+    length: u64,
+    now: u64,
+) -> Line<'static> {
+    let window = limits.and_then(|limits| {
+        if length == 18_000 {
+            limits.five_hour.as_ref()
+        } else {
+            limits.seven_day.as_ref()
+        }
+    });
+    let valid = window.filter(|w| w.used.is_finite() && (0.0..=100.0).contains(&w.used));
+    let value = valid.zip(limits).map(|(w, l)| {
+        crate::claude_accounts::roster::percent(w, l.observed_at, length, now) as f64
+    });
+    let mut spans = vec![Span::raw(format!("  {label:<5} "))];
+    spans.extend(bar(value, PURPLE, false));
+    let reset = valid
+        .and_then(|w| w.resets_at)
+        .filter(|v| *v > now)
+        .map(|v| crate::claude_accounts::roster::span(v - now))
+        .unwrap_or_else(|| "Unknown".into());
+    spans.push(Span::raw(format!("  reset {reset}")));
+    Line::from(spans)
+}
+
+#[cfg(not(unix))]
+pub(super) fn claude(
+    label: &str,
+    _: Option<&crate::claude_accounts::limits::Limits>,
+    _: u64,
+    _: u64,
+) -> Line<'static> {
+    Line::from(format!("  {label:<5} Unknown"))
+}
+
 pub(super) fn codex_label(
     label: &str,
     window: Option<&crate::monitor::CodexQuotaWindow>,

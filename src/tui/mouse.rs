@@ -1,3 +1,5 @@
+use super::{DetailSelection, DetailView, FocusPane, MonitorExit, MonitorPhase, MonitorSnapshot};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::widgets::{Block, Row, Table, TableState};
@@ -80,4 +82,89 @@ pub(super) fn render_clickable_table(
         .take(usize::from(body.height))
         .collect();
     VisibleRows { body, indices }
+}
+
+impl super::MonitorApp {
+    pub(super) fn handle_mouse_query(
+        &mut self,
+        mouse: MouseEvent,
+        state: &MonitorSnapshot,
+        targets: &MouseTargets,
+        size: impl FnOnce() -> std::io::Result<(u16, u16)>,
+    ) -> Option<MonitorExit> {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return None;
+        }
+        size()
+            .ok()
+            .and_then(|size| self.handle_mouse_sized(mouse, state, targets, size))
+    }
+
+    pub(super) fn handle_mouse_sized(
+        &mut self,
+        mouse: MouseEvent,
+        state: &MonitorSnapshot,
+        targets: &MouseTargets,
+        size: (u16, u16),
+    ) -> Option<MonitorExit> {
+        if targets.size != size {
+            return None;
+        }
+        self.handle_mouse(mouse, state, targets)
+    }
+
+    pub(super) fn handle_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        state: &MonitorSnapshot,
+        targets: &MouseTargets,
+    ) -> Option<MonitorExit> {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left)
+            || self.show_help
+            || self.accounts.confirming()
+            || self.show_setup
+            || self.phase != MonitorPhase::Running
+        {
+            return None;
+        }
+        if let Some(code) = targets.key(mouse.column, mouse.row) {
+            return self.handle_key(
+                crossterm::event::KeyEvent::new(code, KeyModifiers::NONE),
+                state,
+            );
+        }
+        if self.usage_open {
+            return self
+                .accounts
+                .click(mouse.column, mouse.row)
+                .and_then(|code| {
+                    self.handle_key(
+                        crossterm::event::KeyEvent::new(code, KeyModifiers::NONE),
+                        state,
+                    )
+                });
+        }
+        match targets.hit(mouse.column, mouse.row) {
+            Some(MouseTarget::Session(index)) => {
+                if let Some(session) = state.sessions.get(index) {
+                    self.focus = FocusPane::Sessions;
+                    self.selected = index;
+                    self.detail = Some(DetailView::Session(DetailSelection::Pinned(
+                        session.session_id.clone(),
+                    )));
+                }
+            }
+            Some(MouseTarget::Request(index)) => {
+                if let Some(request) = state.recent.get(index) {
+                    self.focus = FocusPane::Recent;
+                    self.recent_selected = index;
+                    self.detail = Some(DetailView::Request(DetailSelection::Pinned(
+                        request.request_id.clone(),
+                    )));
+                }
+            }
+            None => {}
+        }
+        None
+    }
 }

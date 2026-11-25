@@ -539,6 +539,7 @@ mod tests {
             .build()
             .unwrap();
         let mut websocket = connect_with_timeout(
+            "",
             &client,
             &WebSocketProxyConfig::direct(),
             "ws://codex.invalid/backend-api/codex/responses",
@@ -693,6 +694,7 @@ mod tests {
             .unwrap();
         let proxy_config = WebSocketProxyConfig::new(None, Some(&proxy_url), None, None);
         let error = match connect_with_timeout(
+            "",
             &client,
             &proxy_config,
             "wss://codex.invalid:4443/backend-api/codex/responses",

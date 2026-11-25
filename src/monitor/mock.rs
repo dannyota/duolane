@@ -146,6 +146,11 @@ fn mock_state_for_tick(
     selected.provider = Some("codex".to_string());
     selected.model = Some("gpt-6-luna".to_string());
     selected.effort = Some("low".to_string());
+    selected.queue_place = Some(1);
+    let mut queued = selected.clone();
+    queued.request_id = "req-active-queued".to_string();
+    queued.session_seq = Some(10);
+    queued.queue_place = Some(2);
 
     let started = active_request(
         now,
@@ -178,7 +183,7 @@ fn mock_state_for_tick(
     byte_stream.stream_chunks = 128_u64.saturating_add(tick.saturating_mul(4));
     byte_stream.generation_duration = Some(Duration::from_millis(8_000 + (tick % 16) * 500));
 
-    let mut active = vec![streaming, upstream, selected, started, byte_stream];
+    let mut active = vec![streaming, upstream, selected, queued, started, byte_stream];
     let mut recent = VecDeque::new();
 
     let mut success = completed_request(
@@ -373,6 +378,15 @@ fn mock_state_for_tick(
     }
     let sessions = session_summaries(&active, &recent, &session_usage, output_buckets, now);
     MonitorState {
+        codex_connections: Some(super::snapshot::CodexConnections {
+            queued_attempts: 2,
+            handshakes_in_flight: 1,
+            handshake_spacing_ms: 1000,
+            websocket_reused: 41,
+            websocket_new: 12,
+            http_fallbacks: 3,
+            origin_403: 2,
+        }),
         codex_quota: Some(super::CodexQuotaSnapshot {
             observed_at: now,
             primary: Some(super::CodexQuotaWindow {

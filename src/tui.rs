@@ -10,10 +10,16 @@ mod mouse;
 #[cfg(test)]
 mod mouse_tests;
 mod overlay;
+#[cfg(test)]
+mod overview_tests;
+#[cfg(test)]
+mod phase_tests;
 mod profile_table;
+mod request_phases;
 mod requests;
 mod sessions;
 mod subscription;
+mod summary;
 mod usage_limits;
 mod usage_stats;
 
@@ -21,13 +27,12 @@ use cells::format_duration;
 #[cfg(test)]
 use chrome::render_header;
 use detail::{render_request_detail, render_session_detail};
-use mouse::{MouseTarget, MouseTargets, VisibleRows};
+use mouse::{MouseTargets, VisibleRows};
 use overlay::{
     render_help_overlay, render_setup_overlay, render_shutdown_confirmation,
     render_shutdown_overlay,
 };
-use requests::{render_active, render_events, render_recent};
-use sessions::render_sessions;
+use requests::{render_active_at, render_events, render_recent};
 
 use std::{
     io::{self, Stdout},
@@ -35,10 +40,11 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+use crossterm::event::MouseEvent;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -309,89 +315,6 @@ struct MonitorApp {
 }
 
 impl MonitorApp {
-    fn handle_mouse_query(
-        &mut self,
-        mouse: MouseEvent,
-        state: &MonitorSnapshot,
-        targets: &MouseTargets,
-        size: impl FnOnce() -> std::io::Result<(u16, u16)>,
-    ) -> Option<MonitorExit> {
-        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-            return None;
-        }
-        size()
-            .ok()
-            .and_then(|size| self.handle_mouse_sized(mouse, state, targets, size))
-    }
-
-    fn handle_mouse_sized(
-        &mut self,
-        mouse: MouseEvent,
-        state: &MonitorSnapshot,
-        targets: &MouseTargets,
-        size: (u16, u16),
-    ) -> Option<MonitorExit> {
-        if targets.size != size {
-            return None;
-        }
-        self.handle_mouse(mouse, state, targets)
-    }
-
-    fn handle_mouse(
-        &mut self,
-        mouse: MouseEvent,
-        state: &MonitorSnapshot,
-        targets: &MouseTargets,
-    ) -> Option<MonitorExit> {
-        if mouse.kind != MouseEventKind::Down(MouseButton::Left)
-            || self.show_help
-            || self.accounts.confirming()
-            || self.show_setup
-            || self.phase != MonitorPhase::Running
-        {
-            return None;
-        }
-        if let Some(code) = targets.key(mouse.column, mouse.row) {
-            return self.handle_key(
-                crossterm::event::KeyEvent::new(code, KeyModifiers::NONE),
-                state,
-            );
-        }
-        if self.usage_open {
-            return self
-                .accounts
-                .click(mouse.column, mouse.row)
-                .and_then(|code| {
-                    self.handle_key(
-                        crossterm::event::KeyEvent::new(code, KeyModifiers::NONE),
-                        state,
-                    )
-                });
-        }
-        match targets.hit(mouse.column, mouse.row) {
-            Some(MouseTarget::Session(index)) => {
-                if let Some(session) = state.sessions.get(index) {
-                    self.focus = FocusPane::Sessions;
-                    self.selected = index;
-                    self.detail = Some(DetailView::Session(DetailSelection::Pinned(
-                        session.session_id.clone(),
-                    )));
-                }
-            }
-            Some(MouseTarget::Request(index)) => {
-                if let Some(request) = state.recent.get(index) {
-                    self.focus = FocusPane::Recent;
-                    self.recent_selected = index;
-                    self.detail = Some(DetailView::Request(DetailSelection::Pinned(
-                        request.request_id.clone(),
-                    )));
-                }
-            }
-            None => {}
-        }
-        None
-    }
-
     fn is_attached(&self) -> bool {
         self.shutdown.is_none() && self.shutdown_complete.is_none()
     }
@@ -616,6 +539,15 @@ fn render_at(
         }
         return targets;
     }
+    let body = Rect::new(
+        area.x,
+        root[1].y,
+        area.width,
+        root[5].y.saturating_sub(root[1].y),
+    );
+    let parts = summary::layout(body, state, detail::height(app, state));
+    summary::render(frame, parts[0], terminal_state, &app.accounts, now, zone);
+    let root = [root[0], parts[1], parts[2], parts[3], parts[4], root[5]];
     let sessions = match &app.detail {
         Some(DetailView::Session(detail)) => {
             let index = detail.index(
@@ -633,16 +565,17 @@ fn render_at(
             render_request_detail(frame, root[1], terminal_state, index);
             VisibleRows::default()
         }
-        None => render_sessions(
+        None => sessions::render_sessions_with_queue(
             frame,
             root[1],
             &terminal_state.sessions,
+            &terminal_state.active,
             app.selected,
             app.focus == FocusPane::Sessions,
             terminal_state.snapshot_at,
         ),
     };
-    render_active(frame, root[2], &terminal_state.active, app.tick);
+    render_active_at(frame, root[2], &terminal_state.active, app.tick, now);
     let recent = render_recent(
         frame,
         root[3],
@@ -826,7 +759,7 @@ mod tests {
     fn request_tables_share_time_status_provider_model_rhythm() {
         assert_eq!(
             headers(&active_columns(LayoutTier::Medium))[..4],
-            ["Started", "Status", "Provider", "Model"]
+            ["Started", "Phase", "Provider", "Model"]
         );
         assert_eq!(
             headers(&recent_columns(LayoutTier::Medium))[..4],
@@ -922,7 +855,7 @@ mod tests {
                     .iter()
                     .filter(|column| column.header.is_empty())
                     .count(),
-                usize::from(matches!(tier, LayoutTier::Expanded | LayoutTier::Wide))
+                0
             );
             assert_eq!(
                 recent

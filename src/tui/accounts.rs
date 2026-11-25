@@ -2,8 +2,8 @@ mod controls;
 
 pub(super) struct Accounts {
     controls: controls::Controls,
-    local: bool,
-    limits: std::collections::BTreeMap<String, crate::claude_accounts::limits::Limits>,
+    pub(super) local: bool,
+    pub(super) limits: std::collections::BTreeMap<String, crate::claude_accounts::limits::Limits>,
     details: super::account_details::Details,
     refreshed: Option<std::time::Instant>,
     names: Vec<String>,

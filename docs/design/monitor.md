@@ -81,8 +81,12 @@ Events.
   the rest.
 - Sessions shows a Queue count after the active count. The row for requests
   without a session counts them too.
-- Below the expanded width each summary cell is one line without bars, and the
-  tables omit Queue, the timeline, Wait, First, and the bars.
+- Below the expanded width the summary cells stack, each one full-width line
+  without bars, and the tables omit Queue, the timeline, Wait, First, and the
+  bars. A one-line lane cell shows `active A queued Q` and the pooled rate,
+  without the profile name. A one-line Connections cell shows
+  `queue Q reuse R%`, and appends `fallback N` and `403 N` only when they are
+  not zero.
 
 A pooled rate is the output tokens counted during generation, summed over the
 requests that report both tokens and a generation time, divided by the sum of
@@ -107,13 +111,14 @@ phase for an active request from the status and the times below:
   socket is never queued.
 - A request shows `queued #n` whenever its current attempt is queued, including
   a retry after the first upstream event.
-- The first upstream event is recorded once for the request. A retry does not
-  move it, so the timeline counts the time a retry takes, with any second wait
-  in the queue, as `thinking`.
+- The first upstream event is recorded once for the request, where duolane
+  receives it, on every transport, whether or not its output is held. A retry
+  does not move it, so the timeline counts the time a retry takes, with any
+  second wait in the queue, as `thinking`.
 - The first output is the first content delivered to the client that has
-  meaning: a text or reasoning delta, or the start of a tool block. Framing
-  alone is not output, so an empty completion and a buffered response have no
-  first output.
+  meaning, on every endpoint: a non-empty text or reasoning delta, or the start
+  of a tool block. Framing alone is not output, so an empty completion and a
+  buffered response have no first output.
 - A status with no phase, such as compaction, shows as it does today.
 
 Active requests shows the phase and a timeline of one cell per second: wait

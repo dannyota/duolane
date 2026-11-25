@@ -6,11 +6,13 @@ use super::cells::{
     text_cell, token_value,
 };
 use super::layout::{
-    CODE_WIDTH, ColumnSpec, DURATION_WIDTH, EFFORT_WIDTH, ENDPOINT_WIDTH, ERROR_WIDTH, ID_WIDTH,
-    LayoutTier, MODEL_MEDIUM_WIDTH, MODEL_NARROW_WIDTH, MODEL_WIDE_WIDTH, PROJECT_MEDIUM_WIDTH,
-    PROJECT_WIDE_WIDTH, PROVIDER_WIDTH, RATE_WIDTH, STATUS_WIDTH, TIME_WIDTH, TOKEN_WIDTH,
+    CODE_WIDTH, ColumnSpec, ENDPOINT_WIDTH, ID_WIDTH, LayoutTier, MODEL_MEDIUM_WIDTH,
+    MODEL_NARROW_WIDTH, MODEL_WIDE_WIDTH, PROJECT_MEDIUM_WIDTH, PROJECT_WIDE_WIDTH, PROVIDER_WIDTH,
+    TIME_WIDTH,
 };
 use super::mouse::{VisibleRows, render_clickable_table};
+pub(super) use super::request_phases::{active_columns, recent_columns};
+use super::request_phases::{active_phase, active_timeline, recent_time, recent_timeline};
 use super::{PANEL_BG, SELECTED_BG};
 use crate::monitor::snapshot::{ActiveSnapshot, CompletedSnapshot};
 use ratatui::layout::{Alignment, Rect};
@@ -33,73 +35,25 @@ pub(super) enum ActiveColumn {
     Output,
     Rate,
     Elapsed,
-    Spacer,
+    Timeline,
 }
 
-pub(super) fn active_columns(tier: LayoutTier) -> Vec<ColumnSpec<ActiveColumn>> {
-    use ActiveColumn as C;
-    match tier {
-        LayoutTier::Wide => vec![
-            ColumnSpec::fixed(C::Started, "Started", Alignment::Left, TIME_WIDTH),
-            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
-            ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_WIDE_WIDTH),
-            ColumnSpec::fixed(C::Session, "Session", Alignment::Left, ID_WIDTH),
-            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
-            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, 5),
-            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
-            ColumnSpec::fixed(C::Endpoint, "Endpoint", Alignment::Left, 8),
-            ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
-            ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
-            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
-            ColumnSpec::fixed(C::Elapsed, "Elapsed", Alignment::Right, DURATION_WIDTH),
-            ColumnSpec::flex(C::Spacer, "", Alignment::Left, 1),
-        ],
-        LayoutTier::Expanded => vec![
-            ColumnSpec::fixed(C::Started, "Started", Alignment::Left, TIME_WIDTH),
-            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
-            ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_MEDIUM_WIDTH),
-            ColumnSpec::fixed(C::Session, "Session", Alignment::Left, ID_WIDTH),
-            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
-            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, 5),
-            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
-            ColumnSpec::fixed(C::Endpoint, "Endpoint", Alignment::Left, 8),
-            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
-            ColumnSpec::fixed(C::Elapsed, "Elapsed", Alignment::Right, DURATION_WIDTH),
-            ColumnSpec::flex(C::Spacer, "", Alignment::Left, 1),
-        ],
-        LayoutTier::Medium => vec![
-            ColumnSpec::fixed(C::Started, "Started", Alignment::Left, TIME_WIDTH),
-            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
-            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
-            ColumnSpec::flex(C::Model, "Model", Alignment::Left, 1),
-            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
-            ColumnSpec::fixed(C::Endpoint, "Endpoint", Alignment::Left, ENDPOINT_WIDTH),
-            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
-            ColumnSpec::fixed(C::Elapsed, "Elapsed", Alignment::Right, DURATION_WIDTH),
-        ],
-        LayoutTier::Narrow => vec![
-            ColumnSpec::fixed(C::Started, "Started", Alignment::Left, TIME_WIDTH),
-            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
-            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
-            ColumnSpec::flex(C::Model, "Model", Alignment::Left, 1),
-            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
-            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
-            ColumnSpec::fixed(C::Elapsed, "Elapsed", Alignment::Right, DURATION_WIDTH),
-        ],
-        LayoutTier::Emergency => vec![
-            ColumnSpec::fixed(C::Started, "Started", Alignment::Left, TIME_WIDTH),
-            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
-            ColumnSpec::flex(C::Target, "Target", Alignment::Left, 1),
-            ColumnSpec::fixed(C::Elapsed, "Elapsed", Alignment::Right, DURATION_WIDTH),
-        ],
-    }
-}
-
+#[cfg(test)]
 pub(super) fn render_active(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     active: &[ActiveSnapshot],
     tick: usize,
+) {
+    render_active_at(frame, area, active, tick, std::time::SystemTime::now());
+}
+
+pub(super) fn render_active_at(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    active: &[ActiveSnapshot],
+    tick: usize,
+    now: std::time::SystemTime,
 ) {
     if active.is_empty() {
         render_empty_table_state(frame, area, "Active requests", false, "No active requests");
@@ -116,7 +70,7 @@ pub(super) fn render_active(
             ActiveColumn::Endpoint,
             area,
             ENDPOINT_WIDTH,
-            0,
+            8,
             active.iter().map(|request| Some(request.endpoint.label())),
         );
         content_constraint(
@@ -125,7 +79,7 @@ pub(super) fn render_active(
             ActiveColumn::Model,
             area,
             MODEL_WIDE_WIDTH,
-            0,
+            8,
             active.iter().map(|request| request.model.as_deref()),
         );
     }
@@ -134,7 +88,7 @@ pub(super) fn render_active(
         widths,
         ActiveColumn::Project,
         area,
-        0,
+        tier.minimum_outer_width(),
         active.iter().map(|request| request.project.as_deref()),
     );
     let rows = active.iter().map(|request| {
@@ -151,7 +105,7 @@ pub(super) fn render_active(
                 match column.key {
                     ActiveColumn::Started => muted_cell(format_system_time(request.started_at)),
                     ActiveColumn::Status => Cell::from(Span::styled(
-                        status.clone(),
+                        active_phase(request).unwrap_or_else(|| status.clone()),
                         status_style(request.status.label()),
                     )),
                     ActiveColumn::Project => {
@@ -183,7 +137,7 @@ pub(super) fn render_active(
                     ActiveColumn::Output => number_cell(token_value(request.output_tokens)),
                     ActiveColumn::Rate => rate_cell(request.rate().label()),
                     ActiveColumn::Elapsed => number_cell(format_duration(request.elapsed())),
-                    ActiveColumn::Spacer => Cell::from(""),
+                    ActiveColumn::Timeline => active_timeline(request, now, width),
                 }
             })
             .collect::<Vec<_>>();
@@ -191,7 +145,14 @@ pub(super) fn render_active(
     });
     let table = Table::new(rows, widths.clone())
         .header(column_header(&columns))
-        .block(panel("Active requests", false));
+        .block(panel(
+            if matches!(tier, LayoutTier::Expanded | LayoutTier::Wide) {
+                "Active requests  ░ wait  ▒ thinking  █ streaming  ·  1 cell = 1s"
+            } else {
+                "Active requests"
+            },
+            false,
+        ));
     frame.render_widget(table, area);
 }
 
@@ -207,78 +168,15 @@ pub(super) enum RecentColumn {
     Effort,
     Endpoint,
     Latency,
+    Wait,
+    First,
+    Timeline,
     Rate,
     Input,
     Output,
     Details,
     Error,
     Spacer,
-}
-
-pub(super) fn recent_columns(tier: LayoutTier) -> Vec<ColumnSpec<RecentColumn>> {
-    use RecentColumn as C;
-    match tier {
-        LayoutTier::Wide => vec![
-            ColumnSpec::fixed(C::Finished, "Finished", Alignment::Left, TIME_WIDTH),
-            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
-            ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_WIDE_WIDTH),
-            ColumnSpec::fixed(C::Session, "Session", Alignment::Left, ID_WIDTH),
-            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
-            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, 5),
-            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
-            ColumnSpec::fixed(C::Endpoint, "Endpoint", Alignment::Left, ENDPOINT_WIDTH),
-            ColumnSpec::fixed(C::Latency, "Latency", Alignment::Right, DURATION_WIDTH),
-            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
-            ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
-            ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
-            ColumnSpec::flex(C::Details, "Details", Alignment::Left, 1),
-        ],
-        LayoutTier::Expanded => vec![
-            ColumnSpec::fixed(C::Finished, "Finished", Alignment::Left, TIME_WIDTH),
-            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
-            ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_MEDIUM_WIDTH),
-            ColumnSpec::fixed(C::Session, "Session", Alignment::Left, ID_WIDTH),
-            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
-            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, 5),
-            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
-            ColumnSpec::fixed(C::Latency, "Latency", Alignment::Right, DURATION_WIDTH),
-            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
-            ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
-            ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
-            ColumnSpec::fixed(C::Error, "!", Alignment::Right, ERROR_WIDTH),
-            ColumnSpec::flex(C::Spacer, "", Alignment::Left, 1),
-        ],
-        LayoutTier::Medium => vec![
-            ColumnSpec::fixed(C::Finished, "Finished", Alignment::Left, TIME_WIDTH),
-            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
-            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
-            ColumnSpec::flex(C::Model, "Model", Alignment::Left, 1),
-            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
-            ColumnSpec::fixed(C::Latency, "Latency", Alignment::Right, DURATION_WIDTH),
-            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
-            ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
-            ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
-            ColumnSpec::fixed(C::Error, "!", Alignment::Right, ERROR_WIDTH),
-        ],
-        LayoutTier::Narrow => vec![
-            ColumnSpec::fixed(C::Finished, "Finished", Alignment::Left, TIME_WIDTH),
-            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
-            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
-            ColumnSpec::flex(C::Model, "Model", Alignment::Left, 1),
-            ColumnSpec::fixed(C::Latency, "Latency", Alignment::Right, DURATION_WIDTH),
-            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
-            ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
-            ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
-            ColumnSpec::fixed(C::Error, "!", Alignment::Right, ERROR_WIDTH),
-        ],
-        LayoutTier::Emergency => vec![
-            ColumnSpec::fixed(C::Finished, "Finished", Alignment::Left, TIME_WIDTH),
-            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
-            ColumnSpec::flex(C::Target, "Target", Alignment::Left, 1),
-            ColumnSpec::fixed(C::Latency, "Latency", Alignment::Right, DURATION_WIDTH),
-            ColumnSpec::fixed(C::Error, "!", Alignment::Right, ERROR_WIDTH),
-        ],
-    }
 }
 
 pub(super) fn render_recent(
@@ -364,6 +262,11 @@ pub(super) fn render_recent(
                     RecentColumn::Effort => text_cell(request.effort.as_deref().unwrap_or("-")),
                     RecentColumn::Endpoint => muted_cell(request.endpoint.label()),
                     RecentColumn::Latency => number_cell(format_duration(request.latency)),
+                    RecentColumn::Wait => {
+                        recent_time(request.started_at, request.first_upstream_event_at)
+                    }
+                    RecentColumn::First => recent_time(request.started_at, request.first_output_at),
+                    RecentColumn::Timeline => recent_timeline(request, width),
                     RecentColumn::Rate => rate_cell(request.rate().label()),
                     RecentColumn::Input => number_cell(token_value(request.input_tokens)),
                     RecentColumn::Output => number_cell(token_value(request.output_tokens)),
@@ -444,6 +347,19 @@ pub(super) fn event_columns(tier: LayoutTier) -> Vec<ColumnSpec<EventColumn>> {
     }
 }
 
+pub(super) fn event_count(recent: &[CompletedSnapshot]) -> usize {
+    recent
+        .iter()
+        .filter(|r| {
+            !r.retry_requested
+                && (r.status == crate::monitor::RequestStatus::Failed
+                    || r.http_status.is_some_and(|s| s >= 400)
+                    || r.error.is_some())
+        })
+        .take(12)
+        .count()
+}
+
 pub(super) fn render_events(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -469,6 +385,15 @@ pub(super) fn render_events(
         })
         .take(12)
         .collect::<Vec<_>>();
+    if events.is_empty() && area.height == 1 {
+        let line = if retry_count > 0 {
+            format!("Events 0  none  Retry requested: {retry_count}")
+        } else {
+            "Events 0  none".to_owned()
+        };
+        frame.render_widget(ratatui::widgets::Paragraph::new(line), area);
+        return VisibleRows::default();
+    }
     if events.is_empty() {
         render_empty_table_state(frame, area, &title, false, "No events");
         return VisibleRows::default();
@@ -563,10 +488,10 @@ mod tests {
             22
         );
         assert_eq!(
-            header.find("Latency").unwrap() - header.find("Endpoint").unwrap(),
-            10
+            header.find("Wait").unwrap() - header.find("Endpoint").unwrap(),
+            13
         );
-        assert!(text.contains(&"d".repeat(35)));
+        assert!(text.contains(&"d".repeat(8)));
     }
 
     #[test]
@@ -576,7 +501,7 @@ mod tests {
         monitor.project_resolved("request-1", "project-name-20-char");
         monitor.provider_selected("request-1", "codex", "short", None);
         let state: MonitorSnapshot = monitor.snapshot().into();
-        let text = buffer_text(&draw(154, 8, |frame| {
+        let text = buffer_text(&draw(180, 8, |frame| {
             render_active(frame, frame.area(), &state.active, 0)
         }));
         assert!(text.contains("project-name-20-char"));
@@ -686,7 +611,7 @@ mod tests {
         });
 
         let active_text = buffer_text(&active);
-        assert!(active_text.contains("⠋ upstream"), "{active_text}");
+        assert!(active_text.contains("connecting"), "{active_text}");
     }
 
     #[test]

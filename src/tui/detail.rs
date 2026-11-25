@@ -9,6 +9,27 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+pub(super) fn height(app: &super::MonitorApp, state: &MonitorSnapshot) -> u16 {
+    match &app.detail {
+        Some(super::DetailView::Session(_)) => 15,
+        Some(super::DetailView::Request(detail)) => {
+            let index = detail.index(
+                app.recent_selected,
+                state.recent.iter().map(|request| &request.request_id),
+            );
+            state.recent.get(index).map_or(3, |request| {
+                19 + u16::from(
+                    request
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| !error.is_empty()),
+                ) + u16::from(request.traffic_capture_path.is_some())
+            })
+        }
+        None => 0,
+    }
+}
+
 pub(super) fn render_session_detail(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -132,6 +153,11 @@ pub(super) fn render_request_detail(
                 DIM_WHITE,
             ),
         ];
+        if let Some(error) = request.error.as_deref().filter(|error| !error.is_empty()) {
+            let status = lines.remove(7);
+            lines.insert(1, status);
+            lines.insert(2, detail_line("detail", error, YELLOW));
+        }
         let provider = request.provider.as_deref().unwrap_or("-");
         if let Some(source) = &request.codex_source {
             lines.insert(
@@ -140,9 +166,6 @@ pub(super) fn render_request_detail(
             );
         } else {
             lines.insert(8, detail_line("provider", provider, TEAL));
-        }
-        if let Some(error) = request.error.as_deref().filter(|error| !error.is_empty()) {
-            lines.push(detail_line("detail", error, YELLOW));
         }
         if let Some(path) = &request.traffic_capture_path {
             lines.push(detail_line(

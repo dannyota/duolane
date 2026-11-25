@@ -52,6 +52,7 @@ impl CodexHttpClient {
         let mut active_continuation = continuation.cloned();
         let mut auth_refresh_attempted = false;
         let mut transport_failures = 0u32;
+        let mut missing_continuation_socket = false;
         loop {
             if transport == CodexTransport::Http {
                 ctx.recovery_budget.begin_http_attempt();
@@ -102,22 +103,18 @@ impl CodexHttpClient {
                     .await
                 }
                 CodexTransport::Auto
-                    if !http_body
-                        .websocket_sent
-                        .load(std::sync::atomic::Ordering::Acquire)
-                        && (http_body
-                            .size_http_selected
-                            .load(std::sync::atomic::Ordering::Acquire)
-                            || self
-                                .auto_large_full_context(
-                                    body,
-                                    ctx,
-                                    active_continuation.as_ref(),
-                                    http_body,
-                                )
-                                .await?) =>
+                    if !sent_before_attempt
+                        && self
+                            .auto_size_http_selected(
+                                body,
+                                ctx,
+                                active_continuation.as_ref(),
+                                http_body,
+                            )
+                            .await? =>
                 {
                     actual_http = true;
+                    super::client_body::record_size_fallback(&mut missing_continuation_socket);
                     ctx.recovery_budget.begin_http_attempt();
                     http_body
                         .size_http_selected
@@ -181,6 +178,8 @@ impl CodexHttpClient {
                             if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
                                 return Err(CodexError::recovery_exhausted());
                             }
+                            super::websocket_pool::HTTP_FALLBACK_COUNT
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             actual_http = true;
                             ctx.recovery_budget.begin_http_attempt();
                             let http_body = http_body.get_or_try_init(prepare_http_body).await?;
@@ -546,6 +545,8 @@ impl CodexHttpClient {
                     if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
                         return Err(CodexError::recovery_exhausted());
                     }
+                    missing_continuation_socket = err.detail.as_deref()
+                        == Some(super::websocket::WEBSOCKET_CONTINUATION_SOCKET_MISSING_DETAIL);
                     active_continuation = full_context_continuation(active_continuation.as_ref());
                     continue;
                 }
@@ -2719,7 +2720,15 @@ mod tests {
             stream.write_all(body).await.unwrap();
         });
         let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
-        let ctx = http_test_context();
+        let mut ctx = http_test_context();
+        let monitor = crate::monitor::MonitorHandle::default();
+        monitor.request_started(
+            &ctx.req_id,
+            None,
+            None,
+            crate::monitor::EndpointKind::Messages,
+        );
+        ctx.monitor = Some(monitor.clone());
         let first_candidate = super::super::continuation::continuation_candidate_for_owner(
             Some(&owner),
             &first,
@@ -2735,6 +2744,11 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(
+            monitor.snapshot().active[0]
+                .first_upstream_event_at
+                .is_some()
+        );
         super::super::update_continuation_from_upstream(
             None,
             &first_candidate,
@@ -2760,6 +2774,7 @@ mod tests {
         super::super::websocket::invalidate_codex_websocket_pool_owner(&owner);
         client.request_compression = crate::config::CodexRequestCompression::Gzip;
         client.auto_ws_max_bytes = 1;
+        let before = super::super::websocket::codex_connection_counters().http_fallbacks;
         let response = client
             .post_codex_with_transport(
                 &request,
@@ -2771,6 +2786,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.transport, ActualTransport::Http);
+        assert_eq!(
+            super::super::websocket::codex_connection_counters().http_fallbacks,
+            before + 1
+        );
         super::super::update_continuation_from_upstream(
             None,
             &continuation,

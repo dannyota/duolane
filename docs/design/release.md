@@ -1,10 +1,45 @@
 # Release publishing
 
-The tag-triggered Release workflow tests `duolane`, builds archives for macOS on
-Apple silicon, Linux on x86-64 and Arm64, and Windows on x86-64, and uploads
+The tag-triggered Release workflow checks `duolane`, builds archives for macOS
+on Apple silicon, Linux on x86-64 and Arm64, and Windows on x86-64, and uploads
 each archive with its checksum. Other platforms build from source with Cargo.
 Publishing to crates.io is a separate owner decision because an uploaded version
 cannot be replaced.
+
+## Checked commits
+
+The Release workflow reuses the tests that CI already passed on the tagged
+commit, so a release does not wait for the same tests a third time.
+
+CI still runs every job for a push to `master`. That run blocks nothing, because
+the pull request already merged, and proving that a pull request run tested
+exactly the merged tree needs more history than GitHub records reliably.
+
+### Proof at the tag
+
+The tests of the Release workflow are skipped only when all of these hold:
+
+- A completed, successful CI run for a `push` event exists in this repository at
+  the commit the Release workflow checked out. A push run checks out the pushed
+  commit with the workflow file of that commit, so it tested that tree whatever
+  its ref.
+- In the latest attempt of that run, the job `rust` completed with success.
+- The commit is `master` or an ancestor of it, with `master` resolved from
+  `refs/heads/master` just before the proof is accepted.
+
+The workflow waits up to five minutes for a matching run that is still in
+progress. Without the proof it runs the tests itself, as before.
+
+The dependency policy always runs at the tag, because an advisory can appear
+after the pull request. The builds start only after the dependency policy passed
+and either the proof was found or the tests passed.
+
+### Lookups
+
+The job that looks for proof never fails the run: each of its steps continues on
+error, and a missing or unexpected answer means no proof. It reads GitHub's API
+with a read-only token, writes nothing, and passes no text from a pull request
+or ref into a shell command.
 
 ## Approaches
 
