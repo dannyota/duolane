@@ -1,4 +1,5 @@
 import copy
+import re
 import importlib.util
 import sys
 from pathlib import Path
@@ -16,20 +17,20 @@ MASTER = "b" * 40
 RUN = {"id": 10, "run_attempt": 2, "status": "completed", "conclusion": "success", "head_sha": SHA, "event": "push", "repository": {"full_name": REPO}}
 JOB = {"name": "rust", "status": "completed", "conclusion": "success", "run_id": 10, "run_attempt": 2}
 REF = {"ref": "refs/heads/master", "object": {"type": "commit", "sha": MASTER}}
-COMPARE = {"status": "ahead"}
+COMPARE = {"status": "ahead", "behind_by": 0, "merge_base_commit": {"sha": SHA}}
 
 
 class ProofTests(unittest.TestCase):
     def test_release_proof(self):
         self.assertTrue(m.release_proof(REPO, SHA, RUN, {"jobs": [JOB]}, REF, COMPARE))
-        self.assertTrue(m.release_proof(REPO, SHA, RUN, {"jobs": [JOB]}, REF, {"status": "identical"}))
-        for jobs in ({"jobs": [JOB, JOB]}, {"jobs": []}, {"jobs": [dict(JOB, run_attempt=1)]}, {"jobs": [dict(JOB, run_id=11)]}, {"jobs": [dict(JOB, conclusion="failure")]}, {"jobs": [dict(JOB, status="in_progress")]}, {}, None, {"jobs": [None]}):
+        self.assertTrue(m.release_proof(REPO, SHA, RUN, {"jobs": [JOB]}, REF, dict(COMPARE, status="identical")))
+        for jobs in ({"jobs": [JOB, JOB]}, {"jobs": [JOB], "total_count": 2}, {"jobs": []}, {"jobs": [dict(JOB, run_attempt=1)]}, {"jobs": [dict(JOB, run_id=11)]}, {"jobs": [dict(JOB, conclusion="failure")]}, {"jobs": [dict(JOB, status="in_progress")]}, {}, None, {"jobs": [None]}):
             self.assertFalse(m.release_proof(REPO, SHA, RUN, jobs, REF, COMPARE))
         for run in (dict(RUN, event="pull_request"), dict(RUN, conclusion="cancelled"), dict(RUN, run_attempt=None), {}, None):
             self.assertFalse(m.release_proof(REPO, SHA, run, {"jobs": [JOB]}, REF, COMPARE))
         for ref in (dict(REF, object={"type": "tag", "sha": MASTER}), {}, None):
             self.assertFalse(m.release_proof(REPO, SHA, RUN, {"jobs": [JOB]}, ref, COMPARE))
-        for compare in ({"status": "behind"}, {"status": "diverged"}, {}, None):
+        for compare in ({"status": "behind"}, {"status": "diverged"}, dict(COMPARE, behind_by=1), dict(COMPARE, merge_base_commit={"sha": MASTER}), {}, None):
             self.assertFalse(m.release_proof(REPO, SHA, RUN, {"jobs": [JOB]}, REF, compare))
 
     def test_poll(self):
@@ -70,43 +71,81 @@ class ProofTests(unittest.TestCase):
         self.assertFalse(m.check_release(REPO, SHA, fetch_runs, fetch_jobs, lambda: None, fetch_compare))
         self.assertFalse(m.check_release(REPO, SHA, fetch_runs, fetch_jobs, fetch_ref, lambda sha: None))
 
+    def test_deadline_between_calls(self):
+        clock = [0]
+        def runs():
+            clock[0] = 11
+            return {"workflow_runs": [RUN]}
+        with patch.object(m.time, "monotonic", lambda: clock[0]):
+            self.assertFalse(m.check_release(REPO, SHA, runs, lambda run: {"jobs": [JOB]}, lambda: REF, lambda sha: COMPARE, deadline=10))
+
     def test_pages(self):
-        with patch.object(m, "command", return_value='[{"jobs":[]},{"jobs":[]}]'):
-            self.assertEqual(m.pages("jobs", "jobs"), [])
-        for malformed in ("null", "[]", '[{"jobs":[]},{}]', "not json"):
+        with patch.object(m, "command", return_value='{"total_count":0,"jobs":[]}'):
+            self.assertEqual(m.pages("jobs?per_page=100", "jobs"), [])
+        for malformed in ("null", "[]", '{}', '{"total_count":2,"jobs":[{}]}', "not json"):
             with patch.object(m, "command", return_value=malformed):
                 with self.assertRaises((ValueError, KeyError, TypeError)):
-                    m.pages("jobs", "jobs")
+                    m.pages("jobs?per_page=100", "jobs")
+        clock = [0]
+        def first_page(*args, **kwargs):
+            clock[0] = 11
+            return m.subprocess.CompletedProcess(args, 0, stdout=b'{"jobs":[' + b'{},' * 99 + b'{}]}')
+        with patch.object(m.time, "monotonic", lambda: clock[0]), patch.object(m.subprocess, "run", side_effect=first_page) as run:
+            with self.assertRaises(TimeoutError):
+                m.pages("jobs?per_page=100", "jobs", deadline=10)
+            self.assertEqual(run.call_count, 1)
 
     def test_workflow_structure(self):
-        import yaml
-        workflows = {}
-        for name in ("ci.yml", "release.yml"):
-            with (Path(__file__).parents[2] / ".github" / "workflows" / name).open() as f:
-                workflows[name] = yaml.safe_load(f)
-                self.assertIsInstance(workflows[name], dict)
-        for workflow in workflows.values():
-            for name, job in workflow["jobs"].items():
-                if name != "ci":
-                    self.assertNotIn("always()", job.get("if", ""), name)
-        jobs = workflows["release.yml"]["jobs"]
-        self.assertTrue(jobs["tested"]["steps"])
-        self.assertTrue(all(step.get("continue-on-error") is True for step in jobs["tested"]["steps"]))
-        def needs(job):
-            value = job.get("needs", [])
-            return [value] if isinstance(value, str) else value
-        def ancestors(name, seen):
-            for dependency in needs(jobs[name]):
-                if dependency not in seen:
-                    seen.add(dependency)
-                    ancestors(dependency, seen)
-            return seen
-        for name, job in jobs.items():
-            if any("if" in jobs[ancestor] for ancestor in ancestors(name, set())):
-                condition = job.get("if", "")
-                self.assertIn("!cancelled()", condition, name)
-                for dependency in needs(job):
-                    self.assertIn(f"needs.{dependency}.result", condition, name)
+        root = Path(__file__).parents[2] / ".github" / "workflows"
+        def jobs(name):
+            text = (root / name).read_text()
+            lines = text.splitlines()
+            start = next(i for i, line in enumerate(lines) if line.strip() == "jobs:")
+            section = lines[start + 1:]
+            headers = [(i, len(match.group(1)), match.group(2)) for i, line in enumerate(section)
+                       if (match := re.fullmatch(r"(\s+)([\w-]+):\s*", line))]
+            indent = min(depth for _, depth, _ in headers)
+            headers = [(i, name) for i, depth, name in headers if depth == indent]
+            return {name: "\n".join(section[index + 1:headers[n + 1][0] if n + 1 < len(headers) else len(section)])
+                    for n, (index, name) in enumerate(headers)}
+        ci = jobs("ci.yml")
+        for name, block in ci.items():
+            if name != "ci":
+                self.assertNotIn("always()", block, name)
+        release = jobs("release.yml")
+        for name in ("checks", "build", "smoke-windows", "release"):
+            block = release[name]
+            needs = re.search(r"(?m)^(\s+)needs:\s*(.+)$", block)
+            self.assertIsNotNone(needs, name)
+            condition = re.search(r"(?m)^" + re.escape(needs.group(1)) + r"if:\s*(.+)$", block)
+            self.assertIsNotNone(condition, name)
+            self.assertIn("!cancelled()", condition.group(1), name)
+            for dependency in re.findall(r"[\w-]+", needs.group(2)):
+                self.assertIn(f"needs.{dependency}.result", condition.group(1), name)
+        block = release["tested"]
+        steps = list(re.finditer(r"(?m)^(\s*)- (?:uses|id):\s*(\S+)", block))
+        self.assertEqual(len(steps), 2)
+        for index, step in enumerate(steps):
+            body = block[step.start():steps[index + 1].start() if index + 1 < len(steps) else len(block)]
+            self.assertRegex(body, r"(?m)^\s*continue-on-error:\s*true\s*$")
+            if step.group(2) == "proof":
+                self.assertRegex(body, r"(?m)^\s*timeout-minutes:\s*\d+\s*$")
+        self.assertEqual(steps[1].group(2), "proof")
+
+    def test_structure_rejects_missing_lines(self):
+        root = Path(__file__).parents[2] / ".github" / "workflows"
+        ci = (root / "ci.yml").read_text()
+        release = (root / "release.yml").read_text()
+        lines = release.splitlines(keepends=True)
+        targets = [i for i, line in enumerate(lines) if line.lstrip().startswith("if: ${{ !cancelled() && needs.") or "needs.tested.result != 'success'" in line or line.strip() == "continue-on-error: true" or line.strip() == "timeout-minutes: 6"]
+        self.assertEqual(len(targets), 7)
+        for index in targets:
+            changed = "".join(lines[:index] + lines[index + 1:])
+            def read(path, *args, **kwargs):
+                return ci if path.name == "ci.yml" else changed
+            with self.subTest(line=lines[index]), patch.object(Path, "read_text", autospec=True, side_effect=read):
+                with self.assertRaises(AssertionError):
+                    self.test_workflow_structure()
 
 
 if __name__ == "__main__":

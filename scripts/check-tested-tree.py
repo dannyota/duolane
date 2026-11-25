@@ -27,6 +27,8 @@ def successful_rust(run, jobs):
     if not isinstance(jobs, dict) or not isinstance(jobs.get("jobs"), list):
         return False
     entries = jobs["jobs"]
+    if "total_count" in jobs and (type(jobs["total_count"]) is not int or jobs["total_count"] != len(entries)):
+        return False
     if any(not isinstance(job, dict) or not isinstance(job.get("name"), str) for job in entries):
         return False
     rust = [job for job in entries if job.get("name") == "rust"]
@@ -45,16 +47,26 @@ def master_sha(ref):
         return None
 
 
+def valid_compare(sha, compare):
+    try:
+        return (isinstance(compare, dict) and compare.get("status") in ("ahead", "identical")
+                and type(compare.get("behind_by")) is int and compare["behind_by"] == 0
+                and compare["merge_base_commit"]["sha"] == sha)
+    except (KeyError, TypeError):
+        return False
+
+
 def release_proof(repo, sha, run, jobs, ref, compare):
     return (matching_run(repo, sha, run) and run.get("status") == "completed"
             and run.get("conclusion") == "success" and successful_rust(run, jobs)
-            and master_sha(ref) is not None and isinstance(compare, dict)
-            and compare.get("status") in ("ahead", "identical"))
+            and master_sha(ref) is not None and valid_compare(sha, compare))
 
 
-def wait_for_release(repo, sha, fetch_runs, fetch_jobs, clock=time.monotonic, sleep=time.sleep):
-    deadline = clock() + 300
+def wait_for_release(repo, sha, fetch_runs, fetch_jobs, clock=time.monotonic, sleep=time.sleep, deadline=None):
+    deadline = min(clock() + 300, deadline if deadline is not None else float("inf"))
     while True:
+        if clock() >= deadline:
+            return False
         response = fetch_runs()
         if not isinstance(response, dict) or not isinstance(response.get("workflow_runs"), list):
             return False
@@ -62,9 +74,11 @@ def wait_for_release(repo, sha, fetch_runs, fetch_jobs, clock=time.monotonic, sl
         if any(not isinstance(run, dict) for run in runs):
             return False
         for run in runs:
+            if clock() >= deadline:
+                return False
             if (matching_run(repo, sha, run) and run.get("status") == "completed"
                     and run.get("conclusion") == "success" and successful_rust(run, fetch_jobs(run))):
-                return True
+                return clock() < deadline
         pending = any(matching_run(repo, sha, run) and run.get("status") in ("queued", "in_progress") for run in runs)
         remaining = deadline - clock()
         if not pending or remaining <= 0:
@@ -72,37 +86,60 @@ def wait_for_release(repo, sha, fetch_runs, fetch_jobs, clock=time.monotonic, sl
         sleep(min(15, remaining))
 
 
-def check_release(repo, sha, fetch_runs, fetch_jobs, fetch_ref, fetch_compare):
+def check_release(repo, sha, fetch_runs, fetch_jobs, fetch_ref, fetch_compare, deadline=None):
+    clock = time.monotonic
+    if deadline is None:
+        deadline = clock() + 300
+    def call(fetch, *args):
+        if clock() >= deadline:
+            raise TimeoutError("proof deadline reached")
+        result = fetch(*args)
+        if clock() >= deadline:
+            raise TimeoutError("proof deadline reached")
+        return result
     try:
-        if not wait_for_release(repo, sha, fetch_runs, fetch_jobs):
+        if not wait_for_release(repo, sha, lambda: call(fetch_runs), lambda run: call(fetch_jobs, run), clock=clock, deadline=deadline):
             return False
-        master = master_sha(fetch_ref())
+        master = master_sha(call(fetch_ref))
         if not master:
             return False
-        compare = fetch_compare(master)
-        return isinstance(compare, dict) and compare.get("status") in ("ahead", "identical")
+        return valid_compare(sha, call(fetch_compare, master))
     except (KeyError, ValueError, TypeError, OSError, subprocess.SubprocessError):
         return False
 
 
-def command(args):
-    return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30).stdout.decode("utf-8")
+def command(args, deadline=None):
+    remaining = 30 if deadline is None else min(30, deadline - time.monotonic())
+    if remaining <= 0:
+        raise TimeoutError("proof deadline reached")
+    return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=remaining).stdout.decode("utf-8")
 
 
-def api(path):
-    return json.loads(command(["gh", "api", path]))
+def api(path, deadline=None):
+    return json.loads(command(["gh", "api", path], deadline))
 
 
-def pages(path, key):
-    result = json.loads(command(["gh", "api", "--paginate", "--slurp", path]))
-    if not isinstance(result, list) or not result:
-        raise ValueError("invalid pages")
+def pages(path, key, deadline=None):
     items = []
-    for page in result:
+    totals = []
+    page_number = 1
+    while True:
+        separator = "&" if "?" in path else "?"
+        page = api(f"{path}{separator}page={page_number}", deadline)
         entries = page[key]
-        if not isinstance(entries, list):
+        if not isinstance(entries, list) or len(entries) > 100:
             raise ValueError("invalid page")
+        if key == "jobs" and "total_count" in page:
+            total = page["total_count"]
+            if type(total) is not int or total < 0:
+                raise ValueError("invalid total count")
+            totals.append(total)
         items.extend(entries)
+        if len(entries) < 100:
+            break
+        page_number += 1
+    if totals and any(total != len(items) for total in totals):
+        raise ValueError("incomplete job pages")
     return items
 
 
@@ -117,12 +154,14 @@ def main():
             raise ValueError("invalid repository or SHA")
         root = f"repos/{repo}"
         runs_path = f"{root}/actions/workflows/ci.yml/runs?head_sha={sha}&event=push&per_page=100"
+        deadline = time.monotonic() + 300
         answer = check_release(
             repo, sha,
-            lambda: {"workflow_runs": pages(runs_path, "workflow_runs")},
-            lambda run: {"jobs": pages(f"{root}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100", "jobs")},
-            lambda: api(f"{root}/git/ref/heads/master"),
-            lambda master: api(f"{root}/compare/{sha}...{master}"),
+            lambda: {"workflow_runs": pages(runs_path, "workflow_runs", deadline)},
+            lambda run: {"jobs": pages(f"{root}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100", "jobs", deadline)},
+            lambda: api(f"{root}/git/ref/heads/master", deadline),
+            lambda master: api(f"{root}/compare/{sha}...{master}", deadline),
+            deadline=deadline,
         )
     except (KeyError, ValueError, TypeError, OSError, subprocess.SubprocessError):
         pass
