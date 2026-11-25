@@ -11,7 +11,24 @@ env:
   BIN_NAME: duolane
 
 jobs:
-  checks:
+  tested:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      tested: ${{ steps.proof.outputs.tested }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/check-tested-tree.py release
+
+  deny:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -32,6 +49,22 @@ jobs:
           fallback: none
       - name: Dependency policy
         run: cargo deny --locked check
+
+  checks:
+    needs: tested
+    if: ${{ !cancelled() && (needs.tested.result != 'success' || needs.tested.outputs.tested != 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: |
+          version="$(tr -d '\r' < rust-toolchain.toml | sed -n 's/^channel = "\(.*\)"$/\1/p')"
+          test -n "$version"
+          rustup toolchain install "$version" --profile minimal --component rustfmt,clippy
+          test "$(rustc --version | cut -d ' ' -f 2)" = "$version"
       - name: Read the cargo-nextest pin
         run: echo "CARGO_NEXTEST=$(tr -d '\r' < .tool-versions | awk '$1 == "cargo-nextest" { print $2 }')" >> "$GITHUB_ENV"
       - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
@@ -42,7 +75,8 @@ jobs:
         run: cargo nextest run --locked
 
   build:
-    needs: checks
+    needs: [tested, deny, checks]
+    if: ${{ !cancelled() && needs.deny.result == 'success' && ((needs.tested.result == 'success' && needs.tested.outputs.tested == 'true') || needs.checks.result == 'success') }}
     strategy:
       fail-fast: false
       matrix:
@@ -133,6 +167,7 @@ jobs:
 
   smoke-windows:
     needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -146,6 +181,7 @@ jobs:
 
   release:
     needs: [build, smoke-windows]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.smoke-windows.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
