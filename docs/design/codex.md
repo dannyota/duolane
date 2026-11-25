@@ -86,6 +86,58 @@ owner, with `:0` appended to the window id. Agent ids are not sent upstream.
 - The `session-id` header matches the one the official Codex client sends.
 - WebSocket requests omit the `stream` field.
 
+## Base instructions
+
+The official Codex client adds its model's base instructions, when they are not
+empty, to the start of a request's input as a developer message, and sends no
+`instructions` field, as
+[`build_responses_request`](https://github.com/openai/codex/blob/main/codex-rs/core/src/client.rs)
+shows. On the Lite lane a tools item comes first. The text is the
+`model_messages.instructions_template` of the model's [catalog](#model-catalog)
+entry, unchanged. duolane sends the same text in the same place, before Claude
+Code's system prompt.
+
+- The template goes only into a `/v1/messages` request that the ChatGPT source
+  sends on the Lite lane, that is not a
+  [compaction request](#compaction-requests), and that gives the model a tool it
+  may call: a tool in the tools item or loaded later in the history, with a
+  `tool_choice` other than `none`. A deferred placeholder is not a tool.
+- The input then reads: the tools item when there is one, the template, the
+  client's system prompt when there is one, and the history unchanged. Each of
+  the two texts is its own developer message.
+- Every other request is unchanged: one without a callable tool, such as a title
+  or a classifier, a compaction request and native server compaction, the full
+  lane, hosted search, native Responses, Chat Completions, and any attempt with
+  an OpenAI API key.
+- The template is sent as the catalog gives it. duolane does not edit it and
+  does not log it directly. It is part of the request, so an opt-in traffic
+  capture records it, continuation keeps it in memory with the rest of the
+  translated input, and an upstream error that quotes it follows the normal
+  diagnostics.
+- The template is chosen once for a request and reused across its retries. When
+  the catalog changes the template, continuation sees a different transcript and
+  sends full context.
+- The catalog keeps its [parsing rules](#model-catalog). A template that is
+  missing, empty, not a string, or larger than the [limit](security.md#limits)
+  is skipped without rejecting its entry, and the request goes out as it does
+  today.
+- The setting is on by default. `codex.baseInstructions` is a JSON boolean, and
+  `DUOLANE_CODEX_BASE_INSTRUCTIONS` overrides it with `1`, `true`, `yes`, or
+  `on`, and `0`, `false`, `no`, or `off`. Any other value falls through to the
+  configuration.
+- [Token counting](#token-counting) adds the template once when ChatGPT is the
+  first source in the [order](openai-api-key.md#order) and the request would
+  carry it there. It does not predict a move to another source.
+
+The template has the authority of a developer message, and it comes from the
+catalog file that the Codex CLI writes. The owner trusts the writer of that file
+to supply developer instructions.
+
+The template names the model Codex and mentions tools that Claude Code does not
+offer. The order above is what goes on the wire. No source says how a model
+weighs the two texts, so the [unverified behavior](#unverified-behavior) lists
+the effect.
+
 ## Continuation
 
 When `DUOLANE_CODEX_PREVIOUS_RESPONSE_ID` is on and a WebSocket request extends
@@ -258,6 +310,9 @@ first-party source confirms them, so recheck them during live verification.
   response headers after first output, `usage_limit_reached` and its headers,
   and `codex.rate_limits` with remaining credits.
 - Whether the live Codex endpoints accept gzip request bodies.
+- Whether the [base instructions](#base-instructions) make a model finish a
+  delegated task that it otherwise ends early, and whether they change how it
+  uses Claude Code's tools.
 - Claude Code: the compaction markers, `DeferredToolPlaceholder`, repeating a
   `thinking_tokens`, the subagent counter, the `anthropic-ratelimit-unified-*`
   headers it reads, and sleeping for the full `Retry-After` value.

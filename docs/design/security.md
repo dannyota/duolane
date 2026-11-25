@@ -140,6 +140,7 @@ Rejections use the Anthropic error shape and never echo request values:
 | Monitor recent requests             | 200                       |
 | Monitor per-session usage entries   | 1,000, for 24 hours       |
 | Session state entries               | 10,000                    |
+| Codex base instructions template    | 256 KiB                   |
 | Logged string                       | 4,000 bytes               |
 | Log file before rotation            | 20 MiB, keeping 5 rotated |
 | Error capture                       | 256 KiB per file          |
