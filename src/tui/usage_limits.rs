@@ -196,7 +196,18 @@ pub(super) fn compact_line(
             Vec::new()
         });
     }
-    let required: usize = parts.iter().map(|part| cells::display_width(part)).sum();
+    let mut required: usize = parts.iter().map(|part| cells::display_width(part)).sum();
+    if name.is_empty() && parts.len() == 2 && required > width {
+        for (part, (long, short)) in parts
+            .iter_mut()
+            .zip([(" Primary ", " P "), (" Secondary ", " S ")])
+        {
+            if let Some(rest) = part.strip_prefix(long) {
+                *part = format!("{short}{rest}");
+            }
+        }
+        required = parts.iter().map(|part| cells::display_width(part)).sum();
+    }
     let name_width = cells::display_width(name);
     let minimum = if name_width > 12 { 13 } else { name_width };
     let available = width

@@ -565,7 +565,6 @@ impl Accounts {
 
 #[cfg(test)]
 mod tests {
-    use super::super::usage_limits::{QuotaLayout, quota_layout};
     use super::*;
     use crate::monitor::{CodexQuotaSnapshot, CodexQuotaWindow};
     use std::time::{Duration, SystemTime};
@@ -744,9 +743,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compact_missing_lengths_preserve_both_passed_resets() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut state: crate::monitor::snapshot::MonitorSnapshot =
+            crate::monitor::mock_state().into();
+        let window = CodexQuotaWindow {
+            used_percent: Some(100.0),
+            window_minutes: None,
+            reset_at: Some(1_699_999_999),
+        };
+        state.codex_quota = Some(CodexQuotaSnapshot {
+            observed_at: now,
+            primary: Some(window.clone()),
+            secondary: Some(window),
+        });
+        let mut app = crate::tui::mouse_tests::app_for_accounts_test(Accounts::new(false));
+        let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(90, 8, |f| {
+            crate::tui::render_at(f, &mut app, &state, now, jiff::tz::TimeZone::UTC);
+        }));
+        assert!(
+            text.contains("P 100.0% passed") && text.contains("S 100.0% passed"),
+            "{text}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn usage_size_sweep_preserves_names_windows_resets_and_staleness() {
+        use super::super::usage_limits::{QuotaLayout, quota_layout};
         use crate::claude_accounts::limits::{Limits, Window};
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let seconds = 1_700_000_000;
@@ -821,11 +846,17 @@ mod tests {
                     ));
                     let lines: Vec<_> = text.lines().collect();
                     let rows = app.accounts.rows;
-                    if rows.height >= 3 {
-                        for (i, name) in ["abcdefghijkl", "mnopqrstuvwx", "yzabcdefghij"]
-                            .iter()
-                            .enumerate()
-                        {
+                    let names = ["abcdefghijkl", "mnopqrstuvwx", "yzabcdefghij"];
+                    let count =
+                        (usize::from(rows.height) / app.accounts.row_height).min(names.len());
+                    if count == 0 {
+                        assert!(
+                            names.iter().all(|name| !text.contains(name)),
+                            "{width}x{height}: {text}"
+                        );
+                    }
+                    {
+                        for (i, name) in names.iter().take(count).enumerate() {
                             let index = usize::from(rows.y) + i * app.accounts.row_height;
                             let line = lines[index];
                             assert!(line.contains(name), "{width}x{height}: {text}");

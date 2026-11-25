@@ -396,7 +396,6 @@ fn usage_keeps_missing_and_literal_dash_models_separate() {
     );
 }
 
-#[cfg(unix)]
 pub(super) fn app_for_accounts_test(accounts: accounts::Accounts) -> MonitorApp {
     let mut app = app();
     app.accounts = accounts;
