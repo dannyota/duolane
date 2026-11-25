@@ -141,15 +141,9 @@ the effect.
 
 ## Continuation
 
-When `DUOLANE_CODEX_PREVIOUS_RESPONSE_ID` is on and a WebSocket request extends
-the transcript of a stored response, duolane sends `previous_response_id` with
-only the new items.
-
-- `function_call.arguments` are compared as JSON values. The stored transcript
-  keeps the text the model streamed, while the next request re-serializes the
-  client's parsed input.
-- Stale continuation state is dropped before a retry picks another transport or
-  connection.
+By default a WebSocket request that extends a recorded response sends
+`previous_response_id` with only its new items. The rules that decide when this
+is safe are in [continuation](continuation.md).
 
 ## Compaction requests
 
@@ -357,6 +351,9 @@ first-party source confirms them, so recheck them during live verification.
   response headers after first output, `usage_limit_reached` and its headers,
   and `codex.rate_limits` with remaining credits.
 - Whether the live Codex endpoints accept gzip request bodies.
+- Whether the response the ChatGPT backend keeps for a `previous_response_id`
+  always equals the output its final event lists, and how often a Claude Code
+  request extends the recorded transcript item for item.
 - Whether the [base instructions](#base-instructions) make a model finish a
   delegated task that it otherwise ends early, and whether they change how it
   uses Claude Code's tools.

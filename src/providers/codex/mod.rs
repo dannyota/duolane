@@ -20,11 +20,17 @@ mod client_sse;
 mod client_test_support;
 pub mod compaction;
 pub mod continuation;
+mod continuation_arguments;
+mod continuation_record;
 pub mod count_tokens;
 mod error_response;
 pub(crate) mod events;
 pub mod images;
 mod live_completion;
+const MAX_RETRYABLE_LIVE_STREAM_RETRIES: u32 = 3;
+pub(super) const MAX_EMPTY_COMPLETION_RETRIES: u32 = 2;
+pub(super) const EMPTY_CODEX_COMPLETION_DETAIL: &str = "empty_codex_completion";
+mod live_echo;
 mod live_response;
 pub mod native;
 #[cfg(test)]
@@ -56,7 +62,9 @@ use self::compaction::{
     CompactionError, abort_compaction_attempt, apply_compaction_replay, begin_compaction,
     request_compaction_for_turn, store_compaction,
 };
-use self::continuation::{abort_continuation_for_owner, continuation_candidate_for_owner};
+use self::continuation::abort_continuation_for_owner;
+#[cfg(test)]
+use self::continuation::continuation_candidate_for_owner;
 use self::count_tokens::count_translated_tokens;
 use self::error_response::*;
 use self::live_completion::*;
@@ -84,12 +92,10 @@ use std::{sync::Arc, time::Instant};
 pub(crate) fn clear_session_compaction(session_id: &str) {
     compaction::clear_compaction(session_id);
 }
-
 pub struct CodexProvider {
     client: Arc<CodexHttpClient>,
     first_source: Option<config::codex_auth::AuthSource>,
 }
-
 impl Default for CodexProvider {
     fn default() -> Self {
         Self::new()
@@ -99,7 +105,6 @@ impl CodexProvider {
     pub fn new() -> Self {
         Self::with_first_source(Some(config::codex_auth::AuthSource::ChatGpt))
     }
-
     pub(crate) fn with_first_source(first_source: Option<config::codex_auth::AuthSource>) -> Self {
         Self {
             client: Arc::new(CodexHttpClient::new()),
@@ -275,6 +280,7 @@ impl CodexProvider {
                 self.client.as_ref(),
                 &translated,
                 &compaction_ctx,
+                conversation_identity.as_ref(),
                 configured_transport,
                 compaction_websocket_sent,
             )
@@ -334,10 +340,12 @@ impl CodexProvider {
         }
 
         let previous_response_id_enabled = config::codex_previous_response_id();
-        let continuation = continuation_candidate_for_owner(
+        let continuation = continuation::messages_candidate(
             conversation_identity.as_ref(),
             &translated,
             previous_response_id_enabled,
+            compact_boundary,
+            server_compaction_enabled,
         );
         let turn_id = continuation.turn_id();
         let configured_transport = summary_transport(configured_transport, compact_boundary);
@@ -578,13 +586,12 @@ impl CodexProvider {
                     output_tokens,
                 );
             }
-            update_continuation_from_upstream(
+            finish_buffered_continuation(
                 ctx.session_id.as_deref(),
                 &request_continuation,
                 compaction_attempt,
                 &translated,
                 &upstream.body,
-                upstream.socket_id,
                 compact_boundary,
             );
 
@@ -611,13 +618,12 @@ impl CodexProvider {
                                 .and_then(|v| v.as_u64()),
                         );
                     }
-                    update_continuation_from_upstream(
+                    finish_buffered_continuation(
                         ctx.session_id.as_deref(),
                         &request_continuation,
                         compaction_attempt,
                         &translated,
                         &upstream.body,
-                        upstream.socket_id,
                         compact_boundary,
                     );
                     (StatusCode::OK, Json(json)).into_response()
@@ -679,19 +685,6 @@ fn codex_generation_event(payload: &serde_json::Value) -> bool {
         payload.get("type").and_then(|value| value.as_str()),
         Some("codex.rate_limits" | "keepalive") | None
     )
-}
-
-#[cfg(test)]
-mod provider_constructor_test_support {
-    use super::*;
-    impl CodexProvider {
-        pub(super) fn with_client(client: Arc<CodexHttpClient>) -> Self {
-            Self {
-                client,
-                first_source: Some(config::codex_auth::AuthSource::ChatGpt),
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -975,6 +968,7 @@ mod tests {
             assert!(status.success());
             return;
         }
+        unsafe { std::env::set_var("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "1") };
         let dir = crate::paths::config_dir();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -1008,7 +1002,7 @@ mod tests {
                     serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_first"}}),
                     serde_json::json!({"type":"response.output_text.delta","output_index":0,"delta":"first"}),
                     serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}),
-                    serde_json::json!({"type":"response.completed","response":{"id":"resp_first","status":"completed"}}),
+                    serde_json::json!({"type":"response.completed","response":{"id":"resp_first","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first"}]}]}}),
                 ] {
                     emit_live_event(&mut ws, &event).await;
                 }
@@ -1036,7 +1030,7 @@ mod tests {
             let provider = CodexProvider::with_client(client);
             let owner = ConversationIdentity::Main(format!("empty-login-{streaming}"));
             let ctx = live_test_context("empty-login");
-            let first = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol","max_tokens":32,"stream":streaming,"messages":[{"role":"user","content":"one"}]})).unwrap();
+            let first = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"one"}]})).unwrap();
             let first = provider
                 .handle_messages_inner(first, ctx.clone(), Some(owner.clone()))
                 .await;

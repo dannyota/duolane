@@ -496,7 +496,11 @@ pub fn codex_user_agent(default: &str) -> String {
 pub fn codex_previous_response_id() -> bool {
     let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID") {
-        return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => return true,
+            "0" | "false" | "no" | "off" => return false,
+            _ => {}
+        }
     }
     let config_dir = paths::config_dir();
     if let Some(file) = read_file_config(&config_dir)
@@ -505,7 +509,7 @@ pub fn codex_previous_response_id() -> bool {
     {
         return val;
     }
-    false
+    true
 }
 
 pub fn codex_server_compaction() -> bool {
@@ -710,6 +714,7 @@ mod tests {
             EnvGuard::unset("DUOLANE_LOG_STDERR"),
             EnvGuard::unset("DUOLANE_CODEX_REASONING_SUMMARY"),
             EnvGuard::unset("DUOLANE_CODEX_SERVER_COMPACTION"),
+            EnvGuard::unset("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID"),
             EnvGuard::unset("DUOLANE_CODEX_BASE_INSTRUCTIONS"),
             EnvGuard::unset("DUOLANE_CODEX_RESPONSES_API"),
             EnvGuard::unset("DUOLANE_CODEX_FULL_LANE"),
@@ -1256,6 +1261,52 @@ mod tests {
             let _model_env = EnvGuard::set("DUOLANE_AUTO_REVIEW_MODEL", "");
             assert_eq!(auto_review_model().as_deref(), Some("gpt-6-luna"));
         }
+    }
+
+    #[test]
+    fn previous_response_id_defaults_on() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        assert!(codex_previous_response_id());
+    }
+
+    #[test]
+    fn previous_response_id_env_boolean_spellings_override_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        for (file_value, values, expected) in [
+            (false, ["1", "true", "yes", "on"], true),
+            (true, ["0", "false", "no", "off"], false),
+        ] {
+            std::fs::write(
+                config.path().join("config.json"),
+                serde_json::json!({"codex":{"previousResponseId":file_value}}).to_string(),
+            )
+            .unwrap();
+            for value in values {
+                let value = format!(" {} ", value.to_ascii_uppercase());
+                let _flag = EnvGuard::set("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", &value);
+                assert_eq!(codex_previous_response_id(), expected, "{value}");
+            }
+        }
+    }
+
+    #[test]
+    fn previous_response_id_invalid_env_falls_through() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        let _flag = EnvGuard::set("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "invalid");
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"previousResponseId":false}}"#,
+        )
+        .unwrap();
+        assert!(!codex_previous_response_id());
+        std::fs::write(config.path().join("config.json"), r#"{"codex":{}}"#).unwrap();
+        assert!(codex_previous_response_id());
     }
 
     #[test]

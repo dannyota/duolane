@@ -6,7 +6,6 @@ use super::continuation::{
     ContinuationReservation, abort_continuation_for_owner, record_continuation_for_owner,
 };
 use super::error_response::*;
-use super::live_response::*;
 use super::translate::reasoning_signature::ReasoningAccount;
 use super::translate::reducer::finish_metadata_from_upstream;
 use super::*;
@@ -204,18 +203,15 @@ pub(super) fn is_missing_previous_response_error(err: &client::CodexError) -> bo
 pub(super) fn drop_live_continuation_for_retry(
     continuation: &mut Option<ContinuationReservation>,
 ) -> bool {
-    if continuation
+    let dropped = continuation
         .as_ref()
         .and_then(|reservation| reservation.candidate().previous_response_id.as_deref())
-        .is_none()
-    {
-        return false;
-    }
-
+        .is_some();
     if let Some(reservation) = continuation.as_ref() {
+        super::client_live::invalidate_live_continuation_pool(Some(reservation));
         *continuation = Some(reservation.full_context_retry());
     }
-    true
+    dropped
 }
 
 fn retryable_live_message(message: &str) -> bool {
@@ -235,14 +231,12 @@ fn retryable_live_message(message: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn update_continuation_from_upstream(
+pub(super) fn finish_buffered_continuation(
     session_id: Option<&str>,
     continuation: &ContinuationReservation,
     compaction_attempt: Option<CompactionAttempt>,
     request_body: &translate::request::ResponsesRequest,
     upstream_body: &[u8],
-    socket_id: Option<u64>,
     compact_boundary: bool,
 ) {
     match finish_metadata_from_upstream(upstream_body, &request_body.reasoning_account) {
@@ -255,6 +249,48 @@ pub(super) fn update_continuation_from_upstream(
                     &finish.output_items,
                 );
             }
+        }
+        _ => abort_compaction_attempt(session_id, compaction_attempt),
+    }
+    abort_continuation_for_owner(continuation);
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn update_continuation_from_upstream(
+    session_id: Option<&str>,
+    continuation: &ContinuationReservation,
+    compaction_attempt: Option<CompactionAttempt>,
+    request_body: &translate::request::ResponsesRequest,
+    upstream_body: &[u8],
+    socket_id: Option<u64>,
+    compact_boundary: bool,
+) {
+    let stored_output_present = crate::anthropic::sse::parse_sse_events(upstream_body)
+        .into_iter()
+        .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.data).ok())
+        .rfind(events::event_is_terminal)
+        .and_then(|event| {
+            event
+                .pointer("/response/output")
+                .and_then(|output| output.as_array())
+                .cloned()
+        })
+        .is_some();
+    match finish_metadata_from_upstream(upstream_body, &request_body.reasoning_account) {
+        Ok(Some(finish)) if finish.continuation_eligible => {
+            if compact_boundary {
+                activate_compaction(
+                    session_id,
+                    compaction_attempt,
+                    &request_body.model,
+                    &finish.output_items,
+                );
+            }
+            if !stored_output_present {
+                abort_continuation_for_owner(continuation);
+                return;
+            }
             record_continuation_for_owner(
                 continuation,
                 request_body,
@@ -262,6 +298,59 @@ pub(super) fn update_continuation_from_upstream(
                 socket_id,
                 &finish.output_items,
             );
+        }
+        _ => {
+            abort_compaction_attempt(session_id, compaction_attempt);
+            abort_continuation_for_owner(continuation);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn update_live_continuation(
+    session_id: Option<&str>,
+    continuation: &ContinuationReservation,
+    compaction_attempt: Option<CompactionAttempt>,
+    request_body: &translate::request::ResponsesRequest,
+    upstream_body: &[u8],
+    socket_id: Option<u64>,
+    compact_boundary: bool,
+    echoed: super::live_echo::LiveEcho,
+) {
+    let stored = crate::anthropic::sse::parse_sse_events(upstream_body)
+        .into_iter()
+        .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.data).ok())
+        .rfind(events::event_is_terminal)
+        .and_then(|event| {
+            event
+                .pointer("/response/output")
+                .and_then(|v| v.as_array())
+                .cloned()
+        });
+    match finish_metadata_from_upstream(upstream_body, &request_body.reasoning_account) {
+        Ok(Some(finish)) if finish.continuation_eligible => {
+            if compact_boundary {
+                activate_compaction(
+                    session_id,
+                    compaction_attempt,
+                    &request_body.model,
+                    &finish.output_items,
+                );
+            }
+            let echoed = echoed.input(&request_body.reasoning_account);
+            if let Some(echoed) = echoed
+                .filter(|items| super::continuation_record::may_record(stored.as_deref(), items))
+            {
+                record_continuation_for_owner(
+                    continuation,
+                    request_body,
+                    finish.response_id.as_deref(),
+                    socket_id,
+                    &echoed,
+                );
+            } else {
+                abort_continuation_for_owner(continuation);
+            }
         }
         _ => {
             abort_compaction_attempt(session_id, compaction_attempt);

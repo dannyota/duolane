@@ -10,6 +10,15 @@ use super::client::CodexHttpClient;
 use super::translate::reasoning_signature::ReasoningAccount;
 use super::*;
 
+impl CodexProvider {
+    pub(super) fn with_client(client: Arc<CodexHttpClient>) -> Self {
+        Self {
+            client,
+            first_source: Some(config::codex_auth::AuthSource::ChatGpt),
+        }
+    }
+}
+
 pub(super) fn live_test_request(text: &str) -> translate::request::ResponsesRequest {
     translate::request::ResponsesRequest {
         model: "gpt-5.6-sol".to_string(),

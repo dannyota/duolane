@@ -1,3 +1,8 @@
+#[path = "websocket_pool_bound.rs"]
+mod bound;
+use bound::IDLE_POOL_BOUND;
+#[cfg(test)]
+use bound::idle_pool_bound;
 #[cfg(test)]
 use futures_util::{SinkExt, StreamExt};
 use http::HeaderMap;
@@ -33,23 +38,6 @@ use super::websocket::*;
 use super::websocket_stream::*;
 
 const POOL_IDLE_TTL_MS: u64 = 30 * 60 * 1000;
-
-fn idle_pool_bound(soft_limit: Option<u64>) -> usize {
-    let Some(limit) = soft_limit else { return 2048 };
-    let (intercepted, tunnels) = crate::intercept::pool_sizes(Some(limit));
-    let spare = limit
-        .saturating_sub(192)
-        .saturating_sub(2 * (intercepted + tunnels) as u64);
-    (spare / 2).min(2048) as usize
-}
-
-static IDLE_POOL_BOUND: once_cell::sync::Lazy<usize> = once_cell::sync::Lazy::new(|| {
-    #[cfg(unix)]
-    let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile).current;
-    #[cfg(not(unix))]
-    let limit = None;
-    idle_pool_bound(limit)
-});
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct HandshakeIdentity {
@@ -243,6 +231,28 @@ pub(crate) fn pooled_socket_id_for_tests(owner: &ConversationIdentity) -> Option
         .map(|(_, entry)| entry.socket_id)
 }
 
+pub(super) fn snapshot_codex_websocket_pool(owner: &ConversationIdentity) -> Vec<u64> {
+    WS_POOL
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|((pooled_owner, _, _), _)| pooled_owner == owner)
+        .map(|(_, entry)| entry.return_id.load(Ordering::Relaxed))
+        .collect()
+}
+
+pub(super) fn invalidate_codex_websocket_pool_snapshot(
+    owner: &ConversationIdentity,
+    return_ids: &[u64],
+) {
+    WS_POOL
+        .lock()
+        .unwrap()
+        .retain(|(pooled_owner, _, _), entry| {
+            pooled_owner != owner || !return_ids.contains(&entry.return_id.load(Ordering::Relaxed))
+        });
+}
+
 pub fn invalidate_codex_websocket_pool_owner(owner: &ConversationIdentity) {
     let mut guard = WS_POOL.lock().unwrap();
     guard.retain(|(pooled_owner, _, _), _| pooled_owner != owner);
@@ -255,6 +265,23 @@ pub fn invalidate_codex_websocket_pool_key(session_id: &str) {
         ConversationIdentity::Main(owner_session_id)
         | ConversationIdentity::Agent(owner_session_id, _) => owner_session_id != session_id,
     });
+}
+
+pub(super) fn invalidate_codex_websocket_pool_reservation(reservation: &ContinuationReservation) {
+    let Some(key) = reservation_pool_owner(Some(reservation)) else {
+        return;
+    };
+    let remove = || {
+        WS_POOL
+            .lock()
+            .unwrap()
+            .retain(|(owner, _, enabled), _| owner != &key.0 || *enabled != key.2);
+    };
+    if key.2 {
+        super::continuation::with_current_turn_for_owner(reservation, remove);
+    } else {
+        remove();
+    }
 }
 
 pub(crate) fn invalidate_codex_websocket_pool_turn_for_owner(
@@ -1249,6 +1276,46 @@ mod tests {
                 .contains_key(&pool_key_for(&main_owner("oldest")))
         );
         clear_codex_websocket_pool_for_tests();
+    }
+
+    #[tokio::test]
+    async fn full_context_retry_discards_pooled_socket() {
+        let _registry_guard =
+            super::super::continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = lock_codex_websocket_pool_for_tests().await;
+        let owner = main_owner("full-context-empty-retry");
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &continuation_request(),
+            true,
+        );
+        let entry = Arc::new(PoolEntry::new(raw_test_stream(None).await));
+        assert!(pool_insert_for_turn(&reservation, entry));
+        let mut retry = Some(reservation.clone());
+        assert!(!super::super::live_completion::drop_live_continuation_for_retry(&mut retry));
+        assert!(super::super::client_live::should_reset_websocket_pool(
+            retry.as_ref()
+        ));
+        super::super::client_live::invalidate_live_continuation_pool(retry.as_ref());
+        assert!(pooled_socket_id_for_tests(&owner).is_none());
+        super::super::continuation::abort_continuation_for_owner(&reservation);
+    }
+
+    #[tokio::test]
+    async fn http_transition_removes_continuation_off_socket() {
+        let _pool_guard = lock_codex_websocket_pool_for_tests().await;
+        let owner = main_owner("http-continuation-off");
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &continuation_request(),
+            false,
+        );
+        assert!(pool_insert_for_turn(
+            &reservation,
+            Arc::new(PoolEntry::new(raw_test_stream(None).await))
+        ));
+        super::super::client_live::invalidate_live_continuation_pool(Some(&reservation));
+        assert!(pooled_socket_id_for_tests(&owner).is_none());
     }
 
     #[tokio::test]

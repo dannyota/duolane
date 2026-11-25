@@ -672,7 +672,7 @@ async fn spawn_websocket_sequence_upstream(captured: Arc<Mutex<Vec<Value>>>) -> 
                     }),
                     json!({
                         "type":"response.completed",
-                        "response":{"id":response_id,"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}
+                        "response":{"id":response_id,"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":response_text}]}],"usage":{"input_tokens":5,"output_tokens":2}}
                     }),
                 ];
 
@@ -764,7 +764,7 @@ async fn spawn_websocket_previous_missing_then_retry_upstream(
                     }),
                     json!({
                         "type":"response.completed",
-                        "response":{"id":response_id,"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}
+                        "response":{"id":response_id,"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":response_text}]}],"usage":{"input_tokens":5,"output_tokens":2}}
                     }),
                 ];
 
@@ -857,7 +857,7 @@ async fn spawn_websocket_close_then_retry_upstream(captured: Arc<Mutex<Vec<Value
                     }),
                     json!({
                         "type":"response.completed",
-                        "response":{"id":response_id,"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}
+                        "response":{"id":response_id,"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":response_text}]}],"usage":{"input_tokens":5,"output_tokens":2}}
                     }),
                 ];
 
@@ -946,7 +946,7 @@ async fn spawn_websocket_empty_completion_then_retry_upstream(
                     }),
                     json!({
                         "type":"response.completed",
-                        "response":{"id":response_id,"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}
+                        "response":{"id":response_id,"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":response_text}]}],"usage":{"input_tokens":5,"output_tokens":2}}
                     }),
                 ];
 
@@ -3881,14 +3881,19 @@ async fn smoke_codex_websocket_previous_response_id_sends_delta_on_second_turn()
     let first = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
+        "stream": true,
         "messages": [{"role":"user","content":"one"}]
     }))
     .await;
     assert_eq!(first.status(), StatusCode::OK);
+    axum::body::to_bytes(first.into_body(), usize::MAX)
+        .await
+        .unwrap();
 
     let second = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
+        "stream": true,
         "messages": [
             {"role":"user","content":"one"},
             {"role":"assistant","content":"first"},
@@ -3906,8 +3911,7 @@ async fn smoke_codex_websocket_previous_response_id_sends_delta_on_second_turn()
         "second response body: {}",
         String::from_utf8_lossy(&second_body)
     );
-    let value: Value = serde_json::from_slice(&second_body).unwrap();
-    assert_eq!(value["content"][0]["text"], "second");
+    assert!(String::from_utf8_lossy(&second_body).contains("second"));
 
     let third = call_messages_body(json!({
         "model": "gpt-5.5",
