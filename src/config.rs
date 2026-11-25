@@ -1,3 +1,5 @@
+mod codex_base_instructions;
+pub use codex_base_instructions::codex_base_instructions;
 pub mod codex_auth;
 pub use codex_auth::openai_base_url;
 mod codex_transport;
@@ -286,6 +288,7 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     {
         out.push("DUOLANE_CODEX_REASONING_SUMMARY (env)".to_string());
     }
+    out.extend(codex_base_instructions::env_source(&env));
     if env.contains_key("DUOLANE_CODEX_SERVER_COMPACTION") {
         out.push("DUOLANE_CODEX_SERVER_COMPACTION (env)".to_string());
     }
@@ -300,6 +303,9 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
         .is_some_and(|v| valid_auto_review_effort(v))
     {
         out.push("DUOLANE_AUTO_REVIEW_EFFORT (env)".to_string());
+    }
+    if let Some(enabled) = codex_base_instructions::file_value(&cfg.config_dir) {
+        out.push(format!("codex.baseInstructions: {enabled}"));
     }
     if let Some(file_cfg) = file {
         if file_cfg
@@ -704,6 +710,7 @@ mod tests {
             EnvGuard::unset("DUOLANE_LOG_STDERR"),
             EnvGuard::unset("DUOLANE_CODEX_REASONING_SUMMARY"),
             EnvGuard::unset("DUOLANE_CODEX_SERVER_COMPACTION"),
+            EnvGuard::unset("DUOLANE_CODEX_BASE_INSTRUCTIONS"),
             EnvGuard::unset("DUOLANE_CODEX_RESPONSES_API"),
             EnvGuard::unset("DUOLANE_CODEX_FULL_LANE"),
             EnvGuard::unset("DUOLANE_CODEX_IMAGES_API"),
@@ -1270,5 +1277,59 @@ mod tests {
         assert!(codex_server_compaction());
         let _disabled_env = EnvGuard::set("DUOLANE_CODEX_SERVER_COMPACTION", "false");
         assert!(!codex_server_compaction());
+    }
+
+    #[test]
+    fn base_instructions_default_and_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        assert!(codex_base_instructions());
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"baseInstructions":false}}"#,
+        )
+        .unwrap();
+        assert!(!codex_base_instructions());
+        {
+            let _value = EnvGuard::set("DUOLANE_CODEX_BASE_INSTRUCTIONS", "invalid");
+            assert!(!codex_base_instructions());
+        }
+        {
+            let _value = EnvGuard::set("DUOLANE_CODEX_BASE_INSTRUCTIONS", " On ");
+            assert!(codex_base_instructions());
+        }
+    }
+    #[test]
+    fn base_instructions_duplicate_last_value_and_invalid_values_preserve_auth_token() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        for (setting, expected) in [
+            (r#""baseInstructions":true,"baseInstructions":false"#, false),
+            (r#""baseInstructions":false,"baseInstructions":true"#, true),
+            (r#""baseInstructions":"off""#, true),
+            (r#""baseInstructions":false"#, false),
+        ] {
+            std::fs::write(
+                config.path().join("config.json"),
+                format!(r#"{{"authToken":"toy-token","codex":{{{setting}}}}}"#),
+            )
+            .unwrap();
+            assert!(auth_token().as_deref() == Some("toy-token"));
+            assert_eq!(codex_base_instructions(), expected);
+        }
+    }
+
+    #[test]
+    fn base_instructions_valid_env_appears_in_summary() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        let _value = EnvGuard::set("DUOLANE_CODEX_BASE_INSTRUCTIONS", "on");
+        assert!(
+            config_override_summary_lines(&load_config())
+                .contains(&"DUOLANE_CODEX_BASE_INSTRUCTIONS (env)".to_string())
+        );
     }
 }

@@ -28,7 +28,7 @@ async fn tracked_buffered_quota_preserves_response_and_credential_proof() {
     let client = Arc::new(super::client_test_support::authenticated_http_test_client(
         format!("http://{addr}/responses"),
     ));
-    let provider = CodexProvider { client };
+    let provider = CodexProvider::with_client(client);
     let body = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol", "max_tokens":64, "messages":[{"role":"user","content":"hello"}]})).unwrap();
     let gate = ReplayGate::new(false);
     let attempt = SourceAttempt::new(
