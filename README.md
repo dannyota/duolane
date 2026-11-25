@@ -57,6 +57,7 @@ Code proxy settings. For gateway mode or background agents, see
 | `duolane accounts list`          | Show Claude profiles and which one is selected          |
 | `duolane accounts use [name]`    | Pick which Claude login the next `duolane claude` uses  |
 | `duolane accounts remove <name>` | Sign out of a named Claude profile and delete it        |
+| `duolane accounts switch [name]` | Select another Claude login and resume the last session |
 | `duolane --help`                 | Discover commands and options                           |
 
 ## Documentation

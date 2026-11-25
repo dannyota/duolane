@@ -29,19 +29,19 @@
 
 **Files:** Create `src/claude_accounts/switch.rs`; modify `src/claude_accounts.rs`, `src/main.rs`; add tests in `tests/claude_accounts.rs`.
 
-- [ ] Write failing tests `claude_accounts_switch_next_skips_same_account`, `claude_accounts_switch_rejects_current_selection`, and `claude_accounts_switch_refuses_inside_claude_code`. Use the existing fake status binary for accounts.
-- [ ] Add `AccountsCommand::Switch { name: Option<String>, next: bool, args: Vec<OsString> }` with `name` conflicting with `--next` and `args` as trailing arguments after `--`.
-- [ ] Implement target resolution with `roster::entries` and the `use` menu, then save through the same function `select` uses. Refuse when `CLAUDE_CONFIG_DIR` is set.
-- [ ] Run `cargo nextest run --locked -E 'test(claude_accounts)'`.
+- [x] Write failing tests `claude_accounts_switch_next_skips_same_account`, `claude_accounts_switch_rejects_current_selection`, and `claude_accounts_switch_refuses_inside_claude_code`. Use the existing fake status binary for accounts.
+- [x] Add `AccountsCommand::Switch { name: Option<String>, next: bool, args: Vec<OsString> }` with `name` conflicting with `--next` and `args` as trailing arguments after `--`.
+- [x] Implement target resolution with `roster::entries` and the `use` menu, then save through the same function `select` uses. Refuse when `CLAUDE_CONFIG_DIR` is set.
+- [x] Run `cargo nextest run --locked -E 'test(claude_accounts)'`.
 
 ## Task 2: Launch with `--continue`
 
 **Files:** `src/claude_accounts/switch.rs`, `src/intercept/wrapper.rs` only if the entry point needs a public wrapper, `README.md`, `docs/wiki/Claude-Accounts.md`, `docs/wiki/CLI.md` if it lists accounts commands.
 
-- [ ] Write failing tests `claude_accounts_switch_adds_continue` and `claude_accounts_switch_keeps_user_session_flag`. Assert the fake `claude` child's arguments.
-- [ ] Implement session flag detection and call `intercept::wrapper::run` with the final arguments. On launch error, add the selected profile name and the `duolane claude --continue` retry hint.
-- [ ] Add the README command row and a wiki section that replaces the two-command resume example with `switch`, keeping the `--resume` form for several sessions.
-- [ ] Run `make check`.
+- [x] Write failing tests `claude_accounts_switch_adds_continue` and `claude_accounts_switch_keeps_user_session_flag`. Assert the fake `claude` child's arguments.
+- [x] Implement session flag detection and call `intercept::wrapper::run` with the final arguments. On launch error, add the selected profile name and the `duolane claude --continue` retry hint.
+- [x] Add the README command row and a wiki section that replaces the two-command resume example with `switch`, keeping the `--resume` form for several sessions.
+- [x] Run `make check`.
 
 ## Delivery
 

@@ -46,12 +46,26 @@ them.
 
 ## Resume a session under another account
 
-Start a session under one login, quit it, then switch and resume it by ID:
+When a login runs out of usage, quit Claude Code and switch from a plain
+terminal in the same project:
 
 ```bash
-duolane accounts use backup
-duolane claude --resume <session-id>
+duolane accounts switch backup
 ```
+
+`switch` saves the new selection and runs `duolane claude --continue`, which
+loads the most recent session in the current directory. `--next` picks the next
+profile in `list` order that holds a different account, and no name shows the
+menu. If several sessions share the project, resume one by ID instead:
+
+```bash
+duolane accounts switch backup -- --resume <session-id>
+```
+
+Arguments after `--` go to Claude Code. If the launch fails, the new selection
+stays saved; fix the problem and run `duolane claude --continue`. `switch`
+refuses when `CLAUDE_CONFIG_DIR` is set, and asks first when run inside a Claude
+Code session or an IDE terminal that sets `CLAUDECODE`.
 
 The first named launch in a project asks you to type `yes` before it shares that
 project's history folder in `~/.claude/projects/` with the profile. The resumed

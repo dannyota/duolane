@@ -334,3 +334,48 @@ fn claude_accounts_remove_signs_out_and_keeps_shared_history() {
         b"default\n"
     );
 }
+
+fn selected(sandbox: &Sandbox) -> Option<Vec<u8>> {
+    std::fs::read(sandbox.config().join("claude-accounts/.selected")).ok()
+}
+
+#[test]
+fn claude_accounts_switch_next_skips_same_account_and_keeps_selection_on_launch_failure() {
+    let sandbox = Sandbox::new();
+    sandbox.login("copy");
+    sandbox.login("zzz");
+    let output = sandbox.run(&["accounts", "switch", "--next"], &[]);
+    assert!(!output.status.success());
+    assert_eq!(selected(&sandbox).as_deref(), Some(&b"zzz\n"[..]));
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("zzz is now selected"));
+    assert!(stderr.contains("duolane claude --continue"));
+}
+
+#[test]
+fn claude_accounts_switch_rejects_current_selection_and_lone_account() {
+    let sandbox = Sandbox::new();
+    sandbox.login("copy");
+    let current = sandbox.run(&["accounts", "switch", "default"], &[]);
+    assert!(text(&current.stderr).contains("already selected"));
+    let lone = sandbox.run(&["accounts", "switch", "--next"], &[]);
+    assert!(text(&lone.stderr).contains("no other profile"));
+    let both = sandbox.run(&["accounts", "switch", "copy", "--next"], &[]);
+    assert!(!both.status.success());
+    assert_eq!(selected(&sandbox), None);
+}
+
+#[test]
+fn claude_accounts_switch_refuses_inside_claude_code_or_config_override() {
+    let sandbox = Sandbox::new();
+    sandbox.login("backup");
+    let inside = sandbox.run(&["accounts", "switch", "backup"], &[("CLAUDECODE", "1")]);
+    assert!(text(&inside.stderr).contains("CLAUDECODE is set"));
+    let config = sandbox.root.path().join("explicit");
+    let overridden = sandbox.run(
+        &["accounts", "switch", "backup"],
+        &[("CLAUDE_CONFIG_DIR", config.to_str().unwrap())],
+    );
+    assert!(text(&overridden.stderr).contains("CLAUDE_CONFIG_DIR is set"));
+    assert_eq!(selected(&sandbox), None);
+}

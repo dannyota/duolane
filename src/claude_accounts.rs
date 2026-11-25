@@ -5,6 +5,8 @@ mod roster;
 #[cfg(unix)]
 pub(crate) mod store;
 #[cfg(unix)]
+mod switch;
+#[cfg(unix)]
 mod transcripts;
 
 #[cfg(unix)]
@@ -220,7 +222,7 @@ mod unix {
         Ok(name)
     }
 
-    fn registered() -> Result<Vec<(String, PathBuf)>> {
+    pub(super) fn registered() -> Result<Vec<(String, PathBuf)>> {
         registered_with_warnings(true)
     }
 
@@ -282,7 +284,7 @@ mod unix {
         std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
     }
 
-    fn current_selection() -> Result<String> {
+    pub(super) fn current_selection() -> Result<String> {
         Ok(read_selection()?.unwrap_or_else(|| "default".into()))
     }
 
@@ -385,6 +387,50 @@ mod unix {
         Ok(choice.and_then(|index| entries.get(index).map(|entry| entry.name.clone())))
     }
 
+    pub(super) fn profile_names(profiles: &[(String, PathBuf)]) -> Vec<String> {
+        let mut names: Vec<String> = profiles.iter().map(|(name, _)| name.clone()).collect();
+        names.insert(0, "default".into());
+        names
+    }
+
+    pub(super) fn checked_target(name: &str, names: &[String]) -> Result<()> {
+        ensure!(
+            name == "default" || valid_name(name),
+            "invalid profile name"
+        );
+        ensure!(names.iter().any(|known| known == name), "unknown profile");
+        Ok(())
+    }
+
+    pub(super) fn prompt_name(
+        profiles: &[(String, PathBuf)],
+        selected: &str,
+    ) -> Result<Option<String>> {
+        let names = profile_names(profiles);
+        let interactive = std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && picker::fits(names.len());
+        if interactive {
+            return choose(profiles, selected);
+        }
+        println!(
+            "Selection applies to the next launch. Named profiles may share approved project history."
+        );
+        for (i, name) in names.iter().enumerate() {
+            println!("{}: {}", i + 1, name);
+        }
+        let choice = input("Choice: ")?
+            .parse::<usize>()
+            .context("invalid choice")?;
+        Ok(Some(
+            choice
+                .checked_sub(1)
+                .and_then(|i| names.get(i))
+                .context("invalid choice")?
+                .clone(),
+        ))
+    }
+
     pub fn select(name: Option<String>) -> Result<()> {
         if let Some(name) = &name {
             ensure!(
@@ -393,35 +439,15 @@ mod unix {
             );
         }
         let profiles = registered()?;
-        let mut names: Vec<String> = profiles.iter().map(|(name, _)| name.clone()).collect();
-        names.insert(0, "default".into());
-        let interactive = std::io::stdin().is_terminal()
-            && std::io::stdout().is_terminal()
-            && picker::fits(names.len());
         let name = if let Some(name) = name {
-            ensure!(names.contains(&name), "unknown profile");
+            checked_target(&name, &profile_names(&profiles))?;
             name
-        } else if interactive {
-            let Some(name) = choose(&profiles, &current_selection()?)? else {
+        } else {
+            let Some(name) = prompt_name(&profiles, &current_selection()?)? else {
                 println!("Selection unchanged.");
                 return Ok(());
             };
             name
-        } else {
-            println!(
-                "Selection applies to the next launch. Named profiles may share approved project history."
-            );
-            for (i, name) in names.iter().enumerate() {
-                println!("{}: {}", i + 1, name);
-            }
-            let choice = input("Choice: ")?
-                .parse::<usize>()
-                .context("invalid choice")?;
-            choice
-                .checked_sub(1)
-                .and_then(|i| names.get(i))
-                .context("invalid choice")?
-                .clone()
         };
         save_selection(&name, None)?;
         println!("The next duolane claude launch uses {name}.");
@@ -559,11 +585,18 @@ mod unix {
 }
 
 #[cfg(unix)]
+pub use switch::switch;
+#[cfg(unix)]
 use unix::claude_command;
 #[cfg(unix)]
 pub(crate) use unix::{Profile, monitor_roster, prepare_launch, save_selection};
 #[cfg(unix)]
 pub use unix::{announce, list, login, remove, select};
+
+#[cfg(not(unix))]
+pub fn switch(_: Option<String>, _: bool, _: Vec<std::ffi::OsString>) -> anyhow::Result<()> {
+    anyhow::bail!("Claude accounts are unavailable on this platform")
+}
 
 #[cfg(not(unix))]
 pub(crate) struct Profile;

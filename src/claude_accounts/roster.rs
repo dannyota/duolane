@@ -378,6 +378,17 @@ pub(super) fn table(entries: &[Entry], selected: &str, now: jiff::Timestamp, col
     }
 }
 
+pub(super) fn same_account(entries: &[Entry], a: &str, b: &str) -> bool {
+    let key = |name: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .and_then(|entry| entry.account.as_ref())
+            .and_then(identity)
+    };
+    key(a).is_some_and(|left| key(b).as_ref() == Some(&left))
+}
+
 pub(super) fn describe(entries: &[Entry], name: &str) -> (Option<String>, Option<String>) {
     let Some(entry) = entries.iter().find(|entry| entry.name == name) else {
         return (None, None);

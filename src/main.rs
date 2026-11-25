@@ -105,6 +105,15 @@ enum AccountsCommand {
         #[arg(value_name = "NAME")]
         name: Option<String>,
     },
+    #[command(about = "Select another profile and resume the latest session under it")]
+    Switch {
+        #[arg(value_name = "NAME", conflicts_with = "next")]
+        name: Option<String>,
+        #[arg(long, help = "Pick the next profile with a different account")]
+        next: bool,
+        #[arg(last = true, value_name = "CLAUDE_ARGS")]
+        args: Vec<std::ffi::OsString>,
+    },
     #[command(about = "Show each profile's account, plan, and login")]
     List,
     #[command(about = "Sign out of a named Claude profile and delete it")]
@@ -384,6 +393,9 @@ fn main() -> Result<()> {
                 duolane::claude_accounts::announce(&name)
             }
             AccountsCommand::Use { name } => duolane::claude_accounts::select(name),
+            AccountsCommand::Switch { name, next, args } => {
+                duolane::claude_accounts::switch(name, next, args)
+            }
             AccountsCommand::List => duolane::claude_accounts::list(),
             AccountsCommand::Remove { name, yes } => duolane::claude_accounts::remove(name, yes),
         },

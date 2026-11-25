@@ -12,6 +12,7 @@
 | `duolane accounts use [name]`    | Select the profile for the next `duolane claude` launch               |
 | `duolane accounts list`          | Show each profile's account, plan, and login                          |
 | `duolane accounts remove <name>` | Sign out of a named profile and delete it                             |
+| `duolane accounts switch [name]` | Select another profile and resume the latest session under it         |
 | `duolane agents setup`           | Install the Codex-family Claude Code subagents                        |
 | `duolane agents remove`          | Remove only the unchanged agents installed by setup                   |
 | `duolane intercept setup`        | Opt in to persistent intercept settings                               |
