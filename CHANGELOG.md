@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.10.0
+
+### Changed
+
+- Continuation is on by default. When a Codex WebSocket request extends a
+  recorded response, duolane sends `previous_response_id` with only the new
+  items. A response is recorded only when the output the backend stored matches
+  what the client received, so every doubt sends the full context.
+  `DUOLANE_CODEX_PREVIOUS_RESPONSE_ID=off` or `codex.previousResponseId: false`
+  turns it off.
+- A conversation's WebSocket is kept for its next request even when that request
+  cannot continue, and is dropped on a retry after a failure, on a move to HTTP,
+  and on an account change.
+- The Release workflow reuses the tests CI already passed on the tagged commit
+  and always runs the dependency policy.
+
+### Added
+
+- The monitor Overview has a summary of the Claude and Codex lanes and of the
+  Codex connections: queued requests, handshakes, socket reuse, HTTP fallbacks,
+  and origin 403s. Active requests show their phase (`queued #n`, `connecting`,
+  `thinking`, `streaming`) and a timeline; Recent requests show Wait, First, and
+  Total.
+
 ## 0.9.0
 
 ### Added
