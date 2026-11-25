@@ -368,9 +368,10 @@ impl Accounts {
                 lines.push(five);
                 lines.push(week);
             } else {
-                let mut windows = super::usage_limits::compact("5h", five);
-                windows.extend(super::usage_limits::compact("week", week));
                 let suffix = if *name == self.selected { " Saved" } else { "" };
+                let width =
+                    usize::from(self.rows.width).saturating_sub(7 + suffix.len() + name.len());
+                let windows = super::usage_limits::compact_pair(five, week, width);
                 let available = usize::from(self.rows.width)
                     .saturating_sub(Line::from(windows.clone()).width() + 7 + suffix.len());
                 let title = format!(
@@ -383,8 +384,17 @@ impl Accounts {
             }
         }
         frame.render_widget(Paragraph::new(lines), self.rows);
+        let quota = snapshot
+            .codex_quota
+            .as_ref()
+            .filter(|q| now.duration_since(q.observed_at).is_ok());
+        let title = if quota_summary(quota, now).contains("Stale") {
+            " Stale ChatGPT subscription "
+        } else {
+            " ChatGPT subscription "
+        };
         let detail_block = Block::default()
-            .title(" ChatGPT subscription ")
+            .title(title)
             .title_style(if self.focus == self.names.len() {
                 Style::default()
                     .fg(super::WHITE)
@@ -444,21 +454,9 @@ impl Accounts {
                 if inner.height < 2 {
                     detail.clear();
                 }
-                let mut spans = super::usage_limits::compact(
-                    &super::usage_limits::codex_label(
-                        "Primary",
-                        quota.and_then(|q| q.primary.as_ref()),
-                    ),
-                    primary,
-                );
-                spans.extend(super::usage_limits::compact(
-                    &super::usage_limits::codex_label(
-                        "Secondary",
-                        quota.and_then(|q| q.secondary.as_ref()),
-                    ),
-                    secondary,
-                ));
-                detail.push(Line::from(spans));
+                detail.push(Line::from(super::usage_limits::compact_pair(
+                    primary, secondary, 0,
+                )));
             }
             if self.local {
                 detail.push(Line::from(saved));
@@ -579,6 +577,40 @@ mod tests {
         assert_eq!(text.matches("20%").count(), 2, "{text}");
         assert_eq!(text.matches("40%").count(), 2, "{text}");
         assert!(text.contains("42.0%") && text.contains("12.0%"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_profile_prioritizes_resets_over_bars() {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut accounts = Accounts::new(true);
+        accounts.names = vec!["default".into(), "backup".into()];
+        accounts.limits.insert(
+            "default".into(),
+            crate::claude_accounts::limits::Limits {
+                five_hour: Some(crate::claude_accounts::limits::Window {
+                    used: 0.2,
+                    resets_at: Some(now + 5400),
+                }),
+                seven_day: Some(crate::claude_accounts::limits::Window {
+                    used: 0.4,
+                    resets_at: Some(now + 129600),
+                }),
+                observed_at: now,
+            },
+        );
+        let state = crate::monitor::mock_state().into();
+        let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(100, 8, |f| {
+            accounts.render(f, f.area(), &state)
+        }));
+        let row = text.lines().find(|line| line.contains("default")).unwrap();
+        assert!(
+            row.contains("20%") && row.contains("40%") && row.contains("1h") && row.contains("1d"),
+            "{text}"
+        );
     }
 
     #[cfg(unix)]

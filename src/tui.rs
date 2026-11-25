@@ -225,7 +225,7 @@ fn run_monitor_events(
                 }
                 Event::Mouse(mouse) => {
                     if let Some(exit) =
-                        app.handle_mouse_sized(mouse, state, &targets, crossterm::terminal::size()?)
+                        app.handle_mouse_query(mouse, state, &targets, crossterm::terminal::size)
                     {
                         return Ok(exit);
                     }
@@ -304,6 +304,21 @@ struct MonitorApp {
 }
 
 impl MonitorApp {
+    fn handle_mouse_query(
+        &mut self,
+        mouse: MouseEvent,
+        state: &MonitorSnapshot,
+        targets: &MouseTargets,
+        size: impl FnOnce() -> std::io::Result<(u16, u16)>,
+    ) -> Option<MonitorExit> {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return None;
+        }
+        size()
+            .ok()
+            .and_then(|size| self.handle_mouse_sized(mouse, state, targets, size))
+    }
+
     fn handle_mouse_sized(
         &mut self,
         mouse: MouseEvent,

@@ -114,6 +114,38 @@ pub(super) fn compact(label: &str, line: Line<'static>) -> Vec<Span<'static>> {
     spans
 }
 
+pub(super) fn compact_pair(
+    first: Line<'static>,
+    second: Line<'static>,
+    width: usize,
+) -> Vec<Span<'static>> {
+    let windows = [first, second];
+    let build = |bars: bool| {
+        let mut spans = Vec::new();
+        for line in &windows {
+            let label = line.spans[0].content.trim().to_owned();
+            let mut window = compact(&label, line.clone());
+            if !bars && window.len() >= 4 {
+                window.drain(1..3);
+            }
+            if line.spans.len() > 1
+                && let Some(reset) = line.spans.last()
+            {
+                let text = reset.content.split(" (").next().unwrap_or(&reset.content);
+                window.push(Span::raw(text.replace("reset ", "")));
+            }
+            spans.extend(window);
+        }
+        spans
+    };
+    let spans = build(true);
+    if Line::from(spans.clone()).width() <= width {
+        spans
+    } else {
+        build(false)
+    }
+}
+
 pub(super) fn wrapped_height(lines: &[Line<'_>], width: u16) -> u16 {
     use ratatui::{
         buffer::Buffer,
@@ -150,9 +182,10 @@ pub(super) fn compact_with_reset(line: Line<'static>, width: u16) -> Vec<Span<'s
         reset.content = reset.content.replace("reset ", "").into();
     }
     if Line::from(spans.clone()).width() > usize::from(width) {
-        let reset = spans.pop().unwrap_or_default();
-        let content = format!("{} {}", reset.content.trim(), Line::from(spans));
-        return vec![Span::raw(cells::ellipsize(&content, usize::from(width)))];
+        return vec![Span::raw(cells::ellipsize(
+            &Line::from(spans).to_string(),
+            usize::from(width),
+        ))];
     }
     spans
 }

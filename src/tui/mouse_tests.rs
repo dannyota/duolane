@@ -485,3 +485,93 @@ fn usage_keeps_missing_and_literal_dash_provider_and_effort_separate() {
     let text = detail_text(&mut app, &state);
     assert_eq!(text.matches("distinct").count(), 3, "{text}");
 }
+
+#[test]
+fn stale_subscription_remains_marked_when_summary_does_not_fit() {
+    use crate::monitor::{CodexQuotaSnapshot, CodexQuotaWindow};
+    use std::time::{Duration, SystemTime};
+    let mut state: MonitorSnapshot = mock_state().into();
+    state.codex_quota = Some(CodexQuotaSnapshot {
+        observed_at: SystemTime::now() - Duration::from_secs(901),
+        primary: Some(CodexQuotaWindow {
+            used_percent: Some(42.0),
+            window_minutes: Some(300),
+            reset_at: None,
+        }),
+        secondary: None,
+    });
+    let mut app = app();
+    app.usage_open = true;
+    let text = buffer_text(&draw(100, 10, |frame| render(frame, &mut app, &state)));
+    assert!(text.contains("42.0%") && text.contains("Stale"), "{text}");
+    state.codex_quota.as_mut().unwrap().observed_at = SystemTime::now() + Duration::from_secs(60);
+    for height in [8, 10, 24] {
+        let text = buffer_text(&draw(100, height, |frame| render(frame, &mut app, &state)));
+        assert!(!text.contains("42.0%"), "{text}");
+    }
+}
+
+#[test]
+fn single_line_subscription_keeps_both_reset_times() {
+    use crate::monitor::{CodexQuotaSnapshot, CodexQuotaWindow};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now();
+    let reset = now.duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600;
+    let mut state: MonitorSnapshot = mock_state().into();
+    state.codex_quota = Some(CodexQuotaSnapshot {
+        observed_at: now,
+        primary: Some(CodexQuotaWindow {
+            used_percent: Some(42.0),
+            window_minutes: Some(300),
+            reset_at: Some(reset),
+        }),
+        secondary: Some(CodexQuotaWindow {
+            used_percent: Some(12.0),
+            window_minutes: Some(10080),
+            reset_at: Some(reset + 3600),
+        }),
+    });
+    let mut app = app();
+    app.usage_open = true;
+    let text = buffer_text(&draw(100, 8, |frame| render(frame, &mut app, &state)));
+    let first = cells::format_system_time(UNIX_EPOCH + Duration::from_secs(reset));
+    let second = cells::format_system_time(UNIX_EPOCH + Duration::from_secs(reset + 3600));
+    assert!(
+        text.contains("5h")
+            && text.contains("42.0%")
+            && text.contains(&first)
+            && text.contains("week")
+            && text.contains("12.0%")
+            && text.contains(&second),
+        "{text}"
+    );
+}
+
+#[test]
+fn mouse_size_query_failure_does_not_interrupt_monitor() {
+    let state: MonitorSnapshot = mock_state().into();
+    let mut app = app();
+    let mut hits = MouseTargets::default();
+    let screen = draw(120, 48, |frame| hits = render(frame, &mut app, &state));
+    let click = left_click(&screen, "2 Usage");
+    let movement = MouseEvent {
+        kind: MouseEventKind::Moved,
+        ..click
+    };
+    assert!(
+        app.handle_mouse_query(click, &state, &hits, || Err(std::io::Error::other("size")))
+            .is_none()
+    );
+    assert!(
+        app.handle_mouse_query(movement, &state, &hits, || panic!(
+            "mouse move queried size"
+        ))
+        .is_none()
+    );
+    assert!(!app.usage_open);
+    assert!(
+        app.handle_mouse_query(click, &state, &hits, || Ok((120, 48)))
+            .is_none()
+    );
+    assert!(app.usage_open);
+}
