@@ -3,7 +3,7 @@ import importlib.util
 import sys
 from pathlib import Path
 import unittest
-from unittest.mock import mock_open, patch
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("tested_tree", Path(__file__).parents[1] / "check-tested-tree.py")
@@ -12,105 +12,74 @@ spec.loader.exec_module(m)
 
 REPO = "owner/repo"
 SHA = "a" * 40
-HEAD = "b" * 40
-BASE = "c" * 40
-TREE = "d" * 40
-PATHS = {path: "e" * 40 for path in (".github", "scripts", "Makefile", ".tool-versions", "rust-toolchain.toml", ".config")}
-PR = {"number": 1, "merged_at": "2026-01-01", "merge_commit_sha": SHA, "base": {"ref": "master", "repo": {"full_name": REPO}}, "head": {"sha": HEAD}}
-RUN = {"id": 10, "status": "completed", "conclusion": "success", "head_sha": HEAD, "event": "pull_request", "repository": {"full_name": REPO}, "pull_requests": [{"number": 1, "base": {"ref": "master"}}]}
-JOBS = {"jobs": [{"id": n, "name": name, "conclusion": "success"} for n, name in enumerate(("gates", "rust", "deny", "gitleaks"), 1)]}
-PUSH = {"status": "completed", "conclusion": "success", "head_sha": SHA, "event": "push", "head_branch": "master", "repository": {"full_name": REPO}}
-
-
-def proof(parents=None, before=None, after=None, pulls=None, run=None, jobs=None, compare=None, head_tree=TREE, push_tree=TREE, timeline=None):
-    return m.push_proof(REPO, SHA, [BASE, HEAD] if parents is None else parents,
-                        PATHS if before is None else before, PATHS if after is None else after,
-                        [PR] if pulls is None else pulls, RUN if run is None else run,
-                        JOBS if jobs is None else jobs, {"status": "ahead", "behind_by": 0} if compare is None else compare,
-                        head_tree, push_tree, [{"event": "opened"}] if timeline is None else timeline)
+MASTER = "b" * 40
+RUN = {"id": 10, "run_attempt": 2, "status": "completed", "conclusion": "success", "head_sha": SHA, "event": "push", "repository": {"full_name": REPO}}
+JOB = {"name": "rust", "status": "completed", "conclusion": "success", "run_id": 10, "run_attempt": 2}
+REF = {"ref": "refs/heads/master", "object": {"type": "commit", "sha": MASTER}}
+COMPARE = {"status": "ahead"}
 
 
 class ProofTests(unittest.TestCase):
-    def test_push(self):
-        self.assertTrue(proof())
-        for parents in ([BASE], [BASE, HEAD, SHA], [BASE, SHA]):
-            self.assertFalse(proof(parents=parents))
-        for path in (".github", "Makefile"):
-            changed = dict(PATHS, **{path: SHA})
-            self.assertFalse(proof(after=changed))
-        absent = dict(PATHS, **{".config": None})
-        self.assertTrue(proof(before=absent, after=absent))
-        self.assertFalse(proof(pulls=[PR, PR]))
-        for field, value in [("merged_at", None), ("merge_commit_sha", HEAD), ("base", {"ref": "other", "repo": {"full_name": REPO}}), ("base", {"ref": "master", "repo": {"full_name": "other/repo"}})]:
-            pr = copy.deepcopy(PR)
-            pr[field] = value
-            self.assertFalse(proof(pulls=[pr]))
-        for field, value in [("pull_requests", []), ("pull_requests", [{"number": 2, "base": {"ref": "master"}}]), ("conclusion", "failure"), ("conclusion", "cancelled")]:
-            run = copy.deepcopy(RUN)
-            run[field] = value
-            self.assertFalse(proof(run=run))
-        for conclusion in ("failure", "skipped"):
-            jobs = copy.deepcopy(JOBS)
-            jobs["jobs"][0]["conclusion"] = conclusion
-            self.assertFalse(proof(jobs=jobs))
-        self.assertFalse(proof(jobs={"jobs": JOBS["jobs"][:-1]}))
-        self.assertTrue(proof(compare={"status": "identical", "behind_by": 0}))
-        for compare in ({"status": "behind", "behind_by": 1}, {"status": "diverged", "behind_by": 0}, {"status": "ahead", "behind_by": 1}, {}):
-            self.assertFalse(proof(compare=compare))
-        self.assertFalse(proof(push_tree=SHA))
-        self.assertFalse(proof(jobs={"jobs": [None]}))
-        self.assertTrue(proof(timeline=[]))
-        self.assertFalse(proof(timeline=[{"event": "base_ref_changed"}]))
-        self.assertFalse(proof(timeline=[None]))
-        self.assertFalse(proof(timeline={}))
-        self.assertFalse(m.push_proof(REPO, SHA, None, None, None, None, None, None, None, None, None, None))
-
-    def test_timeline_fetch_failure(self):
-        output = mock_open()
-        with patch.object(m.sys, "argv", ["check-tested-tree.py", "push"]), \
-             patch.dict(m.os.environ, {"GITHUB_REPOSITORY": REPO, "GITHUB_SHA": SHA, "GITHUB_OUTPUT": "output"}), \
-             patch.object(m, "git", return_value=f"{BASE} {HEAD}"), \
-             patch.object(m, "pages", side_effect=[[PR], OSError("failed timeline")]) as fetch, \
-             patch("builtins.open", output):
-            self.assertEqual(m.main(), 0)
-        self.assertEqual(fetch.call_count, 2)
-        output().write.assert_called_once_with("skip=false\n")
-
-    def test_timeline_pages(self):
-        with patch.object(m, "command", return_value='[[{"event":"opened"}],[{"event":"base_ref_changed"}]]'):
-            self.assertFalse(proof(timeline=m.pages("timeline")))
-        with patch.object(m, "command", return_value='[[{"event":"opened"}],{}]'):
-            with self.assertRaises(ValueError):
-                m.pages("timeline")
-
-    def test_release(self):
-        self.assertTrue(m.release_proof(REPO, SHA, {"workflow_runs": [PUSH]}, {"status": "ahead"}))
-        self.assertTrue(m.release_proof(REPO, SHA, {"workflow_runs": [PUSH]}, {"status": "identical"}))
-        for status in ("behind", "diverged", None):
-            self.assertFalse(m.release_proof(REPO, SHA, {"workflow_runs": [PUSH]}, {"status": status}))
-        for field, value in [("event", "pull_request"), ("head_branch", "other"), ("conclusion", "failure")]:
-            run = copy.deepcopy(PUSH)
-            run[field] = value
-            self.assertFalse(m.release_proof(REPO, SHA, {"workflow_runs": [run]}, {"status": "ahead"}))
-        self.assertFalse(m.release_proof(REPO, SHA, {"workflow_runs": [None]}, {}))
+    def test_release_proof(self):
+        self.assertTrue(m.release_proof(REPO, SHA, RUN, {"jobs": [JOB]}, REF, COMPARE))
+        self.assertTrue(m.release_proof(REPO, SHA, RUN, {"jobs": [JOB]}, REF, {"status": "identical"}))
+        for jobs in ({"jobs": [JOB, JOB]}, {"jobs": []}, {"jobs": [dict(JOB, run_attempt=1)]}, {"jobs": [dict(JOB, run_id=11)]}, {"jobs": [dict(JOB, conclusion="failure")]}, {"jobs": [dict(JOB, status="in_progress")]}, {}, None, {"jobs": [None]}):
+            self.assertFalse(m.release_proof(REPO, SHA, RUN, jobs, REF, COMPARE))
+        for run in (dict(RUN, event="pull_request"), dict(RUN, conclusion="cancelled"), dict(RUN, run_attempt=None), {}, None):
+            self.assertFalse(m.release_proof(REPO, SHA, run, {"jobs": [JOB]}, REF, COMPARE))
+        for ref in (dict(REF, object={"type": "tag", "sha": MASTER}), {}, None):
+            self.assertFalse(m.release_proof(REPO, SHA, RUN, {"jobs": [JOB]}, ref, COMPARE))
+        for compare in ({"status": "behind"}, {"status": "diverged"}, {}, None):
+            self.assertFalse(m.release_proof(REPO, SHA, RUN, {"jobs": [JOB]}, REF, compare))
 
     def test_poll(self):
-        pending = dict(PUSH, status="in_progress", conclusion=None)
+        pending = dict(RUN, status="in_progress", conclusion=None)
         clock = [0]
         def sleep(seconds):
             clock[0] += seconds
-        responses = iter([{"workflow_runs": [pending]}, {"workflow_runs": [PUSH]}])
-        self.assertTrue(m.wait_for_release(REPO, SHA, {"status": "ahead"}, lambda: next(responses), lambda: clock[0], sleep))
+        responses = iter([{"workflow_runs": [pending]}, {"workflow_runs": [RUN]}])
+        self.assertTrue(m.wait_for_release(REPO, SHA, lambda: next(responses), lambda run: {"jobs": [JOB]}, lambda: clock[0], sleep))
         self.assertEqual(clock[0], 15)
         clock[0] = 0
-        self.assertFalse(m.wait_for_release(REPO, SHA, {"status": "ahead"}, lambda: {"workflow_runs": [pending]}, lambda: clock[0], sleep))
+        self.assertFalse(m.wait_for_release(REPO, SHA, lambda: {"workflow_runs": [pending]}, lambda run: {}, lambda: clock[0], sleep))
         self.assertEqual(clock[0], 300)
+        self.assertFalse(m.wait_for_release(REPO, SHA, lambda: {"workflow_runs": [None]}, lambda run: {}))
 
-    def test_yaml_when_available(self):
-        try:
-            import yaml
-        except ImportError:
-            self.skipTest("PyYAML is not available")
+    def test_lookup_order_and_failures(self):
+        calls = []
+        def fetch_runs():
+            calls.append("runs")
+            return {"workflow_runs": [RUN]}
+        def fetch_jobs(run):
+            calls.append("jobs")
+            return {"jobs": [JOB]}
+        def fetch_ref():
+            calls.append("ref")
+            return REF
+        def fetch_compare(sha):
+            calls.append(("compare", sha))
+            return COMPARE
+        self.assertTrue(m.check_release(REPO, SHA, fetch_runs, fetch_jobs, fetch_ref, fetch_compare))
+        self.assertEqual(calls, ["runs", "jobs", "ref", ("compare", MASTER)])
+        for broken in (lambda: None, lambda: {}, lambda: {"workflow_runs": [None]}):
+            self.assertFalse(m.check_release(REPO, SHA, broken, fetch_jobs, fetch_ref, fetch_compare))
+        self.assertFalse(m.check_release(REPO, SHA, fetch_runs, lambda run: None, fetch_ref, fetch_compare))
+        def failing_jobs(run):
+            raise OSError("jobs unavailable")
+        self.assertFalse(m.check_release(REPO, SHA, fetch_runs, failing_jobs, fetch_ref, fetch_compare))
+        self.assertFalse(m.check_release(REPO, SHA, fetch_runs, fetch_jobs, lambda: None, fetch_compare))
+        self.assertFalse(m.check_release(REPO, SHA, fetch_runs, fetch_jobs, fetch_ref, lambda sha: None))
+
+    def test_pages(self):
+        with patch.object(m, "command", return_value='[{"jobs":[]},{"jobs":[]}]'):
+            self.assertEqual(m.pages("jobs", "jobs"), [])
+        for malformed in ("null", "[]", '[{"jobs":[]},{}]', "not json"):
+            with patch.object(m, "command", return_value=malformed):
+                with self.assertRaises((ValueError, KeyError, TypeError)):
+                    m.pages("jobs", "jobs")
+
+    def test_workflow_structure(self):
+        import yaml
         workflows = {}
         for name in ("ci.yml", "release.yml"):
             with (Path(__file__).parents[2] / ".github" / "workflows" / name).open() as f:
@@ -121,6 +90,8 @@ class ProofTests(unittest.TestCase):
                 if name != "ci":
                     self.assertNotIn("always()", job.get("if", ""), name)
         jobs = workflows["release.yml"]["jobs"]
+        self.assertTrue(jobs["tested"]["steps"])
+        self.assertTrue(all(step.get("continue-on-error") is True for step in jobs["tested"]["steps"]))
         def needs(job):
             value = job.get("needs", [])
             return [value] if isinstance(value, str) else value

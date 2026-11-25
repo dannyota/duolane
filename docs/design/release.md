@@ -8,66 +8,38 @@ cannot be replaced.
 
 ## Checked commits
 
-CI and the Release workflow reuse passing tests when the conditions below hold.
-The checks that depend on history or on the day they run still run each time.
+The Release workflow reuses the tests that CI already passed on the tagged
+commit, so a release does not wait for the same tests a third time.
 
-### Push to master
+CI still runs every job for a push to `master`. That run blocks nothing, because
+the pull request already merged, and proving that a pull request run tested
+exactly the merged tree needs more history than GitHub records reliably.
 
-A CI run for a push to `refs/heads/master` skips only the `rust` job, and only
-with proof that this repository's own checks already passed on the pushed tree.
-All of these must hold:
+### Proof at the tag
 
-- The pushed commit is the merge commit of exactly one merged pull request of
-  this repository into `master`, and its second parent is the pull request's
-  head.
-- The head already contained `master`: the first parent of the merge is an
-  ancestor of the head, and the head and the pushed commit have the same tree.
-  The pull request run tested the merge of that head into an earlier or equal
-  `master`, which is then the same tree, with the workflow files of that tree.
-- The merge changed nothing that defines the checks: `.github/`, `scripts/`,
-  `Makefile`, `.tool-versions`, `rust-toolchain.toml`, and `.config/` are the
-  same in the pushed commit and in its first parent. A pull request that changes
-  them is tested again after it merges.
-- A completed, successful CI run for the `pull_request` event exists at that
-  head, linked to that pull request with base `master`. A run without that link,
-  as a fork's pull request has, is no proof.
-- In that run the jobs `gates`, `rust`, `deny`, and `gitleaks` each succeeded.
-- The pull request always targeted `master`: its timeline has no change of base
-  branch. A timeline that cannot be read in full is no proof.
+The tests of the Release workflow are skipped only when all of these hold:
 
-Equal trees alone are not proof. When the head does not contain `master`,
-`master` can change and change back between the run and the merge, and the run
-tested the merge of the head into the `master` of that moment.
+- A completed, successful CI run for a `push` event exists in this repository at
+  the commit the Release workflow checked out. A push run checks out the pushed
+  commit with the workflow file of that commit, so it tested that tree whatever
+  its ref.
+- In the latest attempt of that run, the job `rust` completed with success.
+- The commit is `master` or an ancestor of it, with `master` resolved from
+  `refs/heads/master` just before the proof is accepted.
 
-Without the proof the run does every job it is eligible for. With it, `gates`,
-`deny`, and `gitleaks` still run: `gitleaks` scans the history that the merge
-created, `gates` checks action pins against tags that can move, and `deny` reads
-advisories published since the pull request run.
+The workflow waits up to five minutes for a matching run that is still in
+progress. Without the proof it runs the tests itself, as before.
 
-Scheduled runs, and manually dispatched runs, never skip. The build cache is
-saved only by `rust` jobs on `refs/heads/master`, so a skipped run does not
-refresh it; the weekly run does. The CI badge shows the result of the whole
-workflow.
-
-### Tag
-
-The Release workflow reuses the test result of the tagged commit. The proof is a
-completed, successful CI run for a `push` to `refs/heads/master` at the commit
-the Release workflow checked out, which must still be `master` or an ancestor of
-it. It waits up to five minutes for a run that is still in progress. A cancelled
-run counts only after a re-run succeeds.
-
-With the proof the workflow skips its tests. It always runs the dependency
-policy at the tag, because an advisory can appear after the pull request.
-Without the proof it runs the tests itself, as before. The builds start only
-after the dependency policy passed and either the proof was found or the tests
-passed.
+The dependency policy always runs at the tag, because an advisory can appear
+after the pull request. The builds start only after the dependency policy passed
+and either the proof was found or the tests passed.
 
 ### Lookups
 
-The jobs that look for proof read GitHub's API with a read-only token and write
-nothing. They pass no title, branch name, or other text from a pull request into
-a shell command, and any error or ambiguity means no proof.
+The job that looks for proof never fails the run: each of its steps continues on
+error, and a missing or unexpected answer means no proof. It reads GitHub's API
+with a read-only token, writes nothing, and passes no text from a pull request
+or ref into a shell command.
 
 ## Approaches
 

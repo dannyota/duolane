@@ -19,26 +19,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  tested:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-      actions: read
-    outputs:
-      skip: ${{ steps.proof.outputs.skip }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 2
-          persist-credentials: false
-      - id: proof
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 -I scripts/check-tested-tree.py push
-
   gates:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -75,8 +55,6 @@ jobs:
         run: make docs
 
   rust:
-    needs: tested
-    if: ${{ !cancelled() && (needs.tested.result != 'success' || needs.tested.outputs.skip != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -179,7 +157,7 @@ jobs:
 
   ci:
     if: ${{ always() }}
-    needs: [tested, gates, rust, deny, gitleaks, crate-age]
+    needs: [gates, rust, deny, gitleaks, crate-age]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -194,16 +172,13 @@ jobs:
           import sys
 
           needs = json.loads(os.environ["NEEDS"])
-          expected = {"tested", "gates", "rust", "deny", "gitleaks", "crate-age"}
+          expected = {"gates", "rust", "deny", "gitleaks", "crate-age"}
           if set(needs) != expected:
               sys.exit(f"needed jobs {sorted(needs)} differ from {sorted(expected)}")
-          event = os.environ["EVENT"]
-          tested = needs["tested"]
-          proven = event == "push" and tested["result"] == "success" and tested.get("outputs", {}).get("skip") == "true"
           failed = []
           for name, job in sorted(needs.items()):
               result = job["result"]
-              optional = (name == "crate-age" and event != "pull_request") or (name == "tested" and event != "push") or (name == "rust" and proven)
+              optional = name == "crate-age" and os.environ["EVENT"] != "pull_request"
               if result != "success" and not (optional and result == "skipped"):
                   failed.append(f"{name}: {result}")
           if failed:
