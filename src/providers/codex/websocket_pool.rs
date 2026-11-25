@@ -94,6 +94,7 @@ pub(super) struct PoolEntry {
     identity: Option<HandshakeIdentity>,
     created_at: u64,
     last_activity: AtomicU64,
+    return_id: AtomicU64,
     completed_ids: Mutex<std::collections::HashSet<[u8; 32]>>,
 }
 
@@ -105,6 +106,7 @@ impl PoolEntry {
             identity: None,
             created_at: now_ms(),
             last_activity: AtomicU64::new(next_pool_activity()),
+            return_id: AtomicU64::new(0),
             completed_ids: Mutex::new(std::collections::HashSet::new()),
         }
     }
@@ -145,6 +147,7 @@ static NEXT_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
 pub(super) static POOLED_VALIDATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 static POOL_ACTIVITY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static POOL_RETURN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(super) type PoolKey = (ConversationIdentity, ReasoningAccount, bool);
 
@@ -318,22 +321,26 @@ pub(super) fn pool_insert_for_turn(
     reservation: &ContinuationReservation,
     entry: Arc<PoolEntry>,
 ) -> bool {
-    let Some(owner) = reservation_pool_owner(Some(reservation)) else {
-        return false;
-    };
+    pool_insert_for_turn_token(reservation, entry).is_some()
+}
+
+pub(super) fn pool_insert_for_turn_token(
+    reservation: &ContinuationReservation,
+    entry: Arc<PoolEntry>,
+) -> Option<u64> {
+    let owner = reservation_pool_owner(Some(reservation))?;
     if !owner.2 {
-        return pool_insert_if_vacant_or_same(owner, entry);
+        return pool_insert_token(owner, entry);
     }
-    super::continuation::if_current_turn_for_owner(reservation, || {
-        pool_insert_if_vacant_or_same(owner, entry)
-    })
-    .unwrap_or(false)
+    super::continuation::if_current_turn_for_owner(reservation, || pool_insert_token(owner, entry))
+        .flatten()
 }
 
 pub(super) fn pool_remove_entry(owner: &PoolKey, entry: &Arc<PoolEntry>) {
     invalidate_pool_entry(owner, entry);
 }
 
+#[cfg(test)]
 pub(super) fn invalidate_codex_websocket_pool_socket(
     reservation: &ContinuationReservation,
     socket_id: Option<u64>,
@@ -354,8 +361,28 @@ pub(super) fn invalidate_codex_websocket_pool_socket(
     }
 }
 
+pub(super) fn invalidate_codex_websocket_pool_return(
+    reservation: &ContinuationReservation,
+    return_id: Option<u64>,
+) {
+    let (Some(owner), Some(return_id)) = (reservation_pool_owner(Some(reservation)), return_id)
+    else {
+        return;
+    };
+    if let Ok(mut pool) = WS_POOL.lock()
+        && pool
+            .get(&owner)
+            .is_some_and(|entry| entry.return_id.load(Ordering::Relaxed) == return_id)
+    {
+        pool.remove(&owner);
+    }
+}
+
 fn pool_insert_if_vacant_or_same(owner: PoolKey, entry: Arc<PoolEntry>) -> bool {
-    entry.touch();
+    pool_insert_token(owner, entry).is_some()
+}
+
+fn pool_insert_token(owner: PoolKey, entry: Arc<PoolEntry>) -> Option<u64> {
     let mut guard = WS_POOL.lock().unwrap();
     let now = now_ms();
     let expired_keys: Vec<_> = guard
@@ -371,12 +398,12 @@ fn pool_insert_if_vacant_or_same(owner: PoolKey, entry: Arc<PoolEntry>) -> bool 
         let same = Arc::ptr_eq(existing, &entry);
         drop(guard);
         drop(expired);
-        return same;
+        return same.then(|| entry.return_id.load(Ordering::Relaxed));
     }
     if *IDLE_POOL_BOUND == 0 {
         drop(guard);
         drop(expired);
-        return false;
+        return None;
     }
     let evicted = if guard.len() >= *IDLE_POOL_BOUND {
         guard
@@ -387,11 +414,14 @@ fn pool_insert_if_vacant_or_same(owner: PoolKey, entry: Arc<PoolEntry>) -> bool 
     } else {
         None
     };
+    let return_id = next_monotonic_nonzero(&POOL_RETURN_SEQUENCE, "WebSocket return ID");
+    entry.return_id.store(return_id, Ordering::Relaxed);
+    entry.touch();
     guard.insert(owner, entry);
     drop(guard);
     drop(evicted);
     drop(expired);
-    true
+    Some(return_id)
 }
 
 #[cfg(test)]
@@ -977,6 +1007,7 @@ mod tests {
                 identity: None,
                 created_at: now_ms(),
                 last_activity: AtomicU64::new(next_pool_activity()),
+                return_id: AtomicU64::new(0),
                 completed_ids: Mutex::new(std::collections::HashSet::new()),
             });
             assert!(pool_insert_if_vacant_or_same(

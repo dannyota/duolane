@@ -453,23 +453,22 @@ pub(super) fn start_codex_websocket_events(
         .await;
         drop(guard);
 
-        let origin_reinserted = if reusable {
+        let return_id = if reusable {
             reservation
                 .as_ref()
-                .is_some_and(|reservation| pool_insert_for_turn(reservation, entry.clone()))
+                .and_then(|reservation| pool_insert_for_turn_token(reservation, entry.clone()))
         } else {
             if let Some(owner) = &pool_owner {
                 pool_remove_entry(owner, &entry);
             }
-            false
+            None
         };
-        socket_id_publisher.publish(origin_reinserted.then_some(entry.socket_id));
+        socket_id_publisher.publish_return(return_id.map(|_| entry.socket_id), return_id);
         if let Some(item) = terminal_item
             && tx.send(item).await.is_err()
-            && origin_reinserted
-            && let Some(owner) = &pool_owner
+            && let Some(reservation) = reservation.as_ref()
         {
-            pool_remove_entry(owner, &entry);
+            invalidate_codex_websocket_pool_return(reservation, return_id);
         }
     });
     receiver

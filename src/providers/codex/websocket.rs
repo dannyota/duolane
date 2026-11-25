@@ -16,6 +16,7 @@ pub const WEBSOCKET_PROTOCOL_HEADER: &str = "responses_websockets=2026-02-06";
 pub const WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
 pub const WEBSOCKET_IDLE_TIMEOUT_MS: u64 = 300_000;
 pub const WEBSOCKET_RESPONSE_START_TIMEOUT_DETAIL: &str = "websocket_response_start_timeout";
+pub const WEBSOCKET_STALE_RESPONSE_DETAIL: &str = "websocket_stale_response";
 pub const WEBSOCKET_MISSING_TERMINAL_DETAIL: &str = "websocket_missing_terminal";
 pub const WEBSOCKET_KEEPALIVE_FAILURE_DETAIL: &str = "websocket_keepalive_failure";
 pub const WEBSOCKET_CONTINUATION_SOCKET_MISSING_DETAIL: &str =
@@ -32,6 +33,7 @@ pub(crate) struct CodexWebSocketEventStream {
     receiver: CodexWebSocketEventReceiver,
     is_http: bool,
     socket_id: Arc<AtomicU64>,
+    return_id: Arc<AtomicU64>,
     full_context_retry: Arc<AtomicBool>,
     provider_retry_handoff: Arc<AtomicBool>,
 }
@@ -39,6 +41,7 @@ pub(crate) struct CodexWebSocketEventStream {
 #[derive(Clone)]
 pub(crate) struct CodexWebSocketSocketIdPublisher {
     socket_id: Arc<AtomicU64>,
+    return_id: Arc<AtomicU64>,
     full_context_retry: Arc<AtomicBool>,
     provider_retry_handoff: Arc<AtomicBool>,
 }
@@ -48,6 +51,7 @@ impl CodexWebSocketEventStream {
         receiver: CodexWebSocketEventReceiver,
     ) -> (Self, CodexWebSocketSocketIdPublisher) {
         let socket_id = Arc::new(AtomicU64::new(0));
+        let return_id = Arc::new(AtomicU64::new(0));
         let full_context_retry = Arc::new(AtomicBool::new(false));
         let provider_retry_handoff = Arc::new(AtomicBool::new(false));
         (
@@ -55,11 +59,13 @@ impl CodexWebSocketEventStream {
                 receiver,
                 is_http: false,
                 socket_id: socket_id.clone(),
+                return_id: return_id.clone(),
                 full_context_retry: full_context_retry.clone(),
                 provider_retry_handoff: provider_retry_handoff.clone(),
             },
             CodexWebSocketSocketIdPublisher {
                 socket_id,
+                return_id,
                 full_context_retry,
                 provider_retry_handoff,
             },
@@ -87,6 +93,13 @@ impl CodexWebSocketEventStream {
         }
     }
 
+    pub(crate) fn return_id(&self) -> Option<u64> {
+        match self.return_id.load(Ordering::Acquire) {
+            0 => None,
+            id => Some(id),
+        }
+    }
+
     pub(crate) fn used_full_context_retry(&self) -> bool {
         self.full_context_retry.load(Ordering::Acquire)
     }
@@ -111,6 +124,12 @@ impl CodexWebSocketSocketIdPublisher {
     pub(super) fn publish(&self, socket_id: Option<u64>) {
         self.socket_id
             .store(socket_id.unwrap_or(0), Ordering::Release);
+    }
+
+    pub(super) fn publish_return(&self, socket_id: Option<u64>, return_id: Option<u64>) {
+        self.return_id
+            .store(return_id.unwrap_or(0), Ordering::Release);
+        self.publish(socket_id);
     }
 
     pub(super) fn mark_full_context_retry(&self) {

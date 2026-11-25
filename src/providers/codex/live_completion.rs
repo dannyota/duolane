@@ -181,7 +181,7 @@ pub(super) fn retryable_live_start_codex_error(err: &client::CodexError) -> bool
         }
         return err.status == 0 || matches!(err.status, 429 | 500 | 502 | 503 | 504 | 529);
     }
-    if err.origin == client::CodexErrorOrigin::WebSocketTransient {
+    if err.detail.as_deref() == Some(websocket::WEBSOCKET_STALE_RESPONSE_DETAIL) {
         return true;
     }
     if err.detail.as_deref() == Some(websocket::WEBSOCKET_KEEPALIVE_FAILURE_DETAIL) {
@@ -569,6 +569,17 @@ mod tests {
             origin: client::CodexErrorOrigin::WebSocketHandshake,
         };
 
+        assert!(!retryable_live_start_codex_error(&err));
+    }
+
+    #[test]
+    fn fresh_invalid_data_io_failure_is_not_retried() {
+        let source = tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid data",
+        ));
+        let mut err = super::super::websocket_request::websocket_transport_error("stream", &source);
+        err.origin = client::CodexErrorOrigin::WebSocketTransient;
         assert!(!retryable_live_start_codex_error(&err));
     }
 
