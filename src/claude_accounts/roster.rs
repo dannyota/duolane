@@ -370,6 +370,55 @@ fn pad(text: &str, width: usize) -> String {
     format!("{text}{}", " ".repeat(fill))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Status {
+    Available,
+    Limited(Option<u64>),
+    Unknown,
+}
+
+fn status(limits: Option<&Limits>, now: u64) -> Status {
+    let windows: Vec<&Window> = limits
+        .into_iter()
+        .flat_map(|limits| [limits.five_hour.as_ref(), limits.seven_day.as_ref()])
+        .flatten()
+        .collect();
+    if windows.is_empty() {
+        return Status::Unknown;
+    }
+    let limited: Vec<&Window> = windows
+        .into_iter()
+        .filter(|window| percent(window, now) >= 100)
+        .collect();
+    if limited.is_empty() {
+        return Status::Available;
+    }
+    Status::Limited(
+        limited
+            .iter()
+            .map(|window| window.resets_at)
+            .collect::<Option<Vec<u64>>>()
+            .and_then(|resets| resets.into_iter().max()),
+    )
+}
+
+fn status_cell(status: Status, now: u64) -> String {
+    match status {
+        Status::Available => "available".into(),
+        Status::Limited(Some(reset)) => format!("limited {}", span(reset.saturating_sub(now))),
+        Status::Limited(None) => "limited".into(),
+        Status::Unknown => "unknown".into(),
+    }
+}
+
+fn paint(status: Status, cell: String) -> String {
+    match status {
+        Status::Available => cell.green().to_string(),
+        Status::Limited(_) => cell.red().bold().to_string(),
+        Status::Unknown => cell.dim().to_string(),
+    }
+}
+
 fn heat(cell: String) -> String {
     let used = cell
         .split('%')
@@ -382,7 +431,7 @@ fn heat(cell: String) -> String {
     }
 }
 
-const COLUMNS: usize = 8;
+const COLUMNS: usize = 9;
 
 pub(super) fn table(
     entries: &[Entry],
@@ -415,6 +464,7 @@ pub(super) fn table(
                 ),
             };
             let usage = usage(entries, entry, limits);
+            let state = status(usage, seconds);
             let note = entry
                 .same_as
                 .as_ref()
@@ -425,6 +475,7 @@ pub(super) fn table(
                 account,
                 plan,
                 login,
+                status_cell(state, seconds),
                 window_cell(usage.and_then(|limits| limits.five_hour.as_ref()), seconds),
                 window_cell(usage.and_then(|limits| limits.seven_day.as_ref()), seconds),
                 usage
@@ -435,7 +486,7 @@ pub(super) fn table(
         })
         .collect();
     let titles = [
-        "PROFILE", "ACCOUNT", "PLAN", "LOGIN", "5H", "7D", "SEEN", "",
+        "PROFILE", "ACCOUNT", "PLAN", "LOGIN", "STATUS", "5H", "7D", "SEEN", "",
     ];
     let widths: Vec<usize> = (0..COLUMNS)
         .map(|column| {
@@ -469,7 +520,18 @@ pub(super) fn table(
             if !color {
                 return line(if chosen { "●" } else { " " }, padded);
             }
-            let [name, account, plan, login, five_hour, seven_day, seen, note] = padded;
+            let state = status(usage(entries, entry, limits), seconds);
+            let [
+                name,
+                account,
+                plan,
+                login,
+                state_cell,
+                five_hour,
+                seven_day,
+                seen,
+                note,
+            ] = padded;
             let marker = if chosen {
                 "●".green().to_string()
             } else {
@@ -490,6 +552,7 @@ pub(super) fn table(
                     },
                     plan,
                     login.dim().to_string(),
+                    paint(state, state_cell),
                     heat(five_hour),
                     heat(seven_day),
                     seen.dim().to_string(),
@@ -594,6 +657,31 @@ mod tests {
     }
 
     #[test]
+    fn claude_accounts_roster_marks_limited_until_reset() {
+        let now = 1_000_000;
+        let limits = |five: f64, reset: u64| Limits {
+            five_hour: Some(Window {
+                used: five,
+                resets_at: Some(reset),
+            }),
+            seven_day: Some(Window {
+                used: 0.3,
+                resets_at: None,
+            }),
+            observed_at: now,
+        };
+        let full = limits(1.0, now + 4800);
+        assert_eq!(status(Some(&full), now), Status::Limited(Some(now + 4800)));
+        assert_eq!(status_cell(status(Some(&full), now), now), "limited 1h20m");
+        assert_eq!(status(Some(&limits(1.0, now - 1)), now), Status::Available);
+        assert_eq!(
+            status(Some(&limits(0.99, now + 60)), now),
+            Status::Available
+        );
+        assert_eq!(status(None, now), Status::Unknown);
+    }
+
+    #[test]
     fn claude_accounts_roster_shows_usage_per_account_and_total() {
         let now: jiff::Timestamp = "2026-01-10T00:00:00Z".parse().unwrap();
         let at = u64::try_from(now.as_second()).unwrap();
@@ -641,11 +729,23 @@ mod tests {
         assert!(table.header.contains("5H") && table.header.contains("SEEN"));
         assert_eq!(
             words(0)[2..],
-            ["a@example.com", "62%", "2h10m", "20%", "3d5h", "5m", "ago"]
+            [
+                "a@example.com",
+                "available",
+                "62%",
+                "2h10m",
+                "20%",
+                "3d5h",
+                "5m",
+                "ago"
+            ]
         );
-        assert_eq!(words(1)[1..], ["b@example.com", "0%", "40%", "1m", "now"]);
-        assert_eq!(words(2)[2..6], ["62%", "2h10m", "20%", "3d5h"]);
-        assert_eq!(words(3)[1..], ["c@example.com", "-", "-"]);
+        assert_eq!(
+            words(1)[1..],
+            ["b@example.com", "available", "0%", "40%", "1m", "now"]
+        );
+        assert_eq!(words(2)[2..7], ["available", "62%", "2h10m", "20%", "3d5h"]);
+        assert_eq!(words(3)[1..], ["c@example.com", "unknown", "-", "-"]);
         assert_eq!(
             total(&entries, &limits, now),
             "all accounts: 5H 31% used, 7D 30% used (2 of 3 seen by the proxy)"

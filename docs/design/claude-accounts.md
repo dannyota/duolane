@@ -170,6 +170,12 @@ credential to do so.
   profile name or whose value is out of range.
 - A value changes only when that account sends a request through the proxy.
   `SEEN` shows its age, and a window whose reset time has passed shows 0%.
+- `STATUS` summarizes the newest values. `limited` means a window shows 100% and
+  its reset has not passed; it shows the time until the latest such reset.
+  `available` means at least one window was seen and none is limited. `unknown`
+  means the proxy has no values for the account. On a color terminal,
+  `available` is green, `limited` is bold red, and `unknown` is dim. `STATUS` is
+  an observation, not a reason to change accounts automatically.
 - Profiles that hold the same account share the newest values. The total line is
   the mean over the accounts the proxy has seen, counting each account once, so
   it assumes equal plans.
