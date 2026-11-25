@@ -36,6 +36,22 @@ pub(crate) struct CodexWebSocketEventStream {
     return_id: Arc<AtomicU64>,
     full_context_retry: Arc<AtomicBool>,
     provider_retry_handoff: Arc<AtomicBool>,
+    auto_cleanup: Option<AutoCleanup>,
+}
+
+struct AutoCleanup {
+    continuation: super::continuation::ContinuationReservation,
+    terminal_read: Arc<AtomicBool>,
+}
+
+impl Drop for CodexWebSocketEventStream {
+    fn drop(&mut self) {
+        if let Some(cleanup) = &self.auto_cleanup
+            && !cleanup.terminal_read.load(Ordering::Acquire)
+        {
+            invalidate_codex_websocket_pool_return(&cleanup.continuation, self.return_id());
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -62,6 +78,7 @@ impl CodexWebSocketEventStream {
                 return_id: return_id.clone(),
                 full_context_retry: full_context_retry.clone(),
                 provider_retry_handoff: provider_retry_handoff.clone(),
+                auto_cleanup: None,
             },
             CodexWebSocketSocketIdPublisher {
                 socket_id,
@@ -83,7 +100,15 @@ impl CodexWebSocketEventStream {
     }
 
     pub(crate) async fn recv(&mut self) -> Option<Result<serde_json::Value, CodexError>> {
-        self.receiver.recv().await
+        let item = self.receiver.recv().await;
+        if item
+            .as_ref()
+            .is_some_and(|item| item.as_ref().is_ok_and(is_terminal_event))
+            && let Some(cleanup) = &self.auto_cleanup
+        {
+            cleanup.terminal_read.store(true, Ordering::Release);
+        }
+        item
     }
 
     pub(crate) fn socket_id(&self) -> Option<u64> {
@@ -113,8 +138,9 @@ impl CodexWebSocketEventStream {
         self.provider_retry_handoff.store(true, Ordering::Release);
     }
 
-    pub(crate) fn into_receiver(self) -> CodexWebSocketEventReceiver {
-        self.receiver
+    pub(crate) fn into_receiver(mut self) -> CodexWebSocketEventReceiver {
+        let (_, receiver) = tokio::sync::mpsc::channel(1);
+        std::mem::replace(&mut self.receiver, receiver)
     }
 
     pub(super) fn forward_auto(
@@ -130,7 +156,13 @@ impl CodexWebSocketEventStream {
             return_id: self.return_id.clone(),
             full_context_retry: self.full_context_retry.clone(),
             provider_retry_handoff: self.provider_retry_handoff.clone(),
+            auto_cleanup: None,
         };
+        let terminal_read = Arc::new(AtomicBool::new(false));
+        self.auto_cleanup = continuation.clone().map(|continuation| AutoCleanup {
+            continuation,
+            terminal_read: terminal_read.clone(),
+        });
         tokio::spawn(async move {
             if continuation.is_none() {
                 if tx.send(first).await.is_ok() {
@@ -148,14 +180,50 @@ impl CodexWebSocketEventStream {
                         item = source.recv() => item,
                     },
                 };
-                let Some(next) = next else { return };
+                let Some(next) = next else {
+                    #[cfg(test)]
+                    if continuation.as_ref().and_then(|r| r.owner())
+                        == Some(&crate::request_identity::ConversationIdentity::Main(
+                            "auto-terminal-drop".into(),
+                        ))
+                    {
+                        super::client_live::tests::AUTO_FORWARD_EOF.add_permits(1);
+                    }
+                    return;
+                };
+                #[cfg(test)]
+                let terminal = next.as_ref().is_ok_and(is_terminal_event);
                 if tx.send(next).await.is_err() {
                     break;
                 }
+                #[cfg(test)]
+                if terminal
+                    && continuation.as_ref().and_then(|r| r.owner())
+                        == Some(&crate::request_identity::ConversationIdentity::Main(
+                            "auto-terminal-delivered".into(),
+                        ))
+                {
+                    super::client_live::tests::AUTO_FORWARD_TERMINAL.add_permits(1);
+                    super::client_live::tests::AUTO_FORWARD_RELEASE
+                        .acquire()
+                        .await
+                        .unwrap()
+                        .forget();
+                }
             }
             let return_id = source.close_and_return_id();
-            if let Some(reservation) = continuation.as_ref() {
+            if !terminal_read.load(Ordering::Acquire)
+                && let Some(reservation) = continuation.as_ref()
+            {
                 invalidate_codex_websocket_pool_return(reservation, return_id);
+            }
+            #[cfg(test)]
+            if continuation.as_ref().and_then(|r| r.owner())
+                == Some(&crate::request_identity::ConversationIdentity::Main(
+                    "auto-terminal-delivered".into(),
+                ))
+            {
+                super::client_live::tests::AUTO_FORWARD_DONE.add_permits(1);
             }
         });
         self

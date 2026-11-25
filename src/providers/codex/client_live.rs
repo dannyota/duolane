@@ -603,6 +603,10 @@ pub(crate) mod tests {
 
     static RACE_HOOK: Mutex<Option<Arc<RaceHook>>> = Mutex::new(None);
     pub(super) static AUTO_TERMINAL_QUEUED: Semaphore = Semaphore::const_new(0);
+    pub(crate) static AUTO_FORWARD_EOF: Semaphore = Semaphore::const_new(0);
+    pub(crate) static AUTO_FORWARD_TERMINAL: Semaphore = Semaphore::const_new(0);
+    pub(crate) static AUTO_FORWARD_RELEASE: Semaphore = Semaphore::const_new(0);
+    pub(crate) static AUTO_FORWARD_DONE: Semaphore = Semaphore::const_new(0);
 
     pub(crate) fn race_hook(
         reservation: Option<&super::super::continuation::ContinuationReservation>,
@@ -790,13 +794,6 @@ pub(crate) mod tests {
                 ))
                 .await
                 .unwrap();
-                for _ in 0..70 {
-                    ws.send(tokio_tungstenite::tungstenite::Message::text(
-                        r#"{"type":"response.in_progress"}"#,
-                    ))
-                    .await
-                    .unwrap();
-                }
                 ws.send(tokio_tungstenite::tungstenite::Message::text(
                 r#"{"type":"response.completed","response":{"id":"first","status":"completed"}}"#,
             )).await.unwrap();
@@ -816,6 +813,7 @@ pub(crate) mod tests {
             .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             AUTO_TERMINAL_QUEUED.acquire().await.unwrap().forget();
+            AUTO_FORWARD_EOF.acquire().await.unwrap().forget();
         })
         .await
         .unwrap();
@@ -875,7 +873,10 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
+        AUTO_FORWARD_TERMINAL.acquire().await.unwrap().forget();
         drop(events);
+        AUTO_FORWARD_RELEASE.add_permits(1);
+        AUTO_FORWARD_DONE.acquire().await.unwrap().forget();
         server.await.unwrap();
         assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_some());
         super::super::websocket::clear_codex_websocket_pool_for_tests();
