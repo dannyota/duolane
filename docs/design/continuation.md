@@ -97,17 +97,21 @@ kept, still continues.
 
 Two argument texts are equal when they are the same text. Otherwise they are
 equal only when both parse as JSON without a repeated key in any object, every
-number in both is one that a 64-bit float holds exactly as written, and the
-parsed values are equal. A number with more precision, or a repeated key, makes
-the texts unequal, because parsing would hide the difference.
+number in both is zero or a normal 64-bit float that holds it exactly as
+written, and the parsed values are equal. A number with more precision, a
+subnormal number, or a repeated key makes the texts unequal, because parsing
+would hide the difference.
 
 ## The socket without continuation
 
 A request that sends its full context still reuses the conversation's pooled
 socket, as [transport and retries](codex.md#transport-and-retries) allows with
-continuation off. Not continuing never closes the socket by itself. A retry with
-full context after a failure, and a request that moves to HTTP, still remove the
-conversation's socket from the pool first, as they do today.
+continuation off. Not continuing never closes the socket by itself.
+
+A retry after a failure, including an empty completion, and a request that moves
+to HTTP still remove the conversation's socket from the pool first, for either
+continuation setting and whether or not the failed attempt continued. So does an
+account change found before the request is sent.
 
 ## Limits of the proof
 

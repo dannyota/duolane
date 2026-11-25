@@ -143,6 +143,11 @@ mod tests {
         call("{\"n\":1.0}")
     );
     reject!(
+        distinct_subnormal_arguments_block_recording,
+        call("{\"n\":7.36278524387018e-310}"),
+        call("{\"n\":7.3627852438702e-310}")
+    );
+    reject!(
         different_argument_value,
         call("{\"a\":1}"),
         call("{\"a\":2}")

@@ -203,18 +203,15 @@ pub(super) fn is_missing_previous_response_error(err: &client::CodexError) -> bo
 pub(super) fn drop_live_continuation_for_retry(
     continuation: &mut Option<ContinuationReservation>,
 ) -> bool {
-    if continuation
+    let dropped = continuation
         .as_ref()
         .and_then(|reservation| reservation.candidate().previous_response_id.as_deref())
-        .is_none()
-    {
-        return false;
-    }
-
+        .is_some();
     if let Some(reservation) = continuation.as_ref() {
+        super::client_live::invalidate_live_continuation_pool(Some(reservation));
         *continuation = Some(reservation.full_context_retry());
     }
-    true
+    dropped
 }
 
 fn retryable_live_message(message: &str) -> bool {

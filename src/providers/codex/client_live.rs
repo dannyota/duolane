@@ -74,10 +74,15 @@ impl CodexHttpClient {
             None => {
                 let auth = if ctx.recovery_budget.is_tracked() {
                     self.auth_for_buffered_http(&body.reasoning_account, &ctx.recovery_budget)
-                        .await?
+                        .await
                 } else {
-                    self.auth_for(&body.reasoning_account).await?
-                };
+                    self.auth_for(&body.reasoning_account).await
+                }
+                .inspect_err(|error| {
+                    if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
+                        invalidate_live_continuation_pool(continuation);
+                    }
+                })?;
                 let quota = quota_for_auth(ctx, &auth);
                 (auth, None, quota)
             }
@@ -87,11 +92,8 @@ impl CodexHttpClient {
             ctx.recovery_budget
                 .set_credential(super::sources::CredentialId::for_chatgpt_auth(&auth));
         }
-        let turn_id = continuation.and_then(super::continuation::ContinuationReservation::turn_id);
-        if should_reset_websocket_pool(continuation)
-            && let Some(owner) = websocket_pool_owner(continuation)
-        {
-            super::websocket::invalidate_codex_websocket_pool_turn_for_owner(owner, turn_id);
+        if should_reset_websocket_pool(continuation) {
+            invalidate_live_continuation_pool(continuation);
         }
 
         let client = self.clone();
@@ -551,10 +553,7 @@ pub(super) fn invalidate_live_continuation_pool(
     let Some(continuation) = continuation else {
         return;
     };
-    let Some(owner) = websocket_pool_owner(Some(continuation)) else {
-        return;
-    };
-    super::websocket::invalidate_codex_websocket_pool_turn_for_owner(owner, continuation.turn_id());
+    super::websocket::invalidate_codex_websocket_pool_reservation(continuation);
 }
 
 #[cfg(test)]

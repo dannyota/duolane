@@ -115,7 +115,7 @@ fn number_is_safe(number: &str) -> bool {
     let Ok(value) = number.parse::<f64>() else {
         return false;
     };
-    if !value.is_finite() {
+    if !value.is_finite() || !(value == 0.0 || value.is_normal()) {
         return false;
     }
     let Some(original) = normalized(number) else {
@@ -170,6 +170,14 @@ mod tests {
             r#"{ "s": "123 \\\" 1.0000000000000000001" }"#
         ));
         assert!(!arguments_equal("not json", "not json "));
+    }
+
+    #[test]
+    fn distinct_subnormal_arguments_do_not_match() {
+        assert!(!arguments_equal(
+            r#"{"n":7.36278524387018e-310}"#,
+            r#"{"n":7.3627852438702e-310}"#
+        ));
     }
 
     #[test]
