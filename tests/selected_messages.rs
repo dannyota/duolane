@@ -24,6 +24,7 @@ use tower::ServiceExt;
 #[tokio::test]
 async fn chatgpt_quota_falls_back_and_marks_source() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("models_cache.json"), serde_json::to_vec(&json!({"models":[{"slug":"gpt-99-sol","supported_in_api":true,"visibility":"list","use_responses_lite":true,"model_messages":{"instructions_template":"SYNTHETIC BASE"}}]})).unwrap()).unwrap();
     let auth = dir.path().join("auth.json");
     std::fs::write(&auth, serde_json::to_vec(&json!({"tokens":{"access_token":"toy-access","refresh_token":"toy-refresh","account_id":"toy-account"}})).unwrap()).unwrap();
     let chat_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -52,6 +53,7 @@ async fn chatgpt_quota_falls_back_and_marks_source() {
         let calls = api_calls.clone(); let valid = valid.clone(); let reject = reject.clone();
         move |headers: http::HeaderMap, Json(body): Json<Value>| { let calls = calls.clone(); let valid = valid.clone(); let reject = reject.clone(); async move {
             calls.fetch_add(1, Ordering::SeqCst);
+            valid.fetch_and(!body.to_string().contains("SYNTHETIC BASE"), Ordering::SeqCst);
             valid.fetch_and(headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer toy-key") && body["model"] == "gpt-99-sol", Ordering::SeqCst);
             if reject.load(Ordering::SeqCst) == 1 {
                 return (StatusCode::BAD_REQUEST, "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"upstream marker\"}}");
@@ -89,7 +91,7 @@ async fn chatgpt_quota_falls_back_and_marks_source() {
             .uri("/v1/messages")
             .header("content-type", "application/json")
             .body(Body::from(
-                json!({"model":"sol","messages":[{"role":"user","content":"hello"}]}).to_string(),
+                json!({"model":"sol","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"Read","input_schema":{"type":"object"}}]}).to_string(),
             ))
             .unwrap();
         let response = router.clone().oneshot(request).await.unwrap();
@@ -131,7 +133,7 @@ async fn chatgpt_quota_falls_back_and_marks_source() {
         .uri("/v1/messages")
         .header("content-type", "application/json")
         .body(Body::from(
-            json!({"model":"sol","messages":[{"role":"user","content":"hello"}]}).to_string(),
+            json!({"model":"sol","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"Read","input_schema":{"type":"object"}}]}).to_string(),
         ))
         .unwrap();
     let response = app(Arc::new(registry)).oneshot(request).await.unwrap();
@@ -175,7 +177,7 @@ async fn chatgpt_quota_falls_back_and_marks_source() {
             .uri("/v1/messages")
             .header("content-type", "application/json")
             .body(Body::from(
-                json!({"model":"sol","messages":[{"role":"user","content":"hello"}]}).to_string(),
+                json!({"model":"sol","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"Read","input_schema":{"type":"object"}}]}).to_string(),
             ))
             .unwrap();
         assert_eq!(
@@ -238,13 +240,14 @@ async fn chatgpt_quota_falls_back_and_marks_source() {
         .uri("/v1/messages")
         .header("content-type", "application/json")
         .body(Body::from(
-            json!({"model":"gpt-99-sol","messages":[{"role":"user","content":"hello"}]})
+            json!({"model":"gpt-98-sol","messages":[{"role":"user","content":"hello"}]})
                 .to_string(),
         ))
         .unwrap();
     let response = app(Arc::new(registry)).oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(chat_calls.load(Ordering::SeqCst), 4);
+    assert!(valid.load(Ordering::SeqCst));
     chat_server.abort();
     api_server.abort();
 }

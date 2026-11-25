@@ -44,9 +44,12 @@ impl Registry {
         input: crate::providers::codex::source_startup::StartupInput,
     ) -> anyhow::Result<Self> {
         let startup = crate::providers::codex::source_startup::SourceStartup::build(input).await?;
-        let mut registry = tokio::task::spawn_blocking(move || Self::new(alias_provider))
-            .await
-            .map_err(|_| anyhow::anyhow!("registry startup failed"))?;
+        let first_source = startup.sources().order().sources().first().copied();
+        let mut registry = tokio::task::spawn_blocking(move || {
+            Self::new_with_first_source(alias_provider, first_source)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("registry startup failed"))?;
         registry.source_startup = Some(Arc::new(startup));
         Ok(registry)
     }
@@ -88,6 +91,16 @@ impl Registry {
     }
 
     pub fn new(alias_provider: AliasProvider) -> Self {
+        Self::new_with_first_source(
+            alias_provider,
+            Some(crate::config::codex_auth::AuthSource::ChatGpt),
+        )
+    }
+
+    fn new_with_first_source(
+        alias_provider: AliasProvider,
+        first_source: Option<crate::config::codex_auth::AuthSource>,
+    ) -> Self {
         let mut models: BTreeMap<String, Vec<String>> = BTreeMap::new();
         models.insert(
             "anthropic".into(),
@@ -105,7 +118,9 @@ impl Registry {
             "anthropic".into(),
             Arc::new(crate::providers::anthropic::AnthropicProvider::new()),
         );
-        let codex_provider = Arc::new(crate::providers::codex::CodexProvider::new());
+        let codex_provider = Arc::new(crate::providers::codex::CodexProvider::with_first_source(
+            first_source,
+        ));
         handlers.insert("codex".into(), codex_provider.clone());
 
         Self {

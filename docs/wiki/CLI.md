@@ -40,16 +40,20 @@ with documented 1M context. It does not set Claude Code's compaction policy.
 `/model <codex model>` also becomes the default for new sessions; pick a Claude
 model before you run Claude Code without duolane.
 
-## Monitor accounts
+## Monitor usage
 
-Press `2` in the monitor to open Accounts and `1` to return to Overview.
-Accounts shows the last reported ChatGPT subscription limits, their reset times,
-and when the report was received. An unverified quota is `Unknown`.
+Press `2` or click the `2 Usage` tab in the monitor to open Usage, and `1` or
+the `1 Overview` tab to return. The key hints in the footer can be clicked too.
+Usage shows each account's five hour and weekly limits as bars with their reset
+times, the speed of each model over the recent requests, and the tokens each
+session used. A limit that was not reported is `Unknown`, and the ChatGPT report
+is marked `Stale` after 15 minutes.
 
 In the local Unix monitor, select a Claude profile with the arrow keys or a
 click, then press Enter to review and confirm the next-launch choice. Press `r`
-to reload the local profile list without contacting providers. An attached
-monitor stays read-only and does not show local profile names.
+to reload the local profile list and limits without contacting providers. An
+attached monitor stays read-only and does not show local profile names or Claude
+limits.
 
 ## Claude Code agents
 
