@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.0
+
+### Added
+
+- The monitor header has `1 Overview` and `2 Usage` tabs that a key or a click
+  opens, and the single-key hints in the footer can be clicked. Usage replaces
+  Accounts. It shows each Claude profile's and the ChatGPT subscription's five
+  hour and weekly limits as bars with reset times, the speed of each model over
+  the recent requests, and the tokens each session used. A short terminal gets
+  one compact line per profile.
+- On agent turns the Codex route sends the model's base instructions from the
+  Codex model catalog before Claude Code's system prompt, as the Codex client
+  does. `DUOLANE_CODEX_BASE_INSTRUCTIONS=off` or `codex.baseInstructions: false`
+  turns this off.
+
+### Changed
+
+- A conversation's Codex WebSocket is reused for its next request when
+  continuation is off, so only the first request of a conversation waits for a
+  handshake. Before, every request performed a new handshake through a queue
+  that starts one per second. The pool holds up to 2,048 idle sockets.
+- The profile confirmation in the monitor is an overlay that fits a terminal of
+  80 by 24.
+
 ## 0.8.0
 
 ### Added
