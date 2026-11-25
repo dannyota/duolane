@@ -91,6 +91,7 @@ fn summary_http_resets_same_owner_websocket_continuation() {
         assert!(status.success());
         return;
     }
+    unsafe { std::env::set_var("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "1") };
     let dir = crate::paths::config_dir();
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(

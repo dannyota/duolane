@@ -35,6 +35,7 @@ extern "C" fn isolate_process_environment() {
     for name in inherited {
         unsafe { std::env::remove_var(name) };
     }
+    unsafe { std::env::set_var("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "0") };
     let vars = [
         ("HOME", root.join("home")),
         ("USERPROFILE", root.join("home")),
