@@ -2,7 +2,7 @@ pub(crate) mod limits;
 #[cfg(unix)]
 mod picker;
 #[cfg(unix)]
-mod roster;
+pub(crate) mod roster;
 #[cfg(unix)]
 pub(crate) mod store;
 #[cfg(unix)]

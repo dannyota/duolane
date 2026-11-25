@@ -275,7 +275,7 @@ fn remaining(expires: jiff::Timestamp, now: jiff::Timestamp) -> String {
     }
 }
 
-fn span(seconds: u64) -> String {
+pub(crate) fn span(seconds: u64) -> String {
     match seconds {
         0..60 => "<1m".into(),
         60..3600 => format!("{}m", seconds / 60),
@@ -284,7 +284,7 @@ fn span(seconds: u64) -> String {
     }
 }
 
-fn percent(window: &Window, observed_at: u64, length: u64, now: u64) -> u64 {
+pub(crate) fn percent(window: &Window, observed_at: u64, length: u64, now: u64) -> u64 {
     if window.resets_at.is_some_and(|reset| reset <= now)
         || (window.used >= 1.0
             && window.resets_at.is_none()

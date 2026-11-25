@@ -7,7 +7,7 @@ use ratatui::buffer::Buffer;
 fn app() -> MonitorApp {
     MonitorApp {
         accounts: accounts::Accounts::new(false),
-        accounts_open: false,
+        usage_open: false,
         listen_url: String::new(),
         setup_text: String::new(),
         show_setup: false,
@@ -49,6 +49,40 @@ fn detail_text(app: &mut MonitorApp, state: &MonitorSnapshot) -> String {
     buffer_text(&draw(120, 48, |frame| {
         render(frame, app, state);
     }))
+}
+
+#[test]
+fn tabs_switch_views_and_ignore_overlay_clicks() {
+    let state: MonitorSnapshot = mock_state().into();
+    let mut app = app();
+    click(&mut app, &state, |screen| left_click(screen, "2 Usage"));
+    assert!(app.usage_open);
+    click(&mut app, &state, |screen| left_click(screen, "1 Overview"));
+    assert!(!app.usage_open);
+    app.show_help = true;
+    click(&mut app, &state, |screen| left_click(screen, "2 Usage"));
+    assert!(!app.usage_open);
+}
+
+#[test]
+fn help_hint_is_clickable_but_navigation_hint_is_not() {
+    let state: MonitorSnapshot = mock_state().into();
+    let mut app = app();
+    click(&mut app, &state, |screen| left_click(screen, "arrows/j/k"));
+    assert!(!app.show_help);
+    click(&mut app, &state, |screen| left_click(screen, "?"));
+    assert!(app.show_help);
+}
+
+#[test]
+fn usage_displays_speed_and_session_tokens() {
+    let state: MonitorSnapshot = mock_state().into();
+    let mut app = app();
+    app.usage_open = true;
+    let text = detail_text(&mut app, &state);
+    assert!(text.contains("Speed by model"));
+    assert!(text.contains("Tokens by session"));
+    assert!(text.contains("claude-haiku-5-5"));
 }
 
 #[test]

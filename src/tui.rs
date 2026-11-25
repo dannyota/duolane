@@ -2,6 +2,7 @@ mod accounts;
 mod cells;
 mod chrome;
 mod detail;
+mod key;
 mod layout;
 mod mouse;
 #[cfg(test)]
@@ -9,9 +10,12 @@ mod mouse_tests;
 mod overlay;
 mod requests;
 mod sessions;
+mod usage_limits;
+mod usage_stats;
 
 use cells::format_duration;
-use chrome::{render_footer, render_header};
+#[cfg(test)]
+use chrome::render_header;
 use detail::{render_request_detail, render_session_detail};
 use mouse::{MouseTarget, MouseTargets, VisibleRows};
 use overlay::{
@@ -40,7 +44,6 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
     widgets::{Block, Paragraph},
 };
 use tokio::sync::oneshot;
@@ -66,7 +69,7 @@ const RED: Color = Color::Rgb(220, 120, 120);
 const YELLOW: Color = Color::Rgb(220, 200, 100);
 const BLUE: Color = Color::Rgb(120, 170, 230);
 const PURPLE: Color = Color::Rgb(190, 140, 240);
-const DIM: Color = Color::Rgb(100, 104, 114);
+const DIM: Color = Color::Rgb(139, 144, 156);
 const SESSION_SPARKLINE_MIN_WIDTH: u16 = 170;
 const SESSION_SPARKLINE_MAX_TOKENS: u64 = 4_000;
 
@@ -156,7 +159,7 @@ fn run_monitor_loop(
     let (_guard, mut terminal) = setup_terminal()?;
     let mut app = MonitorApp {
         accounts: accounts::Accounts::new(config.local_accounts),
-        accounts_open: false,
+        usage_open: false,
         listen_url: config.listen_url,
         setup_text: config.setup_text,
         show_setup: false,
@@ -171,6 +174,8 @@ fn run_monitor_loop(
         shutdown_complete: config.shutdown_complete,
     };
 
+    app.accounts.enter();
+    app.accounts.refresh_limits();
     let run_result = run_monitor_events(&mut terminal, &mut snapshot, &mut app);
     if run_result.is_err() {
         app.begin_shutdown();
@@ -192,6 +197,7 @@ fn run_monitor_events(
     app: &mut MonitorApp,
 ) -> Result<MonitorExit, anyhow::Error> {
     loop {
+        app.accounts.refresh_if_due();
         let update = snapshot();
         let state = update.snapshot();
         app.clamp_selection(state.sessions.len(), state.recent.len());
@@ -219,106 +225,16 @@ fn run_monitor_events(
         }
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                    KeyCode::Char('q') if app.is_attached() => return Ok(MonitorExit::Detached),
-                    KeyCode::Char('c')
-                        if app.is_attached() && key.modifiers.contains(KeyModifiers::CONTROL) =>
-                    {
-                        return Ok(MonitorExit::Detached);
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if let Some(exit) = app.handle_key(key, state) {
+                        return Ok(exit);
                     }
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if app.handle_ctrl_c() {
-                            return Ok(MonitorExit::ForceQuit);
-                        }
+                }
+                Event::Mouse(mouse) => {
+                    if let Some(exit) = app.handle_mouse(mouse, state, &targets) {
+                        return Ok(exit);
                     }
-                    _ if app.phase == MonitorPhase::ShuttingDown => {}
-                    KeyCode::Char('y') if app.phase == MonitorPhase::ConfirmingShutdown => {
-                        app.begin_shutdown()
-                    }
-                    KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q')
-                        if app.phase == MonitorPhase::ConfirmingShutdown =>
-                    {
-                        app.cancel_shutdown_confirmation()
-                    }
-                    _ if app.phase == MonitorPhase::ConfirmingShutdown => {}
-                    KeyCode::Char('q') => app.request_shutdown_confirmation(),
-                    KeyCode::Char('?') => app.show_help = !app.show_help,
-                    KeyCode::Char('b') => app.show_setup = !app.show_setup,
-                    KeyCode::Char('1') => {
-                        app.accounts_open = false;
-                        app.accounts.cancel();
-                    }
-                    KeyCode::Char('2') => {
-                        app.accounts_open = true;
-                        app.accounts.enter();
-                    }
-                    KeyCode::Char('r')
-                        if app.accounts_open && !app.show_help && !app.show_setup =>
-                    {
-                        app.accounts.enter()
-                    }
-                    KeyCode::Esc
-                        if app.accounts_open
-                            && app.accounts.confirming()
-                            && !app.show_help
-                            && !app.show_setup =>
-                    {
-                        app.accounts.cancel()
-                    }
-                    KeyCode::Enter if app.accounts_open && !app.show_help && !app.show_setup => {
-                        app.accounts.confirm()
-                    }
-                    KeyCode::Down
-                        if app.accounts_open
-                            && !app.accounts.confirming()
-                            && !app.show_help
-                            && !app.show_setup =>
-                    {
-                        app.accounts.down()
-                    }
-                    KeyCode::Up
-                        if app.accounts_open
-                            && !app.accounts.confirming()
-                            && !app.show_help
-                            && !app.show_setup =>
-                    {
-                        app.accounts.up()
-                    }
-                    _ if app.accounts_open && !matches!(key.code, KeyCode::Esc) => {}
-                    KeyCode::Tab => app.focus = app.focus.next(),
-                    KeyCode::Down => app.move_down(state.sessions.len(), state.recent.len(), true),
-                    KeyCode::Char('j') => {
-                        app.move_down(state.sessions.len(), state.recent.len(), false)
-                    }
-                    KeyCode::Up => app.move_up(state.sessions.len(), state.recent.len(), true),
-                    KeyCode::Char('k') => {
-                        app.move_up(state.sessions.len(), state.recent.len(), false)
-                    }
-                    KeyCode::Right => app.focus = FocusPane::Recent,
-                    KeyCode::Left => app.focus = FocusPane::Sessions,
-                    KeyCode::Enter => {
-                        app.detail = match app.focus {
-                            FocusPane::Sessions if !state.sessions.is_empty() => {
-                                Some(DetailView::Session(DetailSelection::Keyboard))
-                            }
-                            FocusPane::Recent if !state.recent.is_empty() => {
-                                Some(DetailView::Request(DetailSelection::Keyboard))
-                            }
-                            _ => None,
-                        }
-                    }
-                    KeyCode::Esc => {
-                        if app.show_help {
-                            app.show_help = false;
-                        } else if app.show_setup {
-                            app.show_setup = false;
-                        } else {
-                            app.detail = None;
-                        }
-                    }
-                    _ => {}
-                },
-                Event::Mouse(mouse) => app.handle_mouse(mouse, state, &targets),
+                }
                 _ => {}
             }
         }
@@ -377,7 +293,7 @@ enum MonitorPhase {
 
 struct MonitorApp {
     accounts: accounts::Accounts,
-    accounts_open: bool,
+    usage_open: bool,
     listen_url: String,
     setup_text: String,
     show_setup: bool,
@@ -393,17 +309,28 @@ struct MonitorApp {
 }
 
 impl MonitorApp {
-    fn handle_mouse(&mut self, mouse: MouseEvent, state: &MonitorSnapshot, targets: &MouseTargets) {
+    fn handle_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        state: &MonitorSnapshot,
+        targets: &MouseTargets,
+    ) -> Option<MonitorExit> {
         if mouse.kind != MouseEventKind::Down(MouseButton::Left)
             || self.show_help
             || self.show_setup
             || self.phase != MonitorPhase::Running
         {
-            return;
+            return None;
         }
-        if self.accounts_open {
+        if let Some(code) = targets.key(mouse.column, mouse.row) {
+            return self.handle_key(
+                crossterm::event::KeyEvent::new(code, KeyModifiers::NONE),
+                state,
+            );
+        }
+        if self.usage_open {
             self.accounts.click(mouse.column, mouse.row);
-            return;
+            return None;
         }
         match targets.hit(mouse.column, mouse.row) {
             Some(MouseTarget::Session(index)) => {
@@ -426,6 +353,7 @@ impl MonitorApp {
             }
             None => {}
         }
+        None
     }
 
     fn is_attached(&self) -> bool {
@@ -578,16 +506,24 @@ fn render(
         ])
         .split(area);
 
-    render_header(frame, root[0], app, terminal_state);
-    if app.accounts_open {
+    let mut targets = MouseTargets::default();
+    chrome::render_chrome_header(frame, root[0], app, terminal_state, &mut targets);
+    if app.usage_open {
         let body = Rect::new(
             area.x,
             root[1].y,
             area.width,
             root[5].y.saturating_sub(root[1].y),
         );
-        app.accounts.render(frame, body, state);
-        render_footer(frame, root[5], app);
+        let panes = Layout::vertical([
+            Constraint::Percentage(45),
+            Constraint::Percentage(27),
+            Constraint::Percentage(28),
+        ])
+        .split(body);
+        app.accounts.render(frame, panes[0], terminal_state);
+        usage_stats::render(frame, panes[1], panes[2], terminal_state);
+        chrome::render_chrome_footer(frame, root[5], app, &mut targets);
         if app.show_setup {
             render_setup_overlay(frame, area, &app.setup_text);
         }
@@ -599,7 +535,7 @@ fn render(
             MonitorPhase::ConfirmingShutdown => render_shutdown_confirmation(frame, area),
             MonitorPhase::ShuttingDown => render_shutdown_overlay(frame, area, app.tick),
         }
-        return MouseTargets::default();
+        return targets;
     }
     let sessions = match &app.detail {
         Some(DetailView::Session(detail)) => {
@@ -636,7 +572,7 @@ fn render(
         app.focus == FocusPane::Recent,
     );
     let events = render_events(frame, root[4], &terminal_state.recent);
-    render_footer(frame, root[5], app);
+    chrome::render_chrome_footer(frame, root[5], app, &mut targets);
 
     if app.show_setup {
         render_setup_overlay(frame, area, &app.setup_text);
@@ -649,11 +585,10 @@ fn render(
         MonitorPhase::ConfirmingShutdown => render_shutdown_confirmation(frame, area),
         MonitorPhase::ShuttingDown => render_shutdown_overlay(frame, area, app.tick),
     }
-    MouseTargets {
-        sessions,
-        recent,
-        events,
-    }
+    targets.sessions = sessions;
+    targets.recent = recent;
+    targets.events = events;
+    targets
 }
 
 fn mock_setup_text(port: u16, registry: &Registry) -> String {
@@ -1144,7 +1079,7 @@ mod tests {
         let state: MonitorSnapshot = monitor.snapshot().into();
         let mut app = MonitorApp {
             accounts: accounts::Accounts::new(false),
-            accounts_open: false,
+            usage_open: false,
             listen_url: "test".into(),
             setup_text: String::new(),
             show_setup: false,
@@ -1170,7 +1105,7 @@ mod tests {
         let state: MonitorSnapshot = mock_state().into();
         let mut app = MonitorApp {
             accounts: accounts::Accounts::new(false),
-            accounts_open: false,
+            usage_open: false,
             listen_url: "mock://tui-demo".to_string(),
             setup_text: String::new(),
             show_setup: false,
@@ -1205,7 +1140,7 @@ mod tests {
         let state: MonitorSnapshot = monitor.snapshot().into();
         let mut app = MonitorApp {
             accounts: accounts::Accounts::new(false),
-            accounts_open: false,
+            usage_open: false,
             listen_url: "http://127.0.0.1:3000".to_string(),
             setup_text: String::new(),
             show_setup: false,
@@ -1239,7 +1174,7 @@ mod tests {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let mut app = MonitorApp {
             accounts: accounts::Accounts::new(false),
-            accounts_open: false,
+            usage_open: false,
             listen_url: "http://127.0.0.1:3000".to_string(),
             setup_text: String::new(),
             show_setup: false,
@@ -1287,7 +1222,7 @@ mod tests {
         let (_shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel();
         let mut app = MonitorApp {
             accounts: accounts::Accounts::new(false),
-            accounts_open: false,
+            usage_open: false,
             listen_url: "http://127.0.0.1:3000".to_string(),
             setup_text: String::new(),
             show_setup: false,
@@ -1319,7 +1254,7 @@ mod tests {
         let (complete_tx, complete_rx) = mpsc::channel();
         let app = MonitorApp {
             accounts: accounts::Accounts::new(false),
-            accounts_open: false,
+            usage_open: false,
             listen_url: String::new(),
             setup_text: String::new(),
             show_setup: false,
@@ -1349,7 +1284,7 @@ mod tests {
     fn header_renders_configured_listen_url() {
         let app = MonitorApp {
             accounts: accounts::Accounts::new(false),
-            accounts_open: false,
+            usage_open: false,
             listen_url: "http://[::]:18765".to_string(),
             setup_text: String::new(),
             show_setup: false,
@@ -1365,7 +1300,7 @@ mod tests {
         };
         let state: MonitorSnapshot = MonitorHandle::default().snapshot().into();
 
-        let header = draw(80, 1, |frame| {
+        let header = draw(120, 1, |frame| {
             render_header(frame, frame.area(), &app, &state)
         });
 
@@ -1377,7 +1312,7 @@ mod tests {
     fn clamp_selection_caps_to_available_sessions() {
         let mut app = MonitorApp {
             accounts: accounts::Accounts::new(false),
-            accounts_open: false,
+            usage_open: false,
             listen_url: "http://127.0.0.1:3000".to_string(),
             setup_text: String::new(),
             show_setup: false,
@@ -1405,7 +1340,7 @@ mod tests {
     fn arrow_navigation_moves_between_focus_panes_at_edges() {
         let mut app = MonitorApp {
             accounts: accounts::Accounts::new(false),
-            accounts_open: false,
+            usage_open: false,
             listen_url: "http://127.0.0.1:3000".to_string(),
             setup_text: String::new(),
             show_setup: false,
@@ -1433,7 +1368,7 @@ mod tests {
     fn vim_navigation_stays_within_focused_pane() {
         let mut app = MonitorApp {
             accounts: accounts::Accounts::new(false),
-            accounts_open: false,
+            usage_open: false,
             listen_url: "http://127.0.0.1:3000".to_string(),
             setup_text: String::new(),
             show_setup: false,

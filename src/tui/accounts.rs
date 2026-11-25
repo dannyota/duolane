@@ -1,5 +1,7 @@
 pub(super) struct Accounts {
     local: bool,
+    limits: std::collections::BTreeMap<String, crate::claude_accounts::limits::Limits>,
+    refreshed: Option<std::time::Instant>,
     names: Vec<String>,
     selected: String,
     focus: usize,
@@ -8,6 +10,7 @@ pub(super) struct Accounts {
     confirmation_visible: bool,
     status: String,
     rows: ratatui::layout::Rect,
+    subscription: ratatui::layout::Rect,
     first: usize,
 }
 
@@ -15,6 +18,8 @@ impl Accounts {
     pub(super) fn new(local: bool) -> Self {
         Self {
             local: local && cfg!(unix),
+            limits: Default::default(),
+            refreshed: None,
             names: Vec::new(),
             selected: String::new(),
             focus: 0,
@@ -23,7 +28,33 @@ impl Accounts {
             confirmation_visible: false,
             status: String::new(),
             rows: ratatui::layout::Rect::default(),
+            subscription: ratatui::layout::Rect::default(),
             first: 0,
+        }
+    }
+
+    pub(super) fn refresh_limits(&mut self) {
+        self.refresh_with(crate::claude_accounts::limits::load);
+    }
+
+    fn refresh_with(
+        &mut self,
+        load: impl FnOnce()
+            -> std::collections::BTreeMap<String, crate::claude_accounts::limits::Limits>,
+    ) {
+        if self.local {
+            self.limits = load();
+            self.refreshed = Some(std::time::Instant::now());
+        }
+    }
+
+    pub(super) fn refresh_if_due(&mut self) {
+        if self.local
+            && self
+                .refreshed
+                .is_none_or(|time| time.elapsed().as_secs() >= 30)
+        {
+            self.refresh_limits();
         }
     }
 
@@ -150,6 +181,11 @@ fn quota_text(
             lines.push(format!("{title}: Unknown"));
             continue;
         };
+        let title = match window.window_minutes {
+            Some(300) => "5h",
+            Some(10_080) => "week",
+            _ => title,
+        };
         let length = window
             .window_minutes
             .filter(|v| (1..=525_600_000).contains(v))
@@ -187,6 +223,14 @@ fn quota_text(
 
 impl Accounts {
     pub(super) fn click(&mut self, x: u16, y: u16) {
+        if self.pending.is_none()
+            && self
+                .subscription
+                .contains(ratatui::layout::Position::new(x, y))
+        {
+            self.focus = self.names.len();
+            return;
+        }
         if self.pending.is_some()
             || x < self.rows.x
             || x >= self.rows.right()
@@ -195,7 +239,7 @@ impl Accounts {
         {
             return;
         }
-        let index = self.first + usize::from(y - self.rows.y);
+        let index = self.first + usize::from(y - self.rows.y) / 3;
         if index <= self.names.len() {
             self.focus = index;
         }
@@ -218,27 +262,38 @@ impl Accounts {
         } else {
             Direction::Vertical
         };
-        let constraints = if direction == Direction::Horizontal {
-            [Constraint::Percentage(35), Constraint::Percentage(65)]
-        } else {
-            [Constraint::Percentage(40), Constraint::Percentage(60)]
-        };
         let panes = Layout::default()
             .direction(direction)
-            .constraints(constraints)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(area);
         let block = Block::default()
-            .title(" Accounts ")
+            .title(" Claude profiles ")
             .borders(Borders::ALL)
             .style(Style::default().fg(super::SEPARATOR));
         self.rows = block.inner(panes[0]);
         frame.render_widget(block, panes[0]);
-        let count = usize::from(self.rows.height);
-        self.first = self.focus.saturating_add(1).saturating_sub(count);
-        let mut lines: Vec<Line<'_>> = self
-            .names
-            .iter()
-            .map(|name| {
+        let count = usize::from(self.rows.height).div_ceil(3);
+        self.first = self
+            .focus
+            .min(self.names.len().saturating_sub(1))
+            .saturating_add(1)
+            .saturating_sub(count.max(1));
+        let now = std::time::SystemTime::now();
+        let seconds = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut lines: Vec<Line<'_>> = Vec::new();
+        for (index, name) in self.names.iter().enumerate().skip(self.first).take(count) {
+            let style = if index == self.focus {
+                Style::default()
+                    .fg(super::WHITE)
+                    .bg(super::SELECTED_BG)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(super::DIM_WHITE)
+            };
+            lines.push(
                 Line::from(format!(
                     "Claude {name}{}",
                     if *name == self.selected {
@@ -247,92 +302,91 @@ impl Accounts {
                         ""
                     }
                 ))
-            })
-            .collect();
-        lines.push(Line::from("ChatGPT subscription"));
-        let visible: Vec<Line<'_>> = lines
-            .into_iter()
-            .enumerate()
-            .skip(self.first)
-            .take(count)
-            .map(|(index, line)| {
-                if index == self.focus {
-                    line.style(
-                        Style::default()
-                            .fg(super::WHITE)
-                            .bg(super::SELECTED_BG)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    line.style(Style::default().fg(super::DIM_WHITE))
-                }
-            })
-            .collect();
-        frame.render_widget(Paragraph::new(visible), self.rows);
+                .style(style),
+            );
+            let limits = self.limits.get(name);
+            lines.push(super::usage_limits::claude("5h", limits, 18_000, seconds));
+            lines.push(super::usage_limits::claude(
+                "week", limits, 604_800, seconds,
+            ));
+        }
+        frame.render_widget(Paragraph::new(lines), self.rows);
         let detail_block = Block::default()
-            .title(" Details ")
+            .title(" ChatGPT subscription ")
+            .title_style(if self.focus == self.names.len() {
+                Style::default()
+                    .fg(super::WHITE)
+                    .bg(super::SELECTED_BG)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(super::DIM_WHITE)
+            })
             .borders(Borders::ALL)
             .style(Style::default().fg(super::DIM_WHITE));
+        self.subscription = panes[1];
         let inner = detail_block.inner(panes[1]);
+        frame.render_widget(detail_block, panes[1]);
         self.confirmation_visible = false;
-        let saved = format!("Saved: {}", self.selected);
-        let detail = if let Some((name, _)) = &self.pending {
-            let prompt = "Select profile?";
+        let saved = format!(
+            "Saved: {}",
+            if self.selected.is_empty() {
+                "Unknown"
+            } else {
+                &self.selected
+            }
+        );
+        let mut detail: Vec<Line<'_>> = Vec::new();
+        if let Some((name, _)) = &self.pending {
             let actions = "Enter save  Esc cancel";
             self.confirmation_visible = name.is_ascii()
-                && usize::from(inner.width)
-                    >= saved
-                        .len()
-                        .max(prompt.len())
-                        .max(name.len())
-                        .max(actions.len())
+                && usize::from(inner.width) >= saved.len().max(name.len()).max(actions.len())
                 && inner.height >= 4;
+            detail.push(Line::from(saved));
             if self.confirmation_visible {
-                format!("{saved}\n{prompt}\n{name}\n{actions}")
+                detail.push(Line::from("Select profile?"));
+                detail.push(Line::from(name.clone()));
+                detail.push(Line::from(actions));
             } else {
-                format!("{saved}\nResize to confirm")
+                detail.push(Line::from("Resize to confirm"));
             }
-        } else if let Some(name) = self.names.get(self.focus) {
-            format!(
-                "Claude {name}\nLimits: Unknown\nLogin status: Unknown\n{}\n{}",
+        } else {
+            let quota = snapshot.codex_quota.as_ref();
+            let summary = quota_text(quota, now);
+            detail.push(Line::from(
+                summary
+                    .lines()
+                    .next()
+                    .unwrap_or("Last reported: Unknown")
+                    .to_owned(),
+            ));
+            detail.push(super::usage_limits::codex(
+                "Primary",
+                quota.and_then(|q| q.primary.as_ref()),
+                now,
+            ));
+            detail.push(super::usage_limits::codex(
+                "Secondary",
+                quota.and_then(|q| q.secondary.as_ref()),
+                now,
+            ));
+            if self.local {
+                detail.push(Line::from(saved));
                 if self.overridden {
-                    "Selection disabled"
-                } else if *name == self.selected {
-                    "Selected for next launch"
-                } else {
-                    "Enter selects for the next launch"
-                },
-                self.status
-            )
-        } else {
-            format!(
-                "ChatGPT subscription\n{}\n{}",
-                quota_text(snapshot.codex_quota.as_ref(), std::time::SystemTime::now()),
-                if self.local {
-                    self.status.as_str()
-                } else {
-                    "Read-only monitor"
+                    detail.push(Line::from("CLAUDE_CONFIG_DIR overrides selection"));
+                } else if self.names.get(self.focus) == Some(&self.selected) {
+                    detail.push(Line::from("Selected for next launch"));
                 }
-            )
-        };
-        let detail = if self.local && self.pending.is_none() {
-            let saved = if self.selected.is_empty() {
-                "Saved: Unknown".to_owned()
+                if !self.status.is_empty() {
+                    detail.push(Line::from(self.status.clone()));
+                }
             } else {
-                saved
-            };
-            if self.overridden {
-                format!("{saved}\nCLAUDE_CONFIG_DIR overrides selection\n{detail}")
-            } else {
-                format!("{saved}\n{detail}")
+                detail.push(Line::from("Read-only monitor"));
             }
-        } else {
-            detail
-        };
-        let detail = Paragraph::new(detail)
-            .block(detail_block)
-            .wrap(ratatui::widgets::Wrap { trim: false });
-        frame.render_widget(detail, panes[1]);
+        }
+        frame.render_widget(
+            Paragraph::new(detail).wrap(ratatui::widgets::Wrap { trim: false }),
+            inner,
+        );
     }
 }
 
@@ -341,6 +395,20 @@ mod tests {
     use super::*;
     use crate::monitor::{CodexQuotaSnapshot, CodexQuotaWindow};
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn attached_profiles_are_unknown_and_never_load_limits() {
+        let mut accounts = Accounts::new(false);
+        accounts.names.push("example".into());
+        accounts.refresh_with(|| panic!("read-only monitor loaded limits"));
+        let state = crate::monitor::mock_state().into();
+        let buffer = crate::tui::tests::draw(100, 20, |frame| {
+            accounts.render(frame, frame.area(), &state)
+        });
+        let text = crate::tui::tests::buffer_text(&buffer);
+        assert!(text.contains("example"));
+        assert!(text.contains("5h    Unknown"));
+    }
 
     #[cfg(unix)]
     #[test]
@@ -476,6 +544,29 @@ mod tests {
         assert!(text.contains("Saved: backup"));
         assert!(text.contains("CLAUDE_CONFIG_DIR overrides selection"));
         assert!(!text.contains("Next launch"));
+    }
+
+    #[test]
+    fn reported_windows_use_labels_only_for_known_lengths() {
+        let now = SystemTime::now();
+        let mut quota = CodexQuotaSnapshot {
+            observed_at: now,
+            primary: Some(CodexQuotaWindow {
+                used_percent: Some(42.0),
+                window_minutes: Some(300),
+                reset_at: None,
+            }),
+            secondary: Some(CodexQuotaWindow {
+                used_percent: Some(12.0),
+                window_minutes: Some(10080),
+                reset_at: None,
+            }),
+        };
+        let text = quota_text(Some(&quota), now);
+        assert!(text.contains("5h  "));
+        assert!(text.contains("week  "));
+        quota.primary.as_mut().unwrap().window_minutes = None;
+        assert!(quota_text(Some(&quota), now).contains("Primary  "));
     }
 
     #[test]
