@@ -24,12 +24,21 @@ pub(super) enum MouseTarget {
 
 #[derive(Default)]
 pub(super) struct MouseTargets {
+    pub(super) size: (u16, u16),
     pub(super) sessions: VisibleRows,
     pub(super) recent: VisibleRows,
     pub(super) events: VisibleRows,
+    pub(super) keys: Vec<(Rect, crossterm::event::KeyCode)>,
 }
 
 impl MouseTargets {
+    pub(super) fn key(&self, column: u16, row: u16) -> Option<crossterm::event::KeyCode> {
+        self.keys
+            .iter()
+            .find(|(rect, _)| rect.contains(Position::new(column, row)))
+            .map(|(_, key)| *key)
+    }
+
     pub(super) fn hit(&self, column: u16, row: u16) -> Option<MouseTarget> {
         self.sessions
             .hit(column, row)

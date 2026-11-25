@@ -107,7 +107,7 @@ pub(super) fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, at
         ),
         ("?", "toggle help"),
         ("b", "toggle setup"),
-        ("1 / 2", "Overview / Accounts"),
+        ("1 / 2", "Overview / Usage"),
         ("r", "reload local accounts"),
         ("arrows", "navigate rows and panes"),
         ("j / k", "previous / next row"),
@@ -178,4 +178,15 @@ pub(super) fn render_setup_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, s
             .wrap(Wrap { trim: false }),
         inner,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn help_overlay_names_usage_view() {
+        let buffer = crate::tui::tests::draw(80, 24, |frame| {
+            super::render_help_overlay(frame, frame.area(), false);
+        });
+        assert!(crate::tui::tests::buffer_text(&buffer).contains("Overview / Usage"));
+    }
 }

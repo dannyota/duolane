@@ -373,7 +373,25 @@ fn mock_state_for_tick(
     }
     let sessions = session_summaries(&active, &recent, &session_usage, output_buckets, now);
     MonitorState {
-        codex_quota: None,
+        codex_quota: Some(super::CodexQuotaSnapshot {
+            observed_at: now,
+            primary: Some(super::CodexQuotaWindow {
+                used_percent: Some(42.0),
+                window_minutes: Some(300),
+                reset_at: now
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .ok()
+                    .map(|n| n.as_secs() + 7200),
+            }),
+            secondary: Some(super::CodexQuotaWindow {
+                used_percent: Some(67.0),
+                window_minutes: Some(10080),
+                reset_at: now
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .ok()
+                    .map(|n| n.as_secs() + 172800),
+            }),
+        }),
         started_at,
         uptime: now.duration_since(started_at).unwrap_or_default(),
         sessions,
