@@ -49,7 +49,11 @@ impl Drop for CodexWebSocketEventStream {
         if let Some(cleanup) = &self.auto_cleanup
             && !cleanup.terminal_read.load(Ordering::Acquire)
         {
-            invalidate_codex_websocket_pool_return(&cleanup.continuation, self.return_id());
+            self.receiver.close();
+            let return_id = self.return_id();
+            #[cfg(test)]
+            super::client_live::tests::pause_auto_drop(&cleanup.continuation);
+            invalidate_codex_websocket_pool_return(&cleanup.continuation, return_id);
         }
     }
 }
@@ -174,6 +178,10 @@ impl CodexWebSocketEventStream {
             loop {
                 let next = match item.take() {
                     Some(item) => Some(item),
+                    #[cfg(test)]
+                    None if super::client_live::tests::is_auto_drop_race(continuation.as_ref()) => {
+                        source.recv().await
+                    }
                     None => tokio::select! {
                         biased;
                         _ = tx.closed() => break,
@@ -188,6 +196,10 @@ impl CodexWebSocketEventStream {
                         ))
                     {
                         super::client_live::tests::AUTO_FORWARD_EOF.add_permits(1);
+                    }
+                    #[cfg(test)]
+                    if super::client_live::tests::is_auto_drop_race(continuation.as_ref()) {
+                        super::client_live::tests::AUTO_RACE_FORWARD_DONE.add_permits(1);
                     }
                     return;
                 };
@@ -216,6 +228,10 @@ impl CodexWebSocketEventStream {
                 && let Some(reservation) = continuation.as_ref()
             {
                 invalidate_codex_websocket_pool_return(reservation, return_id);
+            }
+            #[cfg(test)]
+            if super::client_live::tests::is_auto_drop_race(continuation.as_ref()) {
+                super::client_live::tests::AUTO_RACE_FORWARD_DONE.add_permits(1);
             }
             #[cfg(test)]
             if continuation.as_ref().and_then(|r| r.owner())

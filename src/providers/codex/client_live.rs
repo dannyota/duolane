@@ -607,6 +607,27 @@ pub(crate) mod tests {
     pub(crate) static AUTO_FORWARD_TERMINAL: Semaphore = Semaphore::const_new(0);
     pub(crate) static AUTO_FORWARD_RELEASE: Semaphore = Semaphore::const_new(0);
     pub(crate) static AUTO_FORWARD_DONE: Semaphore = Semaphore::const_new(0);
+    pub(crate) static AUTO_RACE_FORWARD_DONE: Semaphore = Semaphore::const_new(0);
+    static AUTO_RACE_DROP_REACHED: Semaphore = Semaphore::const_new(0);
+    static AUTO_RACE_DROP_RELEASE: std::sync::Barrier = std::sync::Barrier::new(2);
+
+    pub(crate) fn is_auto_drop_race(
+        reservation: Option<&super::super::continuation::ContinuationReservation>,
+    ) -> bool {
+        reservation.and_then(|r| r.owner())
+            == Some(&super::ConversationIdentity::Main(
+                "auto-drop-publish-race".into(),
+            ))
+    }
+
+    pub(crate) fn pause_auto_drop(
+        reservation: &super::super::continuation::ContinuationReservation,
+    ) {
+        if is_auto_drop_race(Some(reservation)) {
+            AUTO_RACE_DROP_REACHED.add_permits(1);
+            AUTO_RACE_DROP_RELEASE.wait();
+        }
+    }
 
     pub(crate) fn race_hook(
         reservation: Option<&super::super::continuation::ContinuationReservation>,
@@ -829,6 +850,64 @@ pub(crate) mod tests {
         .unwrap();
         server.await.unwrap();
         super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
+
+    #[tokio::test]
+    async fn auto_drop_before_return_publication_removes_socket() {
+        use futures_util::SinkExt;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let owner = ConversationIdentity::Main("auto-drop-publish-race".into());
+        let request = buffered_test_request();
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            ws.send(tokio_tungstenite::tungstenite::Message::text(
+                r#"{"type":"response.created","response":{"id":"first"}}"#,
+            ))
+            .await
+            .unwrap();
+            release_rx.await.unwrap();
+            super::super::client_test_support::send_completed_websocket_response(&mut ws, "first")
+                .await;
+        });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let events = client
+            .stream_codex_auto_events_for_owner(
+                &request,
+                &http_test_context(),
+                &super::super::client_body::CodexHttpBodyCache::new(),
+                Some(&reservation),
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(events.return_id().is_none());
+        let dropping = tokio::task::spawn_blocking(move || drop(events));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            AUTO_RACE_DROP_REACHED.acquire().await.unwrap().forget();
+            release_tx.send(()).unwrap();
+            AUTO_RACE_FORWARD_DONE.acquire().await.unwrap().forget();
+        })
+        .await
+        .unwrap();
+        let pooled = super::super::websocket::pooled_socket_id_for_tests(&owner).is_some();
+        AUTO_RACE_DROP_RELEASE.wait();
+        dropping.await.unwrap();
+        server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        assert!(!pooled);
     }
 
     #[tokio::test]
