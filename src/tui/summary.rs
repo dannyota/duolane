@@ -1,5 +1,8 @@
 use super::*;
-use ratatui::{text::Line, widgets::Borders};
+use ratatui::{
+    text::Line,
+    widgets::{BorderType, Borders},
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) fn height(width: u16) -> u16 {
@@ -97,8 +100,9 @@ pub(super) fn render(
         frame.render_widget(
             Paragraph::new(lines).block(
                 Block::default()
-                    .title(name)
+                    .title(format!(" {name} "))
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(SEPARATOR)),
             ),
             cells[index],
@@ -171,8 +175,9 @@ pub(super) fn render(
         frame.render_widget(
             Paragraph::new(lines).block(
                 Block::default()
-                    .title("Connections")
+                    .title(" Connections ")
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(color)),
             ),
             cells[2],

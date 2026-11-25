@@ -49,13 +49,15 @@ project values are ellipsized.
 ## Views
 
 The header shows two tabs, `1 Overview` and `2 Usage`, with the open one
-highlighted. The key or a left click on a tab opens that view. The footer hints
-for `q`, `?`, `b`, `Tab`, `1`, `2`, and `r` are click targets that act as their
-keys. The `Enter` and navigation hints are not targets, because they act on a
-selection. A click on a tab or a hint is ignored while the help, setup,
-shutdown, or profile confirmation overlay is visible, while a banner covers the
-footer, and when the terminal size differs from the frame the targets came from.
-Only a table row opens a detail.
+highlighted. The key or a left click on a tab opens that view. The footer shows
+the hints that apply to the open view: `Tab` in Overview, `r` in Usage, and `n`
+in the in-process monitor only. The hints for `q`, `?`, `b`, `Tab`, `r`, `n`,
+`1`, and `2` are click targets that act as their keys. The `Enter` and
+navigation hints are not targets, because they act on a selection. A click on a
+tab or a hint is ignored while the help, setup, shutdown, or profile
+confirmation overlay is visible, while a banner covers the footer, and when the
+terminal size differs from the frame the targets came from. Only a table row
+opens a detail.
 
 Dim text uses a color with a contrast of at least 4.5 to 1 on the background.
 
@@ -173,6 +175,9 @@ session. The in-process monitor adds the [profile state](#profile-state), the
   and effort. Each row shows the request count, the median Wait, the median
   generation time, the median output tokens, the pooled rate, and a bar of the
   two medians at one cell per half second.
+- Model and Project take the width of their longest value, up to 36 and 24 cells
+  from a pane of 100 cells and 14 cells below it, so a header or a value is cut
+  only at its cap.
 - Tokens by session lists each session's input and output tokens and its share
   of all output tokens, as a number and a bar.
 - The bars take the width the other columns leave. The two tables share the
@@ -240,6 +245,25 @@ every value has a labeled column and nothing needs a key to appear.
   in full with its account, login time, and the age of the details.
 - When the pane is too short, the header goes first, then the message line. The
   rows scroll to keep the focused profile in view above the buttons.
+
+### Quick switch
+
+`n` picks another Claude profile for the next launch from either view. It is a
+shortcut for focusing a row and pressing `Enter`, so it saves a selection and
+never starts a launch or changes a running session.
+
+- `n` opens Usage and the profile confirmation for a target. The first press
+  takes the suggested profile, or without one the profile after the saved one in
+  table order. Each further press moves to the next target and wraps around.
+- A target is never the saved profile, a profile that holds the same account as
+  the saved one, or a profile whose login is known to be signed out or expired.
+  With no target the message line says so and nothing opens.
+- The confirmation names the profile, its account, and the percent used of both
+  windows when they are known. `Enter` and `Esc` keep the rules of the profile
+  confirmation.
+- The key does nothing in the attached and demo monitors, when
+  `CLAUDE_CONFIG_DIR` overrides the selection, while a name is typed, and while
+  an account action waits for confirmation.
 
 ### Profile state
 

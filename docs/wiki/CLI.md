@@ -63,6 +63,10 @@ the limits, and the account details. The details come from `claude auth status`,
 checked in the background when Usage opens and kept for 5 minutes. The pane
 shows when they were last checked.
 
+Press `n` in either view to pick another profile for the next launch without
+moving the focus yourself. It proposes the suggested profile first; press `n`
+again for the next one, Enter to save, or Esc to cancel.
+
 Below the table, a line of buttons shows every action for the focused profile.
 Click a button or press its key. The line under the buttons shows the result.
 

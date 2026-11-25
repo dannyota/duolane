@@ -85,6 +85,16 @@ impl MonitorApp {
                 self.usage_open = true;
                 self.accounts.open();
             }
+            KeyCode::Char('n' | 'N')
+                if self.accounts.local && !self.show_help && !self.show_setup =>
+            {
+                if !self.usage_open {
+                    self.usage_open = true;
+                    self.detail = None;
+                    self.accounts.open();
+                }
+                self.accounts.quick_switch();
+            }
             KeyCode::Char('r' | 'R') if self.usage_open && !self.show_help && !self.show_setup => {
                 self.accounts.reload();
             }

@@ -122,6 +122,7 @@ pub(super) fn render(
             Style::default().fg(super::DIM_WHITE)
         })
         .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .style(Style::default().fg(super::DIM_WHITE));
     let inner = detail_block.inner(area);
     frame.render_widget(detail_block, area);

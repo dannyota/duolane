@@ -68,7 +68,7 @@ fn tabs_switch_views_and_ignore_overlay_clicks() {
 fn help_hint_is_clickable_but_navigation_hint_is_not() {
     let state: MonitorSnapshot = mock_state().into();
     let mut app = app();
-    click(&mut app, &state, |screen| left_click(screen, "arrows/j/k"));
+    click(&mut app, &state, |screen| left_click(screen, "j/k move"));
     assert!(!app.show_help);
     click(&mut app, &state, |screen| left_click(screen, "?"));
     assert!(app.show_help);

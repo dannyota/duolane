@@ -1,4 +1,5 @@
 mod controls;
+mod quick;
 
 pub(super) struct Accounts {
     controls: controls::Controls,
@@ -187,32 +188,65 @@ impl Accounts {
     ) {
         use ratatui::{
             layout::{Alignment, Rect},
-            widgets::{Block, Borders, Clear, Paragraph},
+            style::{Modifier, Style},
+            text::{Line, Span},
+            widgets::{Block, BorderType, Borders, Clear, Paragraph},
         };
         self.confirmation_visible = false;
         let Some((name, _)) = &self.pending else {
             return;
         };
-        let width = 44.min(area.width);
-        let height = 5.min(area.height);
+        let detail = self.pending_detail().filter(|_| area.height >= 6);
+        let width = 60.min(area.width);
+        let height = (5 + u16::from(detail.is_some())).min(area.height);
         let popup = Rect::new(
             area.x + area.width.saturating_sub(width) / 2,
             area.y + area.height.saturating_sub(height) / 2,
             width,
             height,
         );
-        self.confirmation_visible = name.is_ascii()
-            && usize::from(width.saturating_sub(2)) >= name.len().max(22)
-            && height >= 5;
+        let inner = usize::from(width.saturating_sub(2));
+        self.confirmation_visible = name.is_ascii() && inner >= name.len().max(22) && height >= 5;
+        let dim = Style::default().fg(super::DIM_WHITE);
+        let key = Style::default().fg(super::TEAL);
+        let mut lines = vec![
+            Line::from(Span::styled(
+                "Select profile?",
+                Style::default()
+                    .fg(super::WHITE)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                name.clone(),
+                Style::default()
+                    .fg(super::TEAL)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ];
+        if let Some(detail) = detail {
+            lines.push(Line::from(Span::styled(
+                super::cells::ellipsize(&detail, inner),
+                dim,
+            )));
+        }
+        lines.push(Line::from(vec![
+            Span::styled("Enter", key),
+            Span::styled(" save  ", dim),
+            Span::styled("Esc", key),
+            Span::styled(" cancel  ", dim),
+            Span::styled("n", key),
+            Span::styled(" next", dim),
+        ]));
         frame.render_widget(Clear, popup);
         frame.render_widget(
-            Paragraph::new(format!("Select profile?\n{name}\nEnter save  Esc cancel"))
-                .alignment(Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .style(ratatui::style::Style::default().bg(super::BG)),
-                ),
+            Paragraph::new(lines).alignment(Alignment::Center).block(
+                Block::default()
+                    .title(Span::styled(" Next launch ", key))
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(key)
+                    .style(Style::default().bg(super::BG)),
+            ),
             popup,
         );
     }
@@ -300,6 +334,7 @@ impl Accounts {
         let mut block = Block::default()
             .title(" Claude profiles ")
             .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
             .style(Style::default().fg(super::SEPARATOR));
         if self.local {
             block = block.title_top(
