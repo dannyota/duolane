@@ -41,6 +41,9 @@ switches a running process or falls back on a quota error. Codex is unchanged.
   selected profile's `settings.json` for the model picker. Plain `claude`
   ignores the selection. An explicitly set `CLAUDE_CONFIG_DIR` takes precedence
   and bypasses account selection.
+- `duolane accounts switch [name]` saves a new selection and resumes the current
+  project's latest session under it in one step.
+  [Switch and resume](#switch-and-resume) defines it.
 
 Managed login, selection, launch preparation, and removal take a per-profile
 lock outside the profile directory. Login and logout inherit the lock. If
@@ -138,6 +141,55 @@ Only share projects that both accounts may access. Close the previous process
 before resuming the same session: Claude Code does not guarantee concurrent
 writes to one transcript.
 
+## Switch and resume
+
+`duolane accounts switch [name] [--next] [-- <claude arguments>]` changes the
+selection and starts `duolane claude` under it. It is a manual step for a login
+that has run out of usage. It never runs on its own and never changes an open
+session. Its menu shows the stored [plan usage](#plan-usage), but neither the
+menu nor `--next` uses it to pick a profile. It is available on Unix, like the
+other accounts commands.
+
+1. Refuse when `CLAUDE_CONFIG_DIR` is set, because the launch would ignore the
+   selection. When `CLAUDECODE` is set, ask for confirmation on a terminal and
+   refuse without one. Claude Code sets it to `1` in the processes it spawns and
+   in IDE integrated terminals
+   ([environment variables](https://code.claude.com/docs/en/env-vars)), so the
+   previous session may still be open and writing its transcript.
+2. Pick the target. A name accepts `default` or a registered profile, as `use`
+   does. `--next` takes the profile after the current selection in `list` order,
+   wrapping around and including `default`. It skips a profile that holds the
+   same account as the current selection under the `list` comparison, and a
+   profile whose status check reports it signed out. A failed status check
+   neither matches nor skips. Without a name or `--next`, show the `use` menu
+   with the current selection marked. A name and `--next` together are a usage
+   error. A target equal to the current selection, or no candidate for `--next`,
+   is an error that changes nothing.
+3. Refuse `--environment` before saving the target. Save the target through the
+   checked selector, locks, and atomic write that `use` uses. Print the profile
+   name and its account.
+4. Run the `duolane claude` launch path with the arguments after `--`. If they
+   hold no session flag before their own `--`, prepend `--continue`. Session
+   flags are `-c`, `--continue`, `-r`, `--resume`, `--session-id`, `--from-pr`,
+   and `--teleport`, in separate and `=` forms. Launch checks, refusals, and the
+   first-link confirmation stay as
+   [One transcript per session](#one-transcript-per-session) defines. Refuse
+   before sharing if the saved selection no longer matches the target.
+
+The selection stays saved when the launch fails unless another selection
+replaced it. If the target is still selected, retry `duolane claude` with the
+same Claude arguments, adding `--continue` if `switch` added it. If the
+selection changed or cannot be read, run `duolane accounts switch <target>`
+again with the same Claude arguments, keeping `-- <claude args>` if present.
+
+For interactive launches, `--continue` loads the most recent conversation in the
+current directory and skips `claude -p`, Agent SDK, and `/loop` sessions
+([CLI reference](https://code.claude.com/docs/en/cli-reference#cli-flags)).
+duolane leaves that choice to Claude Code and never reads a transcript to find a
+session. With several sessions in one project, the most recent may not be the
+one that ran out; pass `-- --resume <session-id>` instead. duolane cannot see a
+previous process in another terminal; close it first.
+
 ## Plan usage
 
 `accounts list` and the `use` menu show how much of each account's five hour and
@@ -188,6 +240,11 @@ credential to do so.
 
 ## Alternatives and evidence
 
+A one-shot `duolane claude --account <name>` would leave the exhausted login
+selected for the next launch, so `switch` saves the choice. Switching on a quota
+error inside the proxy would need duolane to hold or substitute Claude
+credentials, which this design forbids.
+
 PR [#73](https://github.com/dannyota/duolane/pull/73) proposed named profiles
 and a persistent selector. Keep those ideas, not the server-side token pool or
 quota rotation. Copying the login to the original config would replace the
@@ -202,5 +259,14 @@ second transcript. A second check ran the duolane wrapper with the default login
 and a profile created by `duolane accounts login`: a session started under the
 default login, `accounts use` switched profiles, and `duolane claude --resume`
 asked for consent, linked the folder, recalled the first turn, and appended to
-the same file. Neither check establishes cross-account compatibility for every
-model or stored tool state.
+the same file. A third check on Claude Code 2.1.332 quit a session under the
+default login and ran `duolane accounts switch` to a named profile: the launch
+linked the folder after consent and `--continue` resumed that session. Neither
+check establishes cross-account compatibility for every model or stored tool
+state.
+
+`claude auth login` stores the login without completing Claude Code's first-run
+setup. Observed on Claude Code 2.1.332, the first interactive launch of such a
+profile runs that setup, including the login method screen, even though
+`claude auth status` reports the profile as signed in. duolane does not edit
+Claude Code's state to skip it.
