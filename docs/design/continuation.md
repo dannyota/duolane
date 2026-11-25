@@ -58,7 +58,9 @@ it does today. A thinking block without a valid signature becomes text, which
 does not match.
 
 A response is also not recorded when it did not end with a completed terminal
-event on a WebSocket whose socket returned to the pool.
+event on a WebSocket whose socket returned to the pool. Only a streamed response
+is recorded: a buffered response, which the client receives whole, is not, so
+its next request sends the full context.
 
 ## Continuing
 

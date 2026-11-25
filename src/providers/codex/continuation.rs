@@ -112,6 +112,11 @@ impl ContinuationReservation {
         &self.candidate
     }
 
+    pub(crate) fn with_disabled_reason(mut self, reason: &str) -> Self {
+        self.candidate.disabled_reason = Some(reason.to_string());
+        self
+    }
+
     pub(crate) fn owner(&self) -> Option<&ConversationIdentity> {
         self.owner.as_ref()
     }
@@ -158,6 +163,34 @@ pub fn continuation_candidate(
 ) -> ContinuationCandidate {
     let owner = session_id.map(|session_id| ConversationIdentity::Main(session_id.to_owned()));
     continuation_candidate_inner(owner.as_ref(), body, enabled, "missing_session").into_candidate()
+}
+
+pub(crate) fn messages_candidate(
+    owner: Option<&ConversationIdentity>,
+    body: &ResponsesRequest,
+    enabled: bool,
+    compact: bool,
+    server_compaction: bool,
+) -> ContinuationReservation {
+    let reason = if !enabled {
+        Some("disabled")
+    } else if compact {
+        Some("compaction_request")
+    } else if server_compaction {
+        Some("server_compaction")
+    } else {
+        None
+    };
+    let candidate = continuation_candidate_for_owner(owner, body, enabled);
+    match reason {
+        Some("disabled") => candidate,
+        Some(reason) => {
+            let mut full = candidate.full_context_retry().with_disabled_reason(reason);
+            full.candidate.input_delta_count = body.input.len();
+            full
+        }
+        None => candidate,
+    }
 }
 
 pub(crate) fn continuation_candidate_for_owner(

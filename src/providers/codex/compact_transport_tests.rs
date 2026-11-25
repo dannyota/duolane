@@ -143,8 +143,8 @@ fn summary_http_resets_same_owner_websocket_continuation() {
             let context = live_test_context("summary-continuation");
             let summary = "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Your task is to create a detailed summary of the conversation so far";
             let mut messages = vec![serde_json::json!({"role":"user","content":"one"})];
-            for text in ["two", summary, "after"] {
-                let body = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol","max_tokens":32,"stream":streaming,"messages":messages})).unwrap();
+            for (index, text) in ["two", summary, "after"].into_iter().enumerate() {
+                let body = serde_json::from_value(serde_json::json!({"model":"gpt-5.6-sol","max_tokens":32,"stream":if index < 2 { true } else { streaming },"messages":messages})).unwrap();
                 let response = tokio::time::timeout(std::time::Duration::from_secs(8), provider.handle_messages_inner(body, context.clone(), Some(owner.clone()))).await.unwrap();
                 assert_eq!(response.status(), StatusCode::OK);
                 assert!(response.into_body().collect().await.is_ok());

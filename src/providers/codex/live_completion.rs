@@ -234,6 +234,31 @@ fn retryable_live_message(message: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+pub(super) fn finish_buffered_continuation(
+    session_id: Option<&str>,
+    continuation: &ContinuationReservation,
+    compaction_attempt: Option<CompactionAttempt>,
+    request_body: &translate::request::ResponsesRequest,
+    upstream_body: &[u8],
+    compact_boundary: bool,
+) {
+    match finish_metadata_from_upstream(upstream_body, &request_body.reasoning_account) {
+        Ok(Some(finish)) if finish.continuation_eligible => {
+            if compact_boundary {
+                activate_compaction(
+                    session_id,
+                    compaction_attempt,
+                    &request_body.model,
+                    &finish.output_items,
+                );
+            }
+        }
+        _ => abort_compaction_attempt(session_id, compaction_attempt),
+    }
+    abort_continuation_for_owner(continuation);
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn update_continuation_from_upstream(
     session_id: Option<&str>,

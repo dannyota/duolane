@@ -3881,14 +3881,19 @@ async fn smoke_codex_websocket_previous_response_id_sends_delta_on_second_turn()
     let first = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
+        "stream": true,
         "messages": [{"role":"user","content":"one"}]
     }))
     .await;
     assert_eq!(first.status(), StatusCode::OK);
+    axum::body::to_bytes(first.into_body(), usize::MAX)
+        .await
+        .unwrap();
 
     let second = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
+        "stream": true,
         "messages": [
             {"role":"user","content":"one"},
             {"role":"assistant","content":"first"},
@@ -3906,8 +3911,7 @@ async fn smoke_codex_websocket_previous_response_id_sends_delta_on_second_turn()
         "second response body: {}",
         String::from_utf8_lossy(&second_body)
     );
-    let value: Value = serde_json::from_slice(&second_body).unwrap();
-    assert_eq!(value["content"][0]["text"], "second");
+    assert!(String::from_utf8_lossy(&second_body).contains("second"));
 
     let third = call_messages_body(json!({
         "model": "gpt-5.5",
