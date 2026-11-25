@@ -231,7 +231,11 @@ where
                     }
                 };
 
-                if reused && !seen_created && stale_before_created(&parsed) {
+                if reused && stale_event(&parsed, seen_created, created_id.as_deref(), pool_entry) {
+                    hosted_tool_executed |= super::client_sse::payload_confirms_hosted(&parsed);
+                    if hosted_tool_executed {
+                        budget.mark_hosted();
+                    }
                     budget.mark_ambiguous_hosted();
                     break Err(stale_response_error());
                 }
@@ -264,7 +268,10 @@ where
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown")
                             .to_string(),
-                        reusable: completed_response_matches(&parsed, created_id.as_deref()),
+                        reusable: completed_response_matches(&parsed, created_id.as_deref())
+                            && pool_entry.is_none_or(|entry| {
+                                entry.record_completed(created_id.as_deref().unwrap_or_default())
+                            }),
                         payload: parsed,
                         hosted_tool_executed,
                     }));
@@ -325,6 +332,26 @@ fn stale_before_created(event: &serde_json::Value) -> bool {
     kind.starts_with("response.") && !matches!(kind, "response.created" | "response.in_progress")
 }
 
+fn stale_event(
+    event: &serde_json::Value,
+    seen_created: bool,
+    created_id: Option<&str>,
+    entry: Option<&Arc<PoolEntry>>,
+) -> bool {
+    let kind = event.get("type").and_then(|v| v.as_str());
+    let id = event
+        .pointer("/response/id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty());
+    if kind == Some("response.created") {
+        return id.is_none_or(|id| entry.is_some_and(|entry| entry.has_completed(id)));
+    }
+    if seen_created && is_terminal_event(event) {
+        return id != created_id;
+    }
+    !seen_created && stale_before_created(event)
+}
+
 fn stale_response_error() -> CodexError {
     CodexError {
         status: 0,
@@ -352,6 +379,7 @@ pub(super) async fn stream_ws_events<S>(
     tx: &mpsc::Sender<Result<serde_json::Value, CodexError>>,
     budget: &super::recovery::RecoveryBudget,
     reused: bool,
+    pool_entry: Option<&Arc<PoolEntry>>,
 ) -> (bool, Option<Result<serde_json::Value, CodexError>>)
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -364,6 +392,7 @@ where
     let mut status = 200u16;
     let mut reusable = false;
     let mut completed = false;
+    let mut hosted_tool_executed = false;
     let mut created_id: Option<String> = None;
     let mut seen_created = false;
     let mut terminal_item = None;
@@ -436,8 +465,17 @@ where
                     }
                 };
 
-                if reused && !seen_created && stale_before_created(&parsed) {
-                    terminal_item = Some(Err(stale_response_error()));
+                hosted_tool_executed |= super::client_sse::payload_confirms_hosted(&parsed);
+                if hosted_tool_executed {
+                    budget.mark_hosted();
+                }
+                if reused && stale_event(&parsed, seen_created, created_id.as_deref(), pool_entry) {
+                    let error = stale_response_error();
+                    terminal_item = Some(Err(if hosted_tool_executed {
+                        error.after_hosted_tool_execution()
+                    } else {
+                        error
+                    }));
                     break;
                 }
                 if parsed.get("type").and_then(|v| v.as_str()) == Some("response.created") {
@@ -475,7 +513,10 @@ where
                     } else {
                         completed = parsed.get("type").and_then(|value| value.as_str())
                             == Some("response.completed");
-                        reusable = completed_response_matches(&parsed, created_id.as_deref());
+                        reusable = completed_response_matches(&parsed, created_id.as_deref())
+                            && pool_entry.is_none_or(|entry| {
+                                entry.record_completed(created_id.as_deref().unwrap_or_default())
+                            });
                         terminal_item = Some(Ok(parsed));
                     }
                     break;
@@ -628,8 +669,16 @@ mod tests {
             .await
             .unwrap();
         let (tx, mut rx) = mpsc::channel(2);
-        let (reusable, terminal) =
-            stream_ws_events(&mut client, 1_000, None, &tx, &Default::default(), true).await;
+        let (reusable, terminal) = stream_ws_events(
+            &mut client,
+            1_000,
+            None,
+            &tx,
+            &Default::default(),
+            true,
+            None,
+        )
+        .await;
         assert!(!reusable);
         assert!(matches!(
             terminal,
@@ -639,6 +688,143 @@ mod tests {
             }))
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_hosted_event_preserves_no_replay_evidence() {
+        for tracked in [false, true] {
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            server
+                .send(Message::text(
+                    r#"{"type":"response.web_search_call.in_progress"}"#,
+                ))
+                .await
+                .unwrap();
+            let budget = if tracked {
+                super::super::recovery::RecoveryBudget::with_gate(
+                    super::super::sources::ReplayGate::new(false),
+                )
+            } else {
+                Default::default()
+            };
+            let error =
+                collect_ws_events_tracked(&mut client, 1_000, None, None, None, &budget, true)
+                    .await
+                    .err()
+                    .unwrap();
+            assert_eq!(error.detail.as_deref(), Some("hosted_tool_executed"));
+            let result = Err(error);
+            assert!(!super::super::recovery::buffered_replay_allowed(
+                &result, &budget
+            ));
+
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            server
+                .send(Message::text(
+                    r#"{"type":"response.web_search_call.in_progress"}"#,
+                ))
+                .await
+                .unwrap();
+            let (tx, mut rx) = mpsc::channel(2);
+            let (_, terminal) =
+                stream_ws_events(&mut client, 1_000, None, &tx, &budget, true, None).await;
+            let error = terminal.unwrap().unwrap_err();
+            assert_eq!(error.detail.as_deref(), Some("hosted_tool_executed"));
+            assert!(!super::super::live_completion::retryable_live_start_codex_error(&error));
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn reused_socket_rejects_terminal_for_another_response() {
+        let (client_io, server_io) = tokio::io::duplex(2048);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        server
+            .send(Message::text(
+                r#"{"type":"response.created","response":{"id":"new"}}"#,
+            ))
+            .await
+            .unwrap();
+        server
+            .send(Message::text(
+                r#"{"type":"response.completed","response":{"id":"old","status":"completed"}}"#,
+            ))
+            .await
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(2);
+        let (reusable, terminal) = stream_ws_events(
+            &mut client,
+            1_000,
+            None,
+            &tx,
+            &Default::default(),
+            true,
+            None,
+        )
+        .await;
+        assert!(!reusable);
+        assert!(matches!(
+            terminal,
+            Some(Err(CodexError {
+                origin: CodexErrorOrigin::WebSocketTransient,
+                ..
+            }))
+        ));
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn untracked_fresh_terminal_output_keeps_existing_hosted_classification() {
+        let (client_io, server_io) = tokio::io::duplex(2048);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        server.send(Message::text(serde_json::json!({"type":"response.completed","response":{"output":[{"type":"web_search_call"}]}}).to_string())).await.unwrap();
+        let (_, terminal) = collect_ws_events(&mut client, 1_000, None, None, None)
+            .await
+            .unwrap();
+        assert!(!terminal.unwrap().hosted_tool_executed);
+    }
+
+    #[tokio::test]
+    async fn fresh_stream_without_created_or_terminal_status_succeeds_without_reuse() {
+        for with_created in [false, true] {
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            if with_created {
+                server
+                    .send(Message::text(
+                        r#"{"type":"response.created","response":{"id":"first"}}"#,
+                    ))
+                    .await
+                    .unwrap();
+            }
+            server
+                .send(Message::text(
+                    r#"{"type":"response.completed","response":{"id":"first"}}"#,
+                ))
+                .await
+                .unwrap();
+            let (tx, _rx) = mpsc::channel(2);
+            let (reusable, terminal) = stream_ws_events(
+                &mut client,
+                1_000,
+                None,
+                &tx,
+                &Default::default(),
+                false,
+                None,
+            )
+            .await;
+            assert!(!reusable);
+            assert!(matches!(terminal, Some(Ok(_))));
+        }
     }
 
     #[tokio::test]
@@ -663,8 +849,16 @@ mod tests {
                 .await
                 .unwrap();
             let (tx, _rx) = mpsc::channel(2);
-            let (reusable, result) =
-                stream_ws_events(&mut client, 1_000, None, &tx, &Default::default(), false).await;
+            let (reusable, result) = stream_ws_events(
+                &mut client,
+                1_000,
+                None,
+                &tx,
+                &Default::default(),
+                false,
+                None,
+            )
+            .await;
             assert!(!reusable);
             assert_eq!(result.unwrap().unwrap(), terminal);
         }
@@ -687,8 +881,16 @@ mod tests {
                 server.send(Message::text(serde_json::json!({"type":"response.completed", "response":{"id":terminal,"status":"completed"}}).to_string())).await.unwrap();
             });
             let (tx, _rx) = mpsc::channel(2);
-            let (reusable, terminal) =
-                stream_ws_events(&mut client, 1_000, None, &tx, &Default::default(), false).await;
+            let (reusable, terminal) = stream_ws_events(
+                &mut client,
+                1_000,
+                None,
+                &tx,
+                &Default::default(),
+                false,
+                None,
+            )
+            .await;
             assert_eq!(reusable, expected);
             assert!(matches!(terminal, Some(Ok(_))));
             task.await.unwrap();
@@ -720,7 +922,7 @@ mod tests {
             }
             let (tx, _rx) = mpsc::channel(1);
             let (_, terminal) =
-                stream_ws_events(&mut socket, 1_000, None, &tx, &budget, false).await;
+                stream_ws_events(&mut socket, 1_000, None, &tx, &budget, false, None).await;
             let error = terminal.unwrap().unwrap_err();
             assert_eq!(
                 error.origin,
@@ -766,7 +968,8 @@ mod tests {
         let send = tokio::spawn(async move {
             server.send(Message::text(r#"{"type":"response.failed","response":{"output":[{"type":"web_search_call"}]}}"#)).await.unwrap();
         });
-        let (_, terminal) = stream_ws_events(&mut client, 1_000, None, &tx, &budget, false).await;
+        let (_, terminal) =
+            stream_ws_events(&mut client, 1_000, None, &tx, &budget, false, None).await;
         assert!(terminal.is_some());
         assert!(gate.hosted());
         assert!(rx.try_recv().is_err());

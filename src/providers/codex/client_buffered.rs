@@ -263,10 +263,8 @@ impl CodexHttpClient {
                 true
             };
             let exhausted = || buffered_transient_exhausted(ctx, transport, typed_transient);
-            let replay_allowed = !ctx.recovery_budget.hosted()
-                && !result
-                    .as_ref()
-                    .is_ok_and(|response| response.hosted_tool_executed);
+            let replay_allowed =
+                super::recovery::buffered_replay_allowed(&result, &ctx.recovery_budget);
             if replay_allowed
                 && should_refresh_after_unauthorized(&result, auth_refresh_attempted, transport)
             {
@@ -904,6 +902,131 @@ mod tests {
             )
             .await
             .unwrap();
+        server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
+
+    #[tokio::test]
+    async fn refreshed_access_reuses_socket_but_changed_refresh_credential_does_not() {
+        use futures_util::StreamExt;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            for id in ["first", "second"] {
+                let _ = next_websocket_json(&mut ws).await;
+                send_completed_websocket_response(&mut ws, id).await;
+            }
+            let closed = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+                .await
+                .unwrap();
+            assert!(matches!(
+                closed,
+                None | Some(Err(_)) | Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+            ));
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            send_completed_websocket_response(&mut ws, "third").await;
+        });
+        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let mut auth = http_test_auth();
+        auth.refresh = "synthetic-refresh-one".into();
+        client.auth_manager().set_test_auth(auth.clone());
+        let request = buffered_request_with_texts(&["one"]);
+        let context = http_test_context();
+        let owner = ConversationIdentity::Main("refresh-identity".into());
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        for index in 0..3 {
+            if index == 1 {
+                auth.access = "synthetic-access-two".into();
+                client.auth_manager().set_test_auth(auth.clone());
+            }
+            if index == 2 {
+                auth.refresh = "synthetic-refresh-two".into();
+                client.auth_manager().set_test_auth(auth.clone());
+            }
+            client
+                .post_codex_with_transport(
+                    &request,
+                    &context,
+                    Some(&reservation),
+                    crate::config::CodexTransport::WebSocket,
+                    &Default::default(),
+                )
+                .await
+                .unwrap();
+        }
+        server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
+
+    #[tokio::test]
+    async fn fresh_responses_without_created_or_status_succeed_without_pooling() {
+        use futures_util::SinkExt;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for with_created in [false, true] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _ = next_websocket_json(&mut ws).await;
+                if with_created {
+                    ws.send(tokio_tungstenite::tungstenite::Message::text(
+                        r#"{"type":"response.created","response":{"id":"response"}}"#,
+                    ))
+                    .await
+                    .unwrap();
+                }
+                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                    r#"{"type":"response.output_text.delta","output_index":0,"delta":"answer"}"#,
+                ))
+                .await
+                .unwrap();
+                let terminal = if with_created {
+                    serde_json::json!({"type":"response.completed","response":{"id":"response"}})
+                } else {
+                    serde_json::json!({"type":"response.completed","response":{"id":"response","status":"completed"}})
+                };
+                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                    terminal.to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+        });
+        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let context = http_test_context();
+        let request = buffered_request_with_texts(&["one"]);
+        for name in ["missing-created", "missing-status"] {
+            let owner = ConversationIdentity::Main(name.into());
+            let reservation = super::super::continuation::continuation_candidate_for_owner(
+                Some(&owner),
+                &request,
+                false,
+            );
+            let response = client
+                .post_codex_with_transport(
+                    &request,
+                    &context,
+                    Some(&reservation),
+                    crate::config::CodexTransport::WebSocket,
+                    &Default::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status, 200);
+            assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_none());
+        }
         server.await.unwrap();
         super::super::websocket::clear_codex_websocket_pool_for_tests();
     }

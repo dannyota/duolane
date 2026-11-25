@@ -626,3 +626,73 @@ async fn codex_explicit_transport_preserves_fallback_and_replay_policy() {
         check_transport_policy(config_dir.path(), Some("auto"), true, stream).await;
     }
 }
+
+#[tokio::test]
+async fn messages_live_retries_stale_reused_socket_before_output() {
+    let _env_lock = ENV_LOCK.lock().await;
+    let _delay = ZeroRetryDelayGuard::new();
+    let dir = TempDir::new().unwrap();
+    write_codex_auth(dir.path());
+    clear_codex_websocket_pool_for_tests();
+    reset_codex_websocket_connect_gate_for_tests();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut guards = clear_proxy_environment();
+    guards.extend(configure_codex(
+        dir.path(),
+        &format!("http://{addr}/responses"),
+    ));
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+        assert!(matches!(
+            ws.next().await.unwrap().unwrap(),
+            Message::Text(_)
+        ));
+        for event in [
+            json!({"type":"response.created","response":{"id":"first"}}),
+            json!({"type":"response.output_text.delta","output_index":0,"delta":"first answer"}),
+            json!({"type":"response.completed","response":{"id":"first","status":"completed","output":[]}}),
+        ] {
+            ws.send(Message::text(event.to_string())).await.unwrap();
+        }
+        loop {
+            match ws.next().await.unwrap().unwrap() {
+                Message::Ping(data) => ws.send(Message::Pong(data)).await.unwrap(),
+                Message::Text(_) => break,
+                _ => {}
+            }
+        }
+        ws.send(Message::text(
+            json!({"type":"response.output_text.delta","delta":"stale"}).to_string(),
+        ))
+        .await
+        .unwrap();
+        let Ok(Ok((socket, _))) =
+            tokio::time::timeout(Duration::from_secs(5), listener.accept()).await
+        else {
+            return false;
+        };
+        let mut retry = tokio_tungstenite::accept_async(socket).await.unwrap();
+        assert!(matches!(
+            retry.next().await.unwrap().unwrap(),
+            Message::Text(_)
+        ));
+        for event in [
+            json!({"type":"response.created","response":{"id":"second"}}),
+            json!({"type":"response.output_text.delta","output_index":0,"delta":"retry answer"}),
+            json!({"type":"response.completed","response":{"id":"second","status":"completed","output":[]}}),
+        ] {
+            retry.send(Message::text(event.to_string())).await.unwrap();
+        }
+        true
+    });
+    let (status, _) = call_messages_with_stream("live-stale-retry", true).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = call_messages_with_stream("live-stale-retry", true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("retry answer"));
+    assert!(!body.contains("stale"));
+    assert!(server.await.unwrap());
+    clear_codex_websocket_pool_for_tests();
+}

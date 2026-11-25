@@ -407,16 +407,31 @@ impl CodexHttpClient {
                                 pending_events.clear();
                             }
                             if tx.send(Ok(payload)).await.is_err() {
+                                cleanup_failed_live_forward(
+                                    continuation.as_ref(),
+                                    stream.socket_id(),
+                                    &socket_id_publisher,
+                                );
                                 return;
                             }
                         }
                         super::events::CodexStreamEventKind::TerminalSuccess => {
                             for pending in pending_events.drain(..) {
                                 if tx.send(Ok(pending)).await.is_err() {
+                                    cleanup_failed_live_forward(
+                                        continuation.as_ref(),
+                                        stream.socket_id(),
+                                        &socket_id_publisher,
+                                    );
                                     return;
                                 }
                             }
                             if tx.send(Ok(payload)).await.is_err() {
+                                cleanup_failed_live_forward(
+                                    continuation.as_ref(),
+                                    stream.socket_id(),
+                                    &socket_id_publisher,
+                                );
                                 return;
                             }
                         }
@@ -425,22 +440,42 @@ impl CodexHttpClient {
                                 forwarded_any = true;
                                 for pending in pending_events.drain(..) {
                                     if tx.send(Ok(pending)).await.is_err() {
+                                        cleanup_failed_live_forward(
+                                            continuation.as_ref(),
+                                            stream.socket_id(),
+                                            &socket_id_publisher,
+                                        );
                                         return;
                                     }
                                 }
                             }
                             if tx.send(Ok(payload)).await.is_err() {
+                                cleanup_failed_live_forward(
+                                    continuation.as_ref(),
+                                    stream.socket_id(),
+                                    &socket_id_publisher,
+                                );
                                 return;
                             }
                         }
                         super::events::CodexStreamEventKind::Control => {
                             if tx.send(Ok(payload)).await.is_err() {
+                                cleanup_failed_live_forward(
+                                    continuation.as_ref(),
+                                    stream.socket_id(),
+                                    &socket_id_publisher,
+                                );
                                 return;
                             }
                         }
                         super::events::CodexStreamEventKind::Structural => {
                             if forwarded_any {
                                 if tx.send(Ok(payload)).await.is_err() {
+                                    cleanup_failed_live_forward(
+                                        continuation.as_ref(),
+                                        stream.socket_id(),
+                                        &socket_id_publisher,
+                                    );
                                     return;
                                 }
                             } else {
@@ -450,14 +485,9 @@ impl CodexHttpClient {
                     },
                     Err(err) => {
                         if tx.send(Err(err)).await.is_err() {
-                            if let Some(reservation) = continuation.as_ref() {
-                                super::websocket::invalidate_codex_websocket_pool_socket(
-                                    reservation,
-                                    stream.socket_id(),
-                                );
-                            }
-                            abort_abandoned_live_continuation(
+                            cleanup_failed_live_forward(
                                 continuation.as_ref(),
+                                stream.socket_id(),
                                 &socket_id_publisher,
                             );
                             return;
@@ -476,6 +506,17 @@ pub(super) fn full_context_continuation(
     continuation: Option<&super::continuation::ContinuationReservation>,
 ) -> Option<super::continuation::ContinuationReservation> {
     continuation.map(super::continuation::ContinuationReservation::full_context_retry)
+}
+
+fn cleanup_failed_live_forward(
+    continuation: Option<&super::continuation::ContinuationReservation>,
+    socket_id: Option<u64>,
+    publisher: &super::websocket::CodexWebSocketSocketIdPublisher,
+) {
+    if let Some(reservation) = continuation {
+        super::websocket::invalidate_codex_websocket_pool_socket(reservation, socket_id);
+    }
+    abort_abandoned_live_continuation(continuation, publisher);
 }
 
 fn abort_live_continuation(continuation: Option<&super::continuation::ContinuationReservation>) {
@@ -570,6 +611,69 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn downstream_disconnect_during_buffered_terminal_forwarding_removes_socket() {
+        use futures_util::SinkExt;
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let owner = ConversationIdentity::Main("terminal-forward-drop".into());
+        let request = buffered_test_request();
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            ws.send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({"type":"response.created","response":{"id":"first"}})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+            for _ in 0..70 {
+                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                    r#"{"type":"response.in_progress"}"#,
+                ))
+                .await
+                .unwrap();
+            }
+            ws.send(tokio_tungstenite::tungstenite::Message::text(serde_json::json!({"type":"response.completed","response":{"id":"first","status":"completed"}}).to_string())).await.unwrap();
+        });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let events = client
+            .stream_codex_websocket_events_for_owner(
+                &request,
+                &http_test_context(),
+                Some(&reservation),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while super::super::websocket::pooled_socket_id_for_tests(&owner).is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(events);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while super::super::websocket::pooled_socket_id_for_tests(&owner).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        server.await.unwrap();
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
 
     #[tokio::test]
     async fn websocket_binds_quota_before_event_task_runs() {

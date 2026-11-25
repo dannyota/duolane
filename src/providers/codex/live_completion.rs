@@ -169,7 +169,10 @@ pub(super) fn is_codex_success_terminal_event(payload: &serde_json::Value) -> bo
 }
 
 pub(super) fn retryable_live_start_codex_error(err: &client::CodexError) -> bool {
-    if err.is_recovery_exhausted() || err.is_websocket_overload() {
+    if err.is_recovery_exhausted()
+        || err.is_websocket_overload()
+        || err.detail.as_deref() == Some("hosted_tool_executed")
+    {
         return false;
     }
     if err.origin == client::CodexErrorOrigin::WebSocketHandshake {
@@ -177,6 +180,9 @@ pub(super) fn retryable_live_start_codex_error(err: &client::CodexError) -> bool
             return false;
         }
         return err.status == 0 || matches!(err.status, 429 | 500 | 502 | 503 | 504 | 529);
+    }
+    if err.origin == client::CodexErrorOrigin::WebSocketTransient {
+        return true;
     }
     if err.detail.as_deref() == Some(websocket::WEBSOCKET_KEEPALIVE_FAILURE_DETAIL) {
         return true;

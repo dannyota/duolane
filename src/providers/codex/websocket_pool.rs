@@ -94,6 +94,7 @@ pub(super) struct PoolEntry {
     identity: Option<HandshakeIdentity>,
     created_at: u64,
     last_activity: AtomicU64,
+    completed_ids: Mutex<std::collections::HashSet<[u8; 32]>>,
 }
 
 impl PoolEntry {
@@ -104,6 +105,7 @@ impl PoolEntry {
             identity: None,
             created_at: now_ms(),
             last_activity: AtomicU64::new(next_pool_activity()),
+            completed_ids: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -111,6 +113,25 @@ impl PoolEntry {
         let mut entry = Self::new(ws);
         entry.identity = Some(identity);
         entry
+    }
+
+    pub(super) fn has_completed(&self, id: &str) -> bool {
+        let digest = ring::digest::digest(&ring::digest::SHA256, id.as_bytes());
+        let mut hash = [0; 32];
+        hash.copy_from_slice(digest.as_ref());
+        self.completed_ids.lock().unwrap().contains(&hash)
+    }
+
+    pub(super) fn record_completed(&self, id: &str) -> bool {
+        let digest = ring::digest::digest(&ring::digest::SHA256, id.as_bytes());
+        let mut hash = [0; 32];
+        hash.copy_from_slice(digest.as_ref());
+        let mut ids = self.completed_ids.lock().unwrap();
+        if ids.len() >= 1024 {
+            return false;
+        }
+        ids.insert(hash);
+        true
     }
 
     fn touch(&self) {
@@ -336,10 +357,25 @@ pub(super) fn invalidate_codex_websocket_pool_socket(
 fn pool_insert_if_vacant_or_same(owner: PoolKey, entry: Arc<PoolEntry>) -> bool {
     entry.touch();
     let mut guard = WS_POOL.lock().unwrap();
+    let now = now_ms();
+    let expired_keys: Vec<_> = guard
+        .iter()
+        .filter(|(_, pooled)| now.saturating_sub(pooled.created_at) > POOL_IDLE_TTL_MS)
+        .map(|(key, _)| key.clone())
+        .collect();
+    let expired: Vec<_> = expired_keys
+        .iter()
+        .filter_map(|key| guard.remove(key))
+        .collect();
     if let Some(existing) = guard.get(&owner) {
-        return Arc::ptr_eq(existing, &entry);
+        let same = Arc::ptr_eq(existing, &entry);
+        drop(guard);
+        drop(expired);
+        return same;
     }
     if *IDLE_POOL_BOUND == 0 {
+        drop(guard);
+        drop(expired);
         return false;
     }
     let evicted = if guard.len() >= *IDLE_POOL_BOUND {
@@ -354,6 +390,7 @@ fn pool_insert_if_vacant_or_same(owner: PoolKey, entry: Arc<PoolEntry>) -> bool 
     guard.insert(owner, entry);
     drop(guard);
     drop(evicted);
+    drop(expired);
     true
 }
 
@@ -766,6 +803,63 @@ mod tests {
         super::super::continuation::abort_continuation_for_owner(&reservation);
     }
 
+    #[tokio::test]
+    async fn reused_socket_rejects_completed_and_missing_created_ids() {
+        let entry = Arc::new(PoolEntry::new(raw_test_stream(None).await));
+        assert!(entry.record_completed("old"));
+        for created in [
+            serde_json::json!({"type":"response.created", "response":{"id":"old"}}),
+            serde_json::json!({"type":"response.created"}),
+        ] {
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            server
+                .send(Message::text(created.to_string()))
+                .await
+                .unwrap();
+            let (tx, mut rx) = mpsc::channel(2);
+            let (_, terminal) = stream_ws_events(
+                &mut client,
+                1_000,
+                None,
+                &tx,
+                &Default::default(),
+                true,
+                Some(&entry),
+            )
+            .await;
+            assert!(matches!(
+                terminal,
+                Some(Err(CodexError {
+                    origin: super::super::client::CodexErrorOrigin::WebSocketTransient,
+                    ..
+                }))
+            ));
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn returning_socket_sweeps_expired_idle_entries() {
+        let _pool_guard = lock_codex_websocket_pool_for_tests().await;
+        clear_codex_websocket_pool_for_tests();
+        let old_owner = main_owner("sweep-old");
+        let mut old = PoolEntry::new(raw_test_stream(None).await);
+        old.created_at = now_ms().saturating_sub(POOL_IDLE_TTL_MS + 1);
+        let old = Arc::new(old);
+        let weak = Arc::downgrade(&old);
+        pool_insert(old_owner.clone(), old);
+        let new = Arc::new(PoolEntry::new(raw_test_stream(None).await));
+        assert!(pool_insert_if_vacant_or_same(
+            (main_owner("sweep-new"), ReasoningAccount::default(), false),
+            new,
+        ));
+        assert!(pooled_socket_id_for_tests(&old_owner).is_none());
+        assert!(weak.upgrade().is_none());
+        clear_codex_websocket_pool_for_tests();
+    }
+
     #[test]
     fn idle_pool_bound_follows_descriptor_limit() {
         assert_eq!(idle_pool_bound(Some(256)), 25);
@@ -883,6 +977,7 @@ mod tests {
                 identity: None,
                 created_at: now_ms(),
                 last_activity: AtomicU64::new(next_pool_activity()),
+                completed_ids: Mutex::new(std::collections::HashSet::new()),
             });
             assert!(pool_insert_if_vacant_or_same(
                 pool_key_for(&main_owner(&format!("idle-{index}"))),

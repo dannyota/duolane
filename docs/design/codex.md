@@ -138,16 +138,20 @@ native server compaction retain their configured transport.
   and reports a completed response. In every other case the socket is closed
   when the request ends, including a cancelled request and a stream without a
   terminal event.
-- On a reused socket, an output event or a completed terminal event that arrives
-  before this request's `response.created` belongs to an earlier response.
-  duolane passes nothing from it to the client, closes the socket, and treats
-  the attempt as failed before output. An `error` event, and a terminal event
-  that reports a failure, keep their own result even before `response.created`,
-  such as a usage limit, along with the evidence that the request was sent; the
-  socket is closed.
+- On a reused socket, a response starts only at a `response.created` whose id
+  the socket has not completed before. An output event or a completed terminal
+  event before that point, and a terminal event with another id after it, belong
+  to an earlier response. duolane passes nothing from them to the client, closes
+  the socket, and fails the attempt as a transport failure at that point, which
+  the rules below retry only before output. A stale event that reports a hosted
+  tool still counts as evidence that the tool ran, so the request is not
+  replayed. Before `response.created`, an `error` event and a terminal event
+  that reports a failure keep their own result, such as a usage limit, along
+  with the evidence that the request was sent; the socket is closed.
 - The pool holds at most the [idle sockets](security.md#limits) the limits
-  allow, counted over all conversations. A socket that returns to a full pool
-  closes the idle socket used least recently.
+  allow, counted over all conversations. A socket that returns to the pool first
+  closes the pooled sockets opened more than 30 minutes ago, and then, if the
+  pool is full, the idle socket used least recently.
 - Fresh WebSocket handshakes share a process-wide queue, with at most four in
   flight and a 30-second queue deadline. Starts are spaced by one second
   initially and at minimum. An origin upgrade 403 doubles spacing up to eight

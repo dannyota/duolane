@@ -448,6 +448,7 @@ pub(super) fn start_codex_websocket_events(
             &tx,
             &budget,
             used_pooled,
+            Some(&entry),
         )
         .await;
         drop(guard);
