@@ -16,6 +16,7 @@ pub const WEBSOCKET_PROTOCOL_HEADER: &str = "responses_websockets=2026-02-06";
 pub const WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
 pub const WEBSOCKET_IDLE_TIMEOUT_MS: u64 = 300_000;
 pub const WEBSOCKET_RESPONSE_START_TIMEOUT_DETAIL: &str = "websocket_response_start_timeout";
+pub const WEBSOCKET_STALE_RESPONSE_DETAIL: &str = "websocket_stale_response";
 pub const WEBSOCKET_MISSING_TERMINAL_DETAIL: &str = "websocket_missing_terminal";
 pub const WEBSOCKET_KEEPALIVE_FAILURE_DETAIL: &str = "websocket_keepalive_failure";
 pub const WEBSOCKET_CONTINUATION_SOCKET_MISSING_DETAIL: &str =
@@ -32,13 +33,35 @@ pub(crate) struct CodexWebSocketEventStream {
     receiver: CodexWebSocketEventReceiver,
     is_http: bool,
     socket_id: Arc<AtomicU64>,
+    return_id: Arc<AtomicU64>,
     full_context_retry: Arc<AtomicBool>,
     provider_retry_handoff: Arc<AtomicBool>,
+    auto_cleanup: Option<AutoCleanup>,
+}
+
+struct AutoCleanup {
+    continuation: super::continuation::ContinuationReservation,
+    terminal_read: Arc<AtomicBool>,
+}
+
+impl Drop for CodexWebSocketEventStream {
+    fn drop(&mut self) {
+        if let Some(cleanup) = &self.auto_cleanup
+            && !cleanup.terminal_read.load(Ordering::Acquire)
+        {
+            self.receiver.close();
+            let return_id = self.return_id();
+            #[cfg(test)]
+            super::client_live::tests::pause_auto_drop(&cleanup.continuation);
+            invalidate_codex_websocket_pool_return(&cleanup.continuation, return_id);
+        }
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct CodexWebSocketSocketIdPublisher {
     socket_id: Arc<AtomicU64>,
+    return_id: Arc<AtomicU64>,
     full_context_retry: Arc<AtomicBool>,
     provider_retry_handoff: Arc<AtomicBool>,
 }
@@ -48,6 +71,7 @@ impl CodexWebSocketEventStream {
         receiver: CodexWebSocketEventReceiver,
     ) -> (Self, CodexWebSocketSocketIdPublisher) {
         let socket_id = Arc::new(AtomicU64::new(0));
+        let return_id = Arc::new(AtomicU64::new(0));
         let full_context_retry = Arc::new(AtomicBool::new(false));
         let provider_retry_handoff = Arc::new(AtomicBool::new(false));
         (
@@ -55,11 +79,14 @@ impl CodexWebSocketEventStream {
                 receiver,
                 is_http: false,
                 socket_id: socket_id.clone(),
+                return_id: return_id.clone(),
                 full_context_retry: full_context_retry.clone(),
                 provider_retry_handoff: provider_retry_handoff.clone(),
+                auto_cleanup: None,
             },
             CodexWebSocketSocketIdPublisher {
                 socket_id,
+                return_id,
                 full_context_retry,
                 provider_retry_handoff,
             },
@@ -77,13 +104,33 @@ impl CodexWebSocketEventStream {
     }
 
     pub(crate) async fn recv(&mut self) -> Option<Result<serde_json::Value, CodexError>> {
-        self.receiver.recv().await
+        let item = self.receiver.recv().await;
+        if item
+            .as_ref()
+            .is_some_and(|item| item.as_ref().is_ok_and(is_terminal_event))
+            && let Some(cleanup) = &self.auto_cleanup
+        {
+            cleanup.terminal_read.store(true, Ordering::Release);
+        }
+        item
     }
 
     pub(crate) fn socket_id(&self) -> Option<u64> {
         match self.socket_id.load(Ordering::Acquire) {
             0 => None,
             socket_id => Some(socket_id),
+        }
+    }
+
+    pub(crate) fn close_and_return_id(&mut self) -> Option<u64> {
+        self.receiver.close();
+        self.return_id()
+    }
+
+    pub(crate) fn return_id(&self) -> Option<u64> {
+        match self.return_id.load(Ordering::Acquire) {
+            0 => None,
+            id => Some(id),
         }
     }
 
@@ -95,15 +142,107 @@ impl CodexWebSocketEventStream {
         self.provider_retry_handoff.store(true, Ordering::Release);
     }
 
-    pub(crate) fn into_receiver(self) -> CodexWebSocketEventReceiver {
-        self.receiver
+    pub(crate) fn into_receiver(mut self) -> CodexWebSocketEventReceiver {
+        let (_, receiver) = tokio::sync::mpsc::channel(1);
+        std::mem::replace(&mut self.receiver, receiver)
     }
 
-    pub(crate) fn replace_receiver(
-        &mut self,
-        receiver: CodexWebSocketEventReceiver,
-    ) -> CodexWebSocketEventReceiver {
-        std::mem::replace(&mut self.receiver, receiver)
+    pub(super) fn forward_auto(
+        mut self,
+        first: Result<serde_json::Value, CodexError>,
+        continuation: Option<super::continuation::ContinuationReservation>,
+    ) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let mut source = Self {
+            receiver: std::mem::replace(&mut self.receiver, rx),
+            is_http: self.is_http,
+            socket_id: self.socket_id.clone(),
+            return_id: self.return_id.clone(),
+            full_context_retry: self.full_context_retry.clone(),
+            provider_retry_handoff: self.provider_retry_handoff.clone(),
+            auto_cleanup: None,
+        };
+        let terminal_read = Arc::new(AtomicBool::new(false));
+        self.auto_cleanup = continuation.clone().map(|continuation| AutoCleanup {
+            continuation,
+            terminal_read: terminal_read.clone(),
+        });
+        tokio::spawn(async move {
+            if continuation.is_none() {
+                if tx.send(first).await.is_ok() {
+                    super::client_sse::forward_codex_events(source.into_receiver(), tx).await;
+                }
+                return;
+            }
+            let mut item = Some(first);
+            loop {
+                let next = match item.take() {
+                    Some(item) => Some(item),
+                    #[cfg(test)]
+                    None if super::client_live::tests::is_auto_drop_race(continuation.as_ref()) => {
+                        source.recv().await
+                    }
+                    None => tokio::select! {
+                        biased;
+                        _ = tx.closed() => break,
+                        item = source.recv() => item,
+                    },
+                };
+                let Some(next) = next else {
+                    #[cfg(test)]
+                    if continuation.as_ref().and_then(|r| r.owner())
+                        == Some(&crate::request_identity::ConversationIdentity::Main(
+                            "auto-terminal-drop".into(),
+                        ))
+                    {
+                        super::client_live::tests::AUTO_FORWARD_EOF.add_permits(1);
+                    }
+                    #[cfg(test)]
+                    if super::client_live::tests::is_auto_drop_race(continuation.as_ref()) {
+                        super::client_live::tests::AUTO_RACE_FORWARD_DONE.add_permits(1);
+                    }
+                    return;
+                };
+                #[cfg(test)]
+                let terminal = next.as_ref().is_ok_and(is_terminal_event);
+                if tx.send(next).await.is_err() {
+                    break;
+                }
+                #[cfg(test)]
+                if terminal
+                    && continuation.as_ref().and_then(|r| r.owner())
+                        == Some(&crate::request_identity::ConversationIdentity::Main(
+                            "auto-terminal-delivered".into(),
+                        ))
+                {
+                    super::client_live::tests::AUTO_FORWARD_TERMINAL.add_permits(1);
+                    super::client_live::tests::AUTO_FORWARD_RELEASE
+                        .acquire()
+                        .await
+                        .unwrap()
+                        .forget();
+                }
+            }
+            let return_id = source.close_and_return_id();
+            if !terminal_read.load(Ordering::Acquire)
+                && let Some(reservation) = continuation.as_ref()
+            {
+                invalidate_codex_websocket_pool_return(reservation, return_id);
+            }
+            #[cfg(test)]
+            if super::client_live::tests::is_auto_drop_race(continuation.as_ref()) {
+                super::client_live::tests::AUTO_RACE_FORWARD_DONE.add_permits(1);
+            }
+            #[cfg(test)]
+            if continuation.as_ref().and_then(|r| r.owner())
+                == Some(&crate::request_identity::ConversationIdentity::Main(
+                    "auto-terminal-delivered".into(),
+                ))
+            {
+                super::client_live::tests::AUTO_FORWARD_DONE.add_permits(1);
+            }
+        });
+        self
     }
 }
 
@@ -111,6 +250,12 @@ impl CodexWebSocketSocketIdPublisher {
     pub(super) fn publish(&self, socket_id: Option<u64>) {
         self.socket_id
             .store(socket_id.unwrap_or(0), Ordering::Release);
+    }
+
+    pub(super) fn publish_return(&self, socket_id: Option<u64>, return_id: Option<u64>) {
+        self.return_id
+            .store(return_id.unwrap_or(0), Ordering::Release);
+        self.publish(socket_id);
     }
 
     pub(super) fn mark_full_context_retry(&self) {

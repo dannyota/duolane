@@ -431,7 +431,7 @@ pub(super) async fn connect_with_timeout(
         &WS_CONNECT_GATE,
         Duration::from_millis(connect_timeout_ms),
         WEBSOCKET_CONNECT_FORBIDDEN_COOLDOWN,
-        || async { cleanup_pool_before_connect() },
+        || async {},
         |seen, headers_latch| {
             connect_once_inner(
                 websocket_client,

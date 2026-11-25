@@ -76,6 +76,7 @@ pub(super) struct WsEvent {
     pub(super) event_type: String,
     pub(super) payload: serde_json::Value,
     pub(super) hosted_tool_executed: bool,
+    pub(super) reusable: bool,
 }
 
 #[cfg(test)]
@@ -96,6 +97,7 @@ where
         pool_entry,
         traffic,
         &Default::default(),
+        false,
     )
     .await
 }
@@ -107,6 +109,7 @@ pub(super) async fn collect_ws_events_tracked<S>(
     pool_entry: Option<&Arc<PoolEntry>>,
     traffic: Option<&TrafficCapture>,
     budget: &super::recovery::RecoveryBudget,
+    reused: bool,
 ) -> Result<(Vec<u8>, Option<WsEvent>), CodexError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -119,10 +122,12 @@ where
         traffic,
         WEBSOCKET_KEEPALIVE_INTERVAL,
         budget,
+        reused,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn collect_ws_events_with_keepalive_interval<S>(
     ws: &mut WebSocketStream<S>,
     idle_timeout_ms: u64,
@@ -131,6 +136,7 @@ async fn collect_ws_events_with_keepalive_interval<S>(
     traffic: Option<&TrafficCapture>,
     keepalive_interval: Duration,
     budget: &super::recovery::RecoveryBudget,
+    reused: bool,
 ) -> Result<(Vec<u8>, Option<WsEvent>), CodexError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -142,6 +148,9 @@ where
     let mut last_response_event_at = response_wait_started;
     let mut response_started = false;
 
+    let mut created_id: Option<String> = None;
+    let mut seen_created = false;
+    let mut conflicting_created = false;
     let terminal_event = loop {
         let response_deadline_started = if response_started {
             last_response_event_at
@@ -223,6 +232,25 @@ where
                     }
                 };
 
+                if reused && stale_event(&parsed, seen_created, created_id.as_deref(), pool_entry) {
+                    hosted_tool_executed |= super::client_sse::payload_confirms_hosted(&parsed);
+                    if hosted_tool_executed {
+                        budget.mark_hosted();
+                    }
+                    budget.mark_ambiguous_hosted();
+                    break Err(stale_response_error());
+                }
+                if parsed.get("type").and_then(|v| v.as_str()) == Some("response.created") {
+                    conflicting_created |= different_created_id(&parsed, created_id.as_deref());
+                    seen_created = true;
+                    if created_id.is_none() {
+                        created_id = parsed
+                            .pointer("/response/id")
+                            .and_then(|v| v.as_str())
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_owned);
+                    }
+                }
                 sse_body.extend_from_slice(&encode_sse(&text));
                 if let Some(tc) = traffic {
                     tc.write_json_event("040-upstream-event", &parsed);
@@ -245,6 +273,11 @@ where
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown")
                             .to_string(),
+                        reusable: !conflicting_created
+                            && completed_response_matches(&parsed, created_id.as_deref())
+                            && pool_entry.is_none_or(|entry| {
+                                entry.record_completed(created_id.as_deref().unwrap_or_default())
+                            }),
                         payload: parsed,
                         hosted_tool_executed,
                     }));
@@ -295,12 +328,80 @@ where
         })
 }
 
+fn stale_before_created(event: &serde_json::Value) -> bool {
+    let kind = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if is_terminal_event(event) {
+        return matches!(kind, "response.completed" | "response.done")
+            && !super::events::response_is_incomplete_terminal(event)
+            && super::events::classify_event_failure(event).is_none();
+    }
+    kind.starts_with("response.") && !matches!(kind, "response.created" | "response.in_progress")
+}
+
+fn different_created_id(event: &serde_json::Value, created_id: Option<&str>) -> bool {
+    event.get("type").and_then(|v| v.as_str()) == Some("response.created")
+        && created_id.is_some_and(|created| {
+            event
+                .pointer("/response/id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| !id.is_empty() && id != created)
+        })
+}
+
+fn stale_event(
+    event: &serde_json::Value,
+    seen_created: bool,
+    created_id: Option<&str>,
+    entry: Option<&Arc<PoolEntry>>,
+) -> bool {
+    let kind = event.get("type").and_then(|v| v.as_str());
+    let id = event
+        .pointer("/response/id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty());
+    if kind == Some("response.created") {
+        if created_id.is_some() && id.is_none() {
+            return false;
+        }
+        return id.is_none_or(|id| {
+            created_id.is_some_and(|created| created != id)
+                || entry.is_some_and(|entry| entry.has_completed(id))
+        });
+    }
+    if seen_created && is_terminal_event(event) {
+        return id.is_some_and(|id| Some(id) != created_id);
+    }
+    !seen_created && stale_before_created(event)
+}
+
+fn stale_response_error() -> CodexError {
+    CodexError {
+        status: 0,
+        message: "Stale WebSocket response event".to_string(),
+        detail: Some(WEBSOCKET_STALE_RESPONSE_DETAIL.to_string()),
+        retry_after: None,
+        usage_limit: None,
+        origin: CodexErrorOrigin::WebSocketTransient,
+    }
+}
+
+fn completed_response_matches(event: &serde_json::Value, created_id: Option<&str>) -> bool {
+    is_terminal_event(event)
+        && super::events::classify_event_failure(event).is_none()
+        && !super::events::response_is_incomplete_terminal(event)
+        && event.pointer("/response/status").and_then(|v| v.as_str()) == Some("completed")
+        && created_id.is_some()
+        && event.pointer("/response/id").and_then(|v| v.as_str()) == created_id
+}
+
 pub(super) async fn stream_ws_events<S>(
     ws: &mut WebSocketStream<S>,
     idle_timeout_ms: u64,
     traffic: Option<Arc<TrafficCapture>>,
     tx: &mpsc::Sender<Result<serde_json::Value, CodexError>>,
     budget: &super::recovery::RecoveryBudget,
+    reused: bool,
+    pool_entry: Option<&Arc<PoolEntry>>,
 ) -> (bool, Option<Result<serde_json::Value, CodexError>>)
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -312,6 +413,11 @@ where
     let mut response_started = false;
     let mut status = 200u16;
     let mut reusable = false;
+    let mut completed = false;
+    let mut hosted_tool_executed = false;
+    let mut created_id: Option<String> = None;
+    let mut seen_created = false;
+    let mut conflicting_created = false;
     let mut terminal_item = None;
 
     loop {
@@ -382,6 +488,30 @@ where
                     }
                 };
 
+                hosted_tool_executed |= super::client_sse::payload_confirms_hosted(&parsed);
+                if hosted_tool_executed {
+                    budget.mark_hosted();
+                }
+                if reused && stale_event(&parsed, seen_created, created_id.as_deref(), pool_entry) {
+                    let error = stale_response_error();
+                    terminal_item = Some(Err(if hosted_tool_executed {
+                        error.after_hosted_tool_execution()
+                    } else {
+                        error
+                    }));
+                    break;
+                }
+                if parsed.get("type").and_then(|v| v.as_str()) == Some("response.created") {
+                    conflicting_created |= different_created_id(&parsed, created_id.as_deref());
+                    seen_created = true;
+                    if created_id.is_none() {
+                        created_id = parsed
+                            .pointer("/response/id")
+                            .and_then(|v| v.as_str())
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_owned);
+                    }
+                }
                 if budget.is_tracked() && super::client_sse::payload_confirms_hosted(&parsed) {
                     budget.mark_hosted();
                 }
@@ -408,8 +538,13 @@ where
                             origin: CodexErrorOrigin::WebSocket,
                         }));
                     } else {
-                        reusable = parsed.get("type").and_then(|value| value.as_str())
+                        completed = parsed.get("type").and_then(|value| value.as_str())
                             == Some("response.completed");
+                        reusable = !conflicting_created
+                            && completed_response_matches(&parsed, created_id.as_deref())
+                            && pool_entry.is_none_or(|entry| {
+                                entry.record_completed(created_id.as_deref().unwrap_or_default())
+                            });
                         terminal_item = Some(Ok(parsed));
                     }
                     break;
@@ -457,7 +592,7 @@ where
         }
     }
 
-    if !reusable {
+    if !completed {
         budget.mark_ambiguous_hosted();
     }
     if let Some(tc) = traffic.as_deref() {
@@ -533,6 +668,509 @@ mod tests {
         }
     }
 
+    struct InvalidReadIo;
+
+    impl AsyncRead for InvalidReadIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buffer: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid data",
+            )))
+        }
+    }
+
+    impl AsyncWrite for InvalidReadIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buffer.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_socket_invalid_data_read_fails_without_live_retry() {
+        let mut client = WebSocketStream::from_raw_socket(InvalidReadIo, Role::Client, None).await;
+        let budget = super::super::recovery::RecoveryBudget::with_gate(
+            super::super::sources::ReplayGate::new(false),
+        );
+        budget.enable_typed_websocket();
+        let (tx, _rx) = mpsc::channel(1);
+        let (_, terminal) =
+            stream_ws_events(&mut client, 1_000, None, &tx, &budget, false, None).await;
+        let error = terminal.unwrap().unwrap_err();
+        assert_eq!(error.origin, CodexErrorOrigin::WebSocketTransient);
+        assert!(!super::super::live_completion::retryable_live_start_codex_error(&error));
+    }
+
+    #[test]
+    fn stale_response_events_exclude_failures_and_keepalives() {
+        assert!(stale_before_created(
+            &serde_json::json!({"type":"response.output_text.delta"})
+        ));
+        assert!(stale_before_created(
+            &serde_json::json!({"type":"response.completed","response":{"status":"completed"}})
+        ));
+        assert!(!stale_before_created(
+            &serde_json::json!({"type":"response.failed"})
+        ));
+        assert!(!stale_before_created(&serde_json::json!({"type":"error"})));
+        assert!(!stale_before_created(
+            &serde_json::json!({"type":"codex.rate_limits"})
+        ));
+    }
+
+    #[tokio::test]
+    async fn reused_socket_rejects_stale_output_before_delivery() {
+        let (client_io, server_io) = tokio::io::duplex(2048);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        server
+            .send(Message::text(
+                r#"{"type":"response.output_text.delta","delta":"stale"}"#,
+            ))
+            .await
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(2);
+        let (reusable, terminal) = stream_ws_events(
+            &mut client,
+            1_000,
+            None,
+            &tx,
+            &Default::default(),
+            true,
+            None,
+        )
+        .await;
+        assert!(!reusable);
+        assert!(matches!(
+            terminal,
+            Some(Err(CodexError {
+                origin: CodexErrorOrigin::WebSocketTransient,
+                ..
+            }))
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_hosted_event_preserves_no_replay_evidence() {
+        for tracked in [false, true] {
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            server
+                .send(Message::text(
+                    r#"{"type":"response.web_search_call.in_progress"}"#,
+                ))
+                .await
+                .unwrap();
+            let budget = if tracked {
+                super::super::recovery::RecoveryBudget::with_gate(
+                    super::super::sources::ReplayGate::new(false),
+                )
+            } else {
+                Default::default()
+            };
+            let error =
+                collect_ws_events_tracked(&mut client, 1_000, None, None, None, &budget, true)
+                    .await
+                    .err()
+                    .unwrap();
+            assert_eq!(error.detail.as_deref(), Some("hosted_tool_executed"));
+            let result = Err(error);
+            assert!(!super::super::recovery::buffered_replay_allowed(
+                &result, &budget
+            ));
+
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            server
+                .send(Message::text(
+                    r#"{"type":"response.web_search_call.in_progress"}"#,
+                ))
+                .await
+                .unwrap();
+            let (tx, mut rx) = mpsc::channel(2);
+            let (_, terminal) =
+                stream_ws_events(&mut client, 1_000, None, &tx, &budget, true, None).await;
+            let error = terminal.unwrap().unwrap_err();
+            assert_eq!(error.detail.as_deref(), Some("hosted_tool_executed"));
+            assert!(!super::super::live_completion::retryable_live_start_codex_error(&error));
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn reused_socket_preserves_idless_terminal_classification() {
+        for payload in [
+            serde_json::json!({"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"limit"}}),
+            serde_json::json!({"type":"error","status":401,"error":{"message":"unauthorized"}}),
+            serde_json::json!({"type":"response.completed","response":{"status":"completed"}}),
+        ] {
+            let mut outcomes = Vec::new();
+            for reused in [false, true] {
+                let (client_io, server_io) = tokio::io::duplex(2048);
+                let mut client =
+                    WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+                let mut server =
+                    WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+                server
+                    .send(Message::text(
+                        r#"{"type":"response.created","response":{"id":"first"}}"#,
+                    ))
+                    .await
+                    .unwrap();
+                server
+                    .send(Message::text(payload.to_string()))
+                    .await
+                    .unwrap();
+                let (tx, _rx) = mpsc::channel(2);
+                let (reusable, terminal) = stream_ws_events(
+                    &mut client,
+                    1_000,
+                    None,
+                    &tx,
+                    &Default::default(),
+                    reused,
+                    None,
+                )
+                .await;
+                assert!(!reusable);
+                let event = terminal.unwrap().unwrap();
+                outcomes.push((
+                    super::super::events::classify_event_failure(&event),
+                    super::super::events::usage_limit_from_event(&event).is_some(),
+                ));
+            }
+            assert_eq!(outcomes[0], outcomes[1]);
+        }
+    }
+
+    #[tokio::test]
+    async fn reused_socket_keeps_first_id_after_idless_created() {
+        let (client_io, server_io) = tokio::io::duplex(2048);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        for event in [
+            r#"{"type":"response.created","response":{"id":"first"}}"#,
+            r#"{"type":"response.created","response":{}}"#,
+            r#"{"type":"response.completed","response":{"id":"first","status":"completed"}}"#,
+        ] {
+            server.send(Message::text(event)).await.unwrap();
+        }
+        let (tx, _rx) = mpsc::channel(3);
+        let (reusable, terminal) = stream_ws_events(
+            &mut client,
+            1_000,
+            None,
+            &tx,
+            &Default::default(),
+            true,
+            None,
+        )
+        .await;
+        assert!(reusable);
+        assert!(matches!(terminal, Some(Ok(_))));
+    }
+
+    #[tokio::test]
+    async fn fresh_socket_accepts_conflicting_created_ids_without_reuse() {
+        let (client_io, server_io) = tokio::io::duplex(2048);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        for id in ["first", "second"] {
+            server
+                .send(Message::text(
+                    serde_json::json!({"type":"response.created","response":{"id":id}}).to_string(),
+                ))
+                .await
+                .unwrap();
+        }
+        server
+            .send(Message::text(
+                r#"{"type":"response.output_text.delta","delta":"hello"}"#,
+            ))
+            .await
+            .unwrap();
+        server
+            .send(Message::text(
+                r#"{"type":"response.completed","response":{"id":"second","status":"completed"}}"#,
+            ))
+            .await
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(3);
+        let (reusable, terminal) = stream_ws_events(
+            &mut client,
+            1_000,
+            None,
+            &tx,
+            &Default::default(),
+            false,
+            None,
+        )
+        .await;
+        assert!(!reusable);
+        assert!(matches!(terminal, Some(Ok(_))));
+        assert_eq!(rx.try_recv().unwrap().unwrap()["type"], "response.created");
+        assert_eq!(rx.try_recv().unwrap().unwrap()["type"], "response.created");
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap()["type"],
+            "response.output_text.delta"
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_created_ids_do_not_pool_when_terminal_matches_first() {
+        for buffered in [false, true] {
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            for id in ["first", "second"] {
+                server
+                    .send(Message::text(
+                        serde_json::json!({"type":"response.created","response":{"id":id}})
+                            .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            server.send(Message::text(r#"{"type":"response.completed","response":{"id":"first","status":"completed"}}"#)).await.unwrap();
+            if buffered {
+                let (_, terminal) = collect_ws_events(&mut client, 1_000, None, None, None)
+                    .await
+                    .unwrap();
+                assert!(!terminal.unwrap().reusable);
+            } else {
+                let (tx, _rx) = mpsc::channel(3);
+                let (reusable, terminal) = stream_ws_events(
+                    &mut client,
+                    1_000,
+                    None,
+                    &tx,
+                    &Default::default(),
+                    false,
+                    None,
+                )
+                .await;
+                assert!(!reusable);
+                assert!(matches!(terminal, Some(Ok(_))));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reused_socket_rejects_second_created_with_different_id() {
+        let (client_io, server_io) = tokio::io::duplex(2048);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        for id in ["first", "second"] {
+            server
+                .send(Message::text(
+                    serde_json::json!({"type":"response.created","response":{"id":id}}).to_string(),
+                ))
+                .await
+                .unwrap();
+        }
+        server
+            .send(Message::text(
+                r#"{"type":"response.completed","response":{"id":"second","status":"completed"}}"#,
+            ))
+            .await
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(3);
+        let (reusable, terminal) = stream_ws_events(
+            &mut client,
+            1_000,
+            None,
+            &tx,
+            &Default::default(),
+            true,
+            None,
+        )
+        .await;
+        assert!(!reusable);
+        assert!(matches!(
+            terminal,
+            Some(Err(CodexError {
+                origin: CodexErrorOrigin::WebSocketTransient,
+                ..
+            }))
+        ));
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn reused_socket_rejects_terminal_for_another_response() {
+        let (client_io, server_io) = tokio::io::duplex(2048);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        server
+            .send(Message::text(
+                r#"{"type":"response.created","response":{"id":"new"}}"#,
+            ))
+            .await
+            .unwrap();
+        server
+            .send(Message::text(
+                r#"{"type":"response.completed","response":{"id":"old","status":"completed"}}"#,
+            ))
+            .await
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(2);
+        let (reusable, terminal) = stream_ws_events(
+            &mut client,
+            1_000,
+            None,
+            &tx,
+            &Default::default(),
+            true,
+            None,
+        )
+        .await;
+        assert!(!reusable);
+        assert!(matches!(
+            terminal,
+            Some(Err(CodexError {
+                origin: CodexErrorOrigin::WebSocketTransient,
+                ..
+            }))
+        ));
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn untracked_fresh_terminal_output_keeps_existing_hosted_classification() {
+        let (client_io, server_io) = tokio::io::duplex(2048);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        server.send(Message::text(serde_json::json!({"type":"response.completed","response":{"output":[{"type":"web_search_call"}]}}).to_string())).await.unwrap();
+        let (_, terminal) = collect_ws_events(&mut client, 1_000, None, None, None)
+            .await
+            .unwrap();
+        assert!(!terminal.unwrap().hosted_tool_executed);
+    }
+
+    #[tokio::test]
+    async fn fresh_stream_without_created_or_terminal_status_succeeds_without_reuse() {
+        for with_created in [false, true] {
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            if with_created {
+                server
+                    .send(Message::text(
+                        r#"{"type":"response.created","response":{"id":"first"}}"#,
+                    ))
+                    .await
+                    .unwrap();
+            }
+            server
+                .send(Message::text(
+                    r#"{"type":"response.completed","response":{"id":"first"}}"#,
+                ))
+                .await
+                .unwrap();
+            let (tx, _rx) = mpsc::channel(2);
+            let (reusable, terminal) = stream_ws_events(
+                &mut client,
+                1_000,
+                None,
+                &tx,
+                &Default::default(),
+                false,
+                None,
+            )
+            .await;
+            assert!(!reusable);
+            assert!(matches!(terminal, Some(Ok(_))));
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_and_incomplete_terminals_are_delivered_without_reuse() {
+        for (kind, status) in [
+            ("response.failed", "failed"),
+            ("response.incomplete", "incomplete"),
+        ] {
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            server
+                .send(Message::text(
+                    serde_json::json!({"type":"response.created","response":{"id":"response"}})
+                        .to_string(),
+                ))
+                .await
+                .unwrap();
+            let terminal = serde_json::json!({"type":kind,"response":{"id":"response","status":status,"incomplete_details":{"reason":"max_output_tokens"}}});
+            server
+                .send(Message::text(terminal.to_string()))
+                .await
+                .unwrap();
+            let (tx, _rx) = mpsc::channel(2);
+            let (reusable, result) = stream_ws_events(
+                &mut client,
+                1_000,
+                None,
+                &tx,
+                &Default::default(),
+                false,
+                None,
+            )
+            .await;
+            assert!(!reusable);
+            assert_eq!(result.unwrap().unwrap(), terminal);
+        }
+    }
+
+    #[tokio::test]
+    async fn reuse_requires_matching_created_and_completed_response() {
+        for (created, terminal, expected) in [("one", "one", true), ("one", "two", false)] {
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            let task = tokio::spawn(async move {
+                server
+                    .send(Message::text(
+                        serde_json::json!({"type":"response.created", "response":{"id":created}})
+                            .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                server.send(Message::text(serde_json::json!({"type":"response.completed", "response":{"id":terminal,"status":"completed"}}).to_string())).await.unwrap();
+            });
+            let (tx, _rx) = mpsc::channel(2);
+            let (reusable, terminal) = stream_ws_events(
+                &mut client,
+                1_000,
+                None,
+                &tx,
+                &Default::default(),
+                false,
+                None,
+            )
+            .await;
+            assert_eq!(reusable, expected);
+            assert!(matches!(terminal, Some(Ok(_))));
+            task.await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn abrupt_loopback_eof_is_transient_only_for_tracked_websocket() {
         use super::super::recovery::{RecoveryBudget, live_retry_exhausted};
@@ -557,7 +1195,8 @@ mod tests {
                 budget.enable_typed_websocket();
             }
             let (tx, _rx) = mpsc::channel(1);
-            let (_, terminal) = stream_ws_events(&mut socket, 1_000, None, &tx, &budget).await;
+            let (_, terminal) =
+                stream_ws_events(&mut socket, 1_000, None, &tx, &budget, false, None).await;
             let error = terminal.unwrap().unwrap_err();
             assert_eq!(
                 error.origin,
@@ -603,7 +1242,8 @@ mod tests {
         let send = tokio::spawn(async move {
             server.send(Message::text(r#"{"type":"response.failed","response":{"output":[{"type":"web_search_call"}]}}"#)).await.unwrap();
         });
-        let (_, terminal) = stream_ws_events(&mut client, 1_000, None, &tx, &budget).await;
+        let (_, terminal) =
+            stream_ws_events(&mut client, 1_000, None, &tx, &budget, false, None).await;
         assert!(terminal.is_some());
         assert!(gate.hosted());
         assert!(rx.try_recv().is_err());
@@ -651,6 +1291,7 @@ mod tests {
             None,
             WEBSOCKET_KEEPALIVE_INTERVAL,
             &Default::default(),
+            false,
         )
         .await
         {
@@ -691,6 +1332,7 @@ mod tests {
             None,
             Duration::from_millis(10),
             &Default::default(),
+            false,
         )
         .await
         {
