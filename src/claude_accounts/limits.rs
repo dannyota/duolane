@@ -36,6 +36,7 @@ struct Document {
 }
 
 static OBSERVED: Mutex<BTreeMap<String, Limits>> = Mutex::new(BTreeMap::new());
+static FLUSH_LOCK: Mutex<()> = Mutex::new(());
 static FLUSHING: AtomicBool = AtomicBool::new(false);
 
 fn number(headers: &HeaderMap, name: &str) -> Option<f64> {
@@ -83,7 +84,7 @@ fn merge(into: &mut BTreeMap<String, Limits>, from: BTreeMap<String, Limits>) {
             continue;
         }
         match into.get(&name) {
-            Some(current) if current.observed_at >= limits.observed_at => {}
+            Some(current) if current.observed_at > limits.observed_at => {}
             _ => {
                 into.insert(name, limits);
             }
@@ -152,6 +153,10 @@ pub(crate) fn record(profile: Option<&str>, headers: &HeaderMap) {
 }
 
 fn flush() {
+    let Ok(_guard) = FLUSH_LOCK.lock() else {
+        FLUSHING.store(false, Ordering::SeqCst);
+        return;
+    };
     FLUSHING.store(false, Ordering::SeqCst);
     let Ok(observed) = OBSERVED.lock().map(|observed| observed.clone()) else {
         return;
@@ -180,6 +185,7 @@ fn persist(observed: BTreeMap<String, Limits>) -> anyhow::Result<()> {
     use anyhow::Context;
     let dir = super::store::checked_dir(&crate::paths::state_dir(), true)?
         .context("state directory unavailable")?;
+    let _lock = super::store::lock(&dir, ".claude-usage-lock", true)?;
     let mut profiles = super::store::private_read(&dir, FILE, MAX_FILE)
         .ok()
         .flatten()
@@ -252,6 +258,20 @@ mod tests {
             &good,
             100 + REFRESH_SECONDS
         ));
+        let same_second = headers(&[("anthropic-ratelimit-unified-5h-utilization", "0.8")]);
+        assert!(observe(
+            &mut observed,
+            Some("backup"),
+            &same_second,
+            100 + REFRESH_SECONDS
+        ));
+        assert_eq!(observed["backup"].five_hour.unwrap().used, 0.8);
+        assert!(observe(
+            &mut observed,
+            Some("backup"),
+            &good,
+            100 + REFRESH_SECONDS
+        ));
         let backup = observed["backup"];
         assert_eq!(
             backup.five_hour,
@@ -305,6 +325,13 @@ mod tests {
         assert_eq!(profiles.len(), MAX_PROFILES);
         assert_eq!(profiles["kept"].observed_at, 1_000_000);
         assert!(!profiles.contains_key("p0") && !profiles.contains_key("Bad!"));
+        let mut replacement = entry(1_000_000);
+        replacement.five_hour.as_mut().unwrap().used = 0.8;
+        merge(
+            &mut profiles,
+            BTreeMap::from([("kept".to_string(), replacement)]),
+        );
+        assert_eq!(profiles["kept"], replacement);
         let stored = serde_json::to_vec(&Document { profiles }).unwrap();
         assert_eq!(decode(&stored).len(), MAX_PROFILES);
         assert!(

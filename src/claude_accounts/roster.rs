@@ -284,18 +284,27 @@ fn span(seconds: u64) -> String {
     }
 }
 
-fn percent(window: &Window, now: u64) -> u64 {
-    if window.resets_at.is_some_and(|reset| reset <= now) {
+fn percent(window: &Window, observed_at: u64, length: u64, now: u64) -> u64 {
+    if window.resets_at.is_some_and(|reset| reset <= now)
+        || (window.used >= 1.0
+            && window.resets_at.is_none()
+            && observed_at.saturating_add(length) <= now)
+    {
         return 0;
     }
-    (window.used * 100.0).round() as u64
+    let value = (window.used * 100.0).floor() as u64;
+    if window.used < 1.0 {
+        value.min(99)
+    } else {
+        value
+    }
 }
 
-fn window_cell(window: Option<&Window>, now: u64) -> String {
+fn window_cell(window: Option<&Window>, observed_at: u64, length: u64, now: u64) -> String {
     let Some(window) = window else {
         return "-".into();
     };
-    let used = percent(window, now);
+    let used = percent(window, observed_at, length, now);
     match window.resets_at.filter(|reset| *reset > now) {
         Some(reset) => format!("{used}% {}", span(reset - now)),
         None => format!("{used}%"),
@@ -345,11 +354,12 @@ pub(super) fn total(
         .iter()
         .filter_map(|entry| usage(entries, entry, limits))
         .collect();
-    let average = |pick: fn(&Limits) -> Option<&Window>| {
+    let average = |pick: fn(&Limits) -> Option<&Window>, length| {
         let used: Vec<u64> = seen
             .iter()
-            .filter_map(|limits| pick(limits))
-            .map(|window| percent(window, now))
+            .filter_map(|limits| {
+                pick(limits).map(|window| percent(window, limits.observed_at, length, now))
+            })
             .collect();
         match used.len() {
             0 => "-".to_string(),
@@ -358,8 +368,8 @@ pub(super) fn total(
     };
     format!(
         "all accounts: 5H {} used, 7D {} used ({} of {} seen by the proxy)",
-        average(|limits| limits.five_hour.as_ref()),
-        average(|limits| limits.seven_day.as_ref()),
+        average(|limits| limits.five_hour.as_ref(), 18_000),
+        average(|limits| limits.seven_day.as_ref(), 604_800),
         seen.len(),
         accounts.len()
     )
@@ -378,17 +388,27 @@ enum Status {
 }
 
 fn status(limits: Option<&Limits>, now: u64) -> Status {
-    let windows: Vec<&Window> = limits
-        .into_iter()
-        .flat_map(|limits| [limits.five_hour.as_ref(), limits.seven_day.as_ref()])
-        .flatten()
-        .collect();
-    if windows.is_empty() {
+    let Some(limits) = limits else {
+        return Status::Unknown;
+    };
+    let windows = [
+        (limits.five_hour.as_ref(), 18_000),
+        (limits.seven_day.as_ref(), 604_800),
+    ];
+    if windows.iter().all(|(window, _)| window.is_none()) {
         return Status::Unknown;
     }
     let limited: Vec<&Window> = windows
         .into_iter()
-        .filter(|window| percent(window, now) >= 100)
+        .filter_map(|(window, length)| {
+            window.filter(|window| {
+                window.used >= 1.0
+                    && window
+                        .resets_at
+                        .unwrap_or_else(|| limits.observed_at.saturating_add(length))
+                        > now
+            })
+        })
         .collect();
     if limited.is_empty() {
         return Status::Available;
@@ -476,8 +496,18 @@ pub(super) fn table(
                 plan,
                 login,
                 status_cell(state, seconds),
-                window_cell(usage.and_then(|limits| limits.five_hour.as_ref()), seconds),
-                window_cell(usage.and_then(|limits| limits.seven_day.as_ref()), seconds),
+                window_cell(
+                    usage.and_then(|limits| limits.five_hour.as_ref()),
+                    usage.map_or(0, |limits| limits.observed_at),
+                    18_000,
+                    seconds,
+                ),
+                window_cell(
+                    usage.and_then(|limits| limits.seven_day.as_ref()),
+                    usage.map_or(0, |limits| limits.observed_at),
+                    604_800,
+                    seconds,
+                ),
                 usage
                     .map(|limits| seen_cell(limits, seconds))
                     .unwrap_or_default(),
@@ -678,6 +708,20 @@ mod tests {
             status(Some(&limits(0.99, now + 60)), now),
             Status::Available
         );
+        let near = limits(0.996, now + 60);
+        assert_eq!(status(Some(&near), now), Status::Available);
+        assert_eq!(
+            window_cell(near.five_hour.as_ref(), near.observed_at, 18_000, now),
+            "99% 1m"
+        );
+        let mut expired = limits(1.0, now + 60);
+        expired.five_hour.as_mut().unwrap().resets_at = None;
+        expired.observed_at = now - 18_000;
+        assert_eq!(status(Some(&expired), now), Status::Available);
+        assert_eq!(
+            window_cell(expired.five_hour.as_ref(), expired.observed_at, 18_000, now),
+            "0%"
+        );
         assert_eq!(status(None, now), Status::Unknown);
     }
 
@@ -732,7 +776,7 @@ mod tests {
             [
                 "a@example.com",
                 "available",
-                "62%",
+                "61%",
                 "2h10m",
                 "20%",
                 "3d5h",
@@ -744,11 +788,11 @@ mod tests {
             words(1)[1..],
             ["b@example.com", "available", "0%", "40%", "1m", "now"]
         );
-        assert_eq!(words(2)[2..7], ["available", "62%", "2h10m", "20%", "3d5h"]);
+        assert_eq!(words(2)[2..7], ["available", "61%", "2h10m", "20%", "3d5h"]);
         assert_eq!(words(3)[1..], ["c@example.com", "unknown", "-", "-"]);
         assert_eq!(
             total(&entries, &limits, now),
-            "all accounts: 5H 31% used, 7D 30% used (2 of 3 seen by the proxy)"
+            "all accounts: 5H 30% used, 7D 30% used (2 of 3 seen by the proxy)"
         );
         assert_eq!(
             total(&entries, &BTreeMap::new(), now),

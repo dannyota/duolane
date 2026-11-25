@@ -148,10 +148,10 @@ credential to do so.
 - Anthropic answers a message request with
   `anthropic-ratelimit-unified-5h-utilization`,
   `anthropic-ratelimit-unified-5h-reset`, and the same pair for `7d`. The
-  utilization is a fraction of the window and the reset is in epoch seconds.
-  First-party documentation does not describe these headers. The names and units
-  come from the Claude Code 2.1.330 program, which reads them for its own usage
-  display, and were not checked against a live response.
+  utilization is treated as a fraction of the window and the reset as epoch
+  seconds. First-party documentation does not describe these headers. Their
+  names were read from the Claude Code 2.1.330 and 2.1.332 programs. The units
+  and a live response were not checked.
 - The Claude route reads those headers from each upstream response and forwards
   the response unchanged. It ignores a value that is missing, repeated, not a
   finite number, negative, or above 100.
@@ -165,17 +165,22 @@ credential to do so.
   `CLAUDE_CONFIG_DIR` therefore also counts as `default`.
 - The proxy keeps the newest values for at most 64 profiles and saves them to
   `claude-usage.json` in the state directory, an owner-only file of at most 64
-  KiB, written off the request path. `accounts list` ignores the file when it is
-  not a regular owner-only file, and ignores an entry whose name is not a valid
-  profile name or whose value is out of range.
+  KiB, written off the request path. A process mutex and a file lock serialize
+  each read, merge, and write. When two values carry the same second, the later
+  one wins. `accounts list` ignores the file when it is not a regular owner-only
+  file, and ignores an entry whose name is not a valid profile name or whose
+  value is out of range.
 - A value changes only when that account sends a request through the proxy.
-  `SEEN` shows its age, and a window whose reset time has passed shows 0%.
-- `STATUS` summarizes the newest values. `limited` means a window shows 100% and
-  its reset has not passed; it shows the time until the latest such reset.
-  `available` means at least one window was seen and none is limited. `unknown`
-  means the proxy has no values for the account. On a color terminal,
-  `available` is green, `limited` is bold red, and `unknown` is dim. `STATUS` is
-  an observation, not a reason to change accounts automatically.
+  `SEEN` shows its age. Percentages round down, so 100% means full. A window
+  shows 0% once its reset has passed, or, when it has no reset, once its
+  observation is one window length old.
+- `STATUS` summarizes the newest values. `limited` means a window is full and
+  has not reset by the rule above; it shows the time until the latest such reset
+  when every full window has one. `available` means at least one window was seen
+  and none is limited. `unknown` means the proxy has no values for the account.
+  On a color terminal, `available` is green, `limited` is bold red, and
+  `unknown` is dim. `STATUS` is an observation, not a reason to change accounts
+  automatically.
 - Profiles that hold the same account share the newest values. The total line is
   the mean over the accounts the proxy has seen, counting each account once, so
   it assumes equal plans.
