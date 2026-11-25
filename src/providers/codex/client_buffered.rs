@@ -700,6 +700,9 @@ impl CodexHttpClient {
 }
 #[cfg(test)]
 mod tests {
+    mod fresh_socket_tests {
+        include!("client_buffered_fresh_socket_tests.rs");
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 

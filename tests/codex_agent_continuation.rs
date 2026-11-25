@@ -453,9 +453,15 @@ impl InstrumentedUpstream {
             .collect::<Vec<_>>();
         expected_probe_sites.sort_unstable();
         actual_probe_sites.sort_unstable();
-        assert_eq!(
-            actual_probe_sites, expected_probe_sites,
-            "each successful pooled reuse must have one probe at its exact socket-local request boundary: {probes:?}"
+        assert!(
+            actual_probe_sites
+                .iter()
+                .all(|site| expected_probe_sites.binary_search(site).is_ok()),
+            "pooled validation probes must precede reuse at the socket-local request boundary: {probes:?}"
+        );
+        assert!(
+            actual_probe_sites.is_empty(),
+            "recently returned sockets must not receive validation probes: {probes:?}"
         );
         let unique = probes
             .iter()
