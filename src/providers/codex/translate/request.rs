@@ -28,6 +28,17 @@ pub fn translate_request(
     translate_request_inner(req, opts, true)
 }
 
+pub fn translate_request_with_base(
+    req: &MessagesRequest,
+    opts: TranslateOptions,
+    base: Option<&str>,
+) -> Result<ResponsesRequest, anyhow::Error> {
+    let lite = opts.use_responses_lite;
+    let mut out = translate_request(req, opts)?;
+    super::request_base::insert_base(req, &mut out, lite, base);
+    Ok(out)
+}
+
 fn translate_request_inner(
     req: &MessagesRequest,
     opts: TranslateOptions,
@@ -866,6 +877,81 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn base_instructions_follow_tools_and_precede_system() {
+        let mut req = tool_search_request(false, false);
+        req.extra.insert("system".into(), json!("CLIENT SYSTEM"));
+        let options = || TranslateOptions {
+            use_responses_lite: true,
+            ..opts()
+        };
+        let without = translate_request(&req, options()).unwrap();
+        let with = translate_request_with_base(&req, options(), Some("SYNTHETIC BASE")).unwrap();
+        let before = serde_json::to_value(without).unwrap();
+        let after = serde_json::to_value(with).unwrap();
+        let old = before["input"].as_array().unwrap();
+        let input = after["input"].as_array().unwrap();
+        assert_eq!(input.len(), old.len() + 1);
+        assert_eq!(input[0]["type"], "additional_tools");
+        assert!(input[1]["content"][0]["text"] == "SYNTHETIC BASE");
+        assert_eq!(input[2..], old[1..]);
+    }
+
+    #[test]
+    fn base_instructions_skip_ineligible_requests() {
+        let base = tool_search_request(false, false);
+        let mut cases = Vec::new();
+        let mut no_tools = base.clone();
+        no_tools.extra.remove("tools");
+        cases.push((no_tools, true));
+        let mut placeholder = base.clone();
+        placeholder.extra.insert("tools".into(), json!([{"name":"DeferredToolPlaceholder","defer_loading":true,"input_schema":{"type":"object"}}]));
+        cases.push((placeholder, true));
+        let mut none = base.clone();
+        none.extra
+            .insert("tool_choice".into(), json!({"type":"none"}));
+        cases.push((none, true));
+        let mut compact = base.clone();
+        compact.extra.insert(
+            "system".into(),
+            json!("You are a helpful AI assistant tasked with summarizing conversations"),
+        );
+        cases.push((compact, true));
+        cases.push((base, false));
+        for (req, lite) in cases {
+            let options = || TranslateOptions {
+                use_responses_lite: lite,
+                ..opts()
+            };
+            let before = serde_json::to_value(translate_request(&req, options()).unwrap()).unwrap();
+            let after = serde_json::to_value(
+                translate_request_with_base(&req, options(), Some("SYNTHETIC BASE")).unwrap(),
+            )
+            .unwrap();
+            assert!(before == after);
+        }
+    }
+
+    #[test]
+    fn base_instructions_apply_when_only_loaded_tools_are_callable() {
+        let mut req = tool_search_request(true, false);
+        req.extra["tools"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|tool| tool["name"] == "mcp__mail__search");
+        let translated = translate_request_with_base(
+            &req,
+            TranslateOptions {
+                use_responses_lite: true,
+                ..opts()
+            },
+            Some("SYNTHETIC BASE"),
+        )
+        .unwrap();
+        let wire = serde_json::to_value(translated).unwrap();
+        assert!(wire["input"][0]["content"][0]["text"] == "SYNTHETIC BASE");
     }
 
     fn additional_tool_names(item: &Value) -> Vec<String> {

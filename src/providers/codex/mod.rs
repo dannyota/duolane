@@ -64,7 +64,9 @@ use self::live_response::*;
 use self::request_state::*;
 use self::translate::accumulate::accumulate_response_with_traffic;
 use self::translate::model_allowlist::{ResolvedModel, resolve_model_request_with_config_override};
-use self::translate::request::{TranslateOptions, is_compact_messages_request, translate_request};
+use self::translate::request::{
+    TranslateOptions, is_compact_messages_request, translate_request_with_base,
+};
 use self::translate::stream::translate_stream_bytes_with_traffic;
 use crate::anthropic::error::json_error;
 use crate::anthropic::schema::MessagesRequest;
@@ -218,7 +220,10 @@ impl CodexProvider {
             monitor.model_resolved(&ctx.req_id, &resolved.model);
         }
 
-        let mut translated = match translate_request(
+        let base = config::codex_base_instructions()
+            .then(|| translate::model_catalog::base_instructions(&resolved.model))
+            .flatten();
+        let mut translated = match translate_request_with_base(
             body,
             TranslateOptions {
                 session_id: ctx.session_id.clone(),
@@ -227,6 +232,7 @@ impl CodexProvider {
                 use_responses_lite,
                 reasoning_account: self.client.auth_manager().reasoning_account().await,
             },
+            base.as_deref(),
         ) {
             Ok(t) => t,
             Err(e) => {

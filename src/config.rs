@@ -1,3 +1,5 @@
+mod codex_base_instructions;
+pub use codex_base_instructions::codex_base_instructions;
 pub mod codex_auth;
 pub use codex_auth::openai_base_url;
 mod codex_transport;
@@ -74,6 +76,8 @@ struct CodexConfig {
     pub previous_response_id: Option<bool>,
     #[serde(rename = "serverCompaction")]
     pub server_compaction: Option<bool>,
+    #[serde(rename = "baseInstructions")]
+    pub base_instructions: Option<bool>,
     #[serde(rename = "responsesApi")]
     pub responses_api: Option<bool>,
     #[serde(rename = "fullLane")]
@@ -342,6 +346,9 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
             }
             if let Some(enabled) = codex.server_compaction {
                 out.push(format!("codex.serverCompaction: {enabled}"));
+            }
+            if let Some(enabled) = codex.base_instructions {
+                out.push(format!("codex.baseInstructions: {enabled}"));
             }
             if codex.responses_api == Some(true) {
                 out.push("codex.responsesApi: true".to_string());
@@ -704,6 +711,7 @@ mod tests {
             EnvGuard::unset("DUOLANE_LOG_STDERR"),
             EnvGuard::unset("DUOLANE_CODEX_REASONING_SUMMARY"),
             EnvGuard::unset("DUOLANE_CODEX_SERVER_COMPACTION"),
+            EnvGuard::unset("DUOLANE_CODEX_BASE_INSTRUCTIONS"),
             EnvGuard::unset("DUOLANE_CODEX_RESPONSES_API"),
             EnvGuard::unset("DUOLANE_CODEX_FULL_LANE"),
             EnvGuard::unset("DUOLANE_CODEX_IMAGES_API"),
@@ -1270,5 +1278,27 @@ mod tests {
         assert!(codex_server_compaction());
         let _disabled_env = EnvGuard::set("DUOLANE_CODEX_SERVER_COMPACTION", "false");
         assert!(!codex_server_compaction());
+    }
+
+    #[test]
+    fn base_instructions_default_and_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        assert!(codex_base_instructions());
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"baseInstructions":false}}"#,
+        )
+        .unwrap();
+        assert!(!codex_base_instructions());
+        {
+            let _value = EnvGuard::set("DUOLANE_CODEX_BASE_INSTRUCTIONS", "invalid");
+            assert!(!codex_base_instructions());
+        }
+        {
+            let _value = EnvGuard::set("DUOLANE_CODEX_BASE_INSTRUCTIONS", " On ");
+            assert!(codex_base_instructions());
+        }
     }
 }

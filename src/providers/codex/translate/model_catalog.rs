@@ -23,6 +23,20 @@ pub struct CatalogModel {
     pub display_name: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CatalogEntry {
+    model: CatalogModel,
+    base_instructions: Option<String>,
+}
+
+impl std::ops::Deref for CatalogEntry {
+    type Target = CatalogModel;
+
+    fn deref(&self) -> &Self::Target {
+        &self.model
+    }
+}
+
 #[derive(Deserialize)]
 struct CacheFile {
     models: Vec<serde_json::Value>,
@@ -39,6 +53,8 @@ struct CacheModel {
     priority: Option<serde_json::Value>,
     #[serde(default)]
     display_name: Option<serde_json::Value>,
+    #[serde(default)]
+    model_messages: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -54,7 +70,7 @@ struct CacheState {
     path: Option<PathBuf>,
     checked_at: Option<Instant>,
     key: Option<(SystemTime, u64)>,
-    models: Vec<CatalogModel>,
+    models: Vec<CatalogEntry>,
 }
 
 static CACHE: OnceLock<Mutex<CacheState>> = OnceLock::new();
@@ -82,7 +98,7 @@ pub fn valid_slug(slug: &str) -> bool {
         && !crate::registry::is_anthropic_alias(slug)
 }
 
-fn parse_catalog(bytes: &[u8]) -> Option<Vec<CatalogModel>> {
+fn parse_catalog(bytes: &[u8]) -> Option<Vec<CatalogEntry>> {
     if bytes.len() as u64 > MAX_CACHE_BYTES {
         return None;
     }
@@ -96,15 +112,24 @@ fn parse_catalog(bytes: &[u8]) -> Option<Vec<CatalogModel>> {
             .into_iter()
             .filter_map(|value| serde_json::from_value::<CacheModel>(value).ok())
             .filter(|model| valid_slug(&model.slug) && seen.insert(model.slug.clone()))
-            .map(|model| CatalogModel {
-                listed: matches!(model.visibility, Visibility::List),
-                slug: model.slug,
-                use_responses_lite: model.use_responses_lite,
-                supported_in_api: model.supported_in_api,
-                priority: model.priority.as_ref().and_then(serde_json::Value::as_i64),
-                display_name: match model.display_name {
-                    Some(serde_json::Value::String(name)) => Some(name),
-                    _ => None,
+            .map(|model| CatalogEntry {
+                base_instructions: model
+                    .model_messages
+                    .as_ref()
+                    .and_then(|value| value.get("instructions_template"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|text| !text.is_empty() && text.len() <= 262144)
+                    .map(str::to_owned),
+                model: CatalogModel {
+                    listed: matches!(model.visibility, Visibility::List),
+                    slug: model.slug,
+                    use_responses_lite: model.use_responses_lite,
+                    supported_in_api: model.supported_in_api,
+                    priority: model.priority.as_ref().and_then(serde_json::Value::as_i64),
+                    display_name: match model.display_name {
+                        Some(serde_json::Value::String(name)) => Some(name),
+                        _ => None,
+                    },
                 },
             })
             .collect(),
@@ -112,7 +137,7 @@ fn parse_catalog(bytes: &[u8]) -> Option<Vec<CatalogModel>> {
 }
 
 impl CacheState {
-    fn load(&mut self, path: Option<&Path>, now: Instant) -> Vec<CatalogModel> {
+    fn load(&mut self, path: Option<&Path>, now: Instant) -> Vec<CatalogEntry> {
         if self.path.as_deref() != path {
             *self = Self {
                 path: path.map(Path::to_path_buf),
@@ -150,12 +175,26 @@ impl CacheState {
     }
 }
 
-pub fn catalog_models() -> Vec<CatalogModel> {
+fn catalog_entries() -> Vec<CatalogEntry> {
     CACHE
         .get_or_init(|| Mutex::new(CacheState::default()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .load(catalog_path().as_deref(), Instant::now())
+}
+
+pub fn catalog_models() -> Vec<CatalogModel> {
+    catalog_entries()
+        .into_iter()
+        .map(|entry| entry.model)
+        .collect()
+}
+
+pub fn base_instructions(slug: &str) -> Option<String> {
+    catalog_entries()
+        .into_iter()
+        .find(|entry| entry.slug == slug)
+        .and_then(|entry| entry.base_instructions)
 }
 
 pub fn catalog_model(slug: &str) -> Option<CatalogModel> {
@@ -168,6 +207,29 @@ pub fn catalog_model(slug: &str) -> Option<CatalogModel> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn keeps_only_nonempty_bounded_string_templates() {
+        let values = [
+            json!("a".repeat(262144)),
+            json!("a".repeat(262145)),
+            json!(7),
+            json!(""),
+        ];
+        let models: Vec<_> = values.into_iter().enumerate().map(|(i, value)| json!({"slug":format!("gpt-test-{i}"),"supported_in_api":true,"visibility":"list","model_messages":{"instructions_template":value}})).collect();
+        let parsed =
+            parse_catalog(&serde_json::to_vec(&json!({"models":models})).unwrap()).unwrap();
+        assert_eq!(parsed.len(), 4);
+        assert_eq!(
+            parsed[0].base_instructions.as_ref().map(String::len),
+            Some(262144)
+        );
+        assert!(
+            parsed[1..]
+                .iter()
+                .all(|model| model.base_instructions.is_none())
+        );
+    }
 
     fn fixture(slug: &str) -> Vec<u8> {
         serde_json::to_vec(
