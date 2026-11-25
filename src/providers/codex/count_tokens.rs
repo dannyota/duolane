@@ -13,7 +13,8 @@ use super::request_state::apply_model_lane_for_request;
 use super::translate::model_allowlist::resolve_model_request_with_config_override;
 use super::translate::request::{
     ResponsesContentPart, ResponsesFunctionCallOutput, ResponsesFunctionCallOutputContentPart,
-    ResponsesInputItem, ResponsesRequest, ResponsesTool, TranslateOptions, translate_request,
+    ResponsesInputItem, ResponsesRequest, ResponsesTool, TranslateOptions,
+    translate_request_with_base,
 };
 
 impl CodexProvider {
@@ -41,7 +42,13 @@ impl CodexProvider {
             monitor.model_resolved(&ctx.req_id, &resolved.model);
         }
 
-        let translated = match translate_request(
+        let first = self.first_source;
+        let base = if count_base(config::codex_base_instructions(), first, Some(())).is_some() {
+            super::translate::model_catalog::base_instructions(&resolved.model)
+        } else {
+            None
+        };
+        let translated = match translate_request_with_base(
             &body,
             TranslateOptions {
                 session_id: None,
@@ -50,6 +57,7 @@ impl CodexProvider {
                 use_responses_lite,
                 reasoning_account: self.client.auth_manager().reasoning_account().await,
             },
+            base.as_deref(),
         ) {
             Ok(t) => t,
             Err(e) => {
@@ -72,6 +80,18 @@ impl CodexProvider {
             }),
         )
             .into_response()
+    }
+}
+
+fn count_base<T>(
+    enabled: bool,
+    first: Option<config::codex_auth::AuthSource>,
+    base: Option<T>,
+) -> Option<T> {
+    if enabled && first == Some(config::codex_auth::AuthSource::ChatGpt) {
+        base
+    } else {
+        None
     }
 }
 
@@ -209,6 +229,27 @@ pub(crate) fn truncate_to_token_budget(text: &str, max_tokens: u64) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn base_template_counts_once_only_for_chatgpt_first() {
+        use crate::config::codex_auth::AuthSource;
+        let req: MessagesRequest = serde_json::from_value(json!({"model":"gpt-6-sol","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"Read","input_schema":{"type":"object"}}]})).unwrap();
+        let count = |source| {
+            let base = count_base(true, Some(source), Some("SYNTHETIC BASE"));
+            let options = TranslateOptions {
+                session_id: None,
+                service_tier: None,
+                model: "gpt-6-sol".into(),
+                use_responses_lite: true,
+                reasoning_account: Default::default(),
+            };
+            count_translated_tokens(&translate_request_with_base(&req, options, base).unwrap())
+        };
+        let template = "SYNTHETIC BASE";
+        let count_matches = count(AuthSource::ChatGpt)
+            == count(AuthSource::ApiKey) + approx_token_count(template) + 4;
+        assert!(count_matches, "base template is counted once");
+    }
 
     #[test]
     fn count_simple_request() {
