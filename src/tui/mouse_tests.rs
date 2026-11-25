@@ -469,7 +469,7 @@ fn compact_subscription_uses_validated_window_labels() {
     app.usage_open = true;
     let text = buffer_text(&draw(100, 10, |frame| render(frame, &mut app, &state)));
     assert!(text.contains("5h"), "{text}");
-    assert!(text.contains("Secondary (120m)"), "{text}");
+    assert!(text.contains("120m 12.0% -"), "{text}");
 }
 
 #[test]

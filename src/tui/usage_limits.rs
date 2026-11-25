@@ -139,6 +139,23 @@ fn relative_span(seconds: u64) -> String {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum QuotaLayout {
+    Full,
+    TwoLines,
+    OneLine,
+}
+
+pub(super) fn quota_layout(full_height: u16, available_height: u16) -> QuotaLayout {
+    if full_height <= available_height {
+        QuotaLayout::Full
+    } else if available_height >= 2 {
+        QuotaLayout::TwoLines
+    } else {
+        QuotaLayout::OneLine
+    }
+}
+
 pub(super) struct CompactWindow {
     pub label: String,
     pub line: Line<'static>,
@@ -148,7 +165,7 @@ pub(super) struct CompactWindow {
 pub(super) fn compact_line(
     name: &str,
     style: Style,
-    windows: [CompactWindow; 2],
+    windows: impl IntoIterator<Item = CompactWindow>,
     width: usize,
     now: u64,
 ) -> Line<'static> {
@@ -164,7 +181,13 @@ pub(super) fn compact_line(
         let reset = window
             .reset
             .filter(|v| (1..=253_402_300_799).contains(v))
-            .map(|v| relative_span(v.saturating_sub(now)))
+            .map(|v| {
+                if v <= now {
+                    "passed".into()
+                } else {
+                    relative_span(v - now)
+                }
+            })
             .unwrap_or_else(|| "-".into());
         parts.push(format!(" {} {} {}", window.label, value, reset));
         bars.push(if spans.len() >= 4 {
@@ -214,33 +237,31 @@ pub(super) fn wrapped_height(lines: &[Line<'_>], width: u16) -> u16 {
         .map_or(0, |y| y + 1)
 }
 
-pub(super) fn compact_with_reset(line: Line<'static>, width: u16) -> Vec<Span<'static>> {
-    let label = line.spans[0].content.trim().to_owned();
-    let mut spans = compact(&label, line.clone());
-    if let Some(reset) = line.spans.last() {
-        let text = reset.content.split(" (").next().unwrap_or(&reset.content);
-        spans.push(Span::raw(text.to_owned()));
-    }
-    if Line::from(spans.clone()).width() > usize::from(width) && spans.len() >= 5 {
-        spans.drain(1..3);
-    }
-    if Line::from(spans.clone()).width() > usize::from(width)
-        && let Some(reset) = spans.last_mut()
-    {
-        reset.content = reset.content.replace("reset ", "").into();
-    }
-    if Line::from(spans.clone()).width() > usize::from(width) {
-        return vec![Span::raw(cells::ellipsize(
-            &Line::from(spans).to_string(),
-            usize::from(width),
-        ))];
-    }
-    spans
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compact_reset_distinguishes_past_and_future() {
+        let window = |reset| CompactWindow {
+            label: "5h".into(),
+            line: codex(
+                "Primary",
+                Some(&crate::monitor::CodexQuotaWindow {
+                    used_percent: Some(42.0),
+                    window_minutes: Some(300),
+                    reset_at: Some(reset),
+                }),
+                UNIX_EPOCH + Duration::from_secs(100),
+            ),
+            reset: Some(reset),
+        };
+        let line =
+            compact_line("", Style::default(), [window(99), window(101)], 80, 100).to_string();
+        assert!(
+            line.contains("42.0% passed") && line.contains("42.0% <1m"),
+            "{line}"
+        );
+    }
     #[test]
     fn bar_thresholds_and_invalid_values() {
         for (value, expected) in [(49.0, TEAL), (50.0, YELLOW), (79.0, YELLOW), (80.0, RED)] {

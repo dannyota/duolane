@@ -306,6 +306,7 @@ impl Accounts {
         now: std::time::SystemTime,
         zone: jiff::tz::TimeZone,
     ) {
+        use super::usage_limits::{QuotaLayout, quota_layout};
         use ratatui::{
             layout::{Constraint, Direction, Layout},
             style::{Modifier, Style},
@@ -480,27 +481,18 @@ impl Accounts {
                 now,
                 zone.clone(),
             );
-            if super::usage_limits::wrapped_height(
-                &[detail[0].clone(), primary.clone(), secondary.clone()],
-                inner.width,
-            ) <= inner.height
-            {
+            let layout = quota_layout(
+                super::usage_limits::wrapped_height(
+                    &[detail[0].clone(), primary.clone(), secondary.clone()],
+                    inner.width,
+                ),
+                inner.height,
+            );
+            if layout == QuotaLayout::Full {
                 detail.push(primary);
                 detail.push(secondary);
-            } else if inner.height >= 2 {
-                if inner.height == 2 {
-                    detail.clear();
-                }
-                detail.push(Line::from(super::usage_limits::compact_with_reset(
-                    primary,
-                    inner.width,
-                )));
-                detail.push(Line::from(super::usage_limits::compact_with_reset(
-                    secondary,
-                    inner.width,
-                )));
             } else {
-                if inner.height < 2 {
+                if inner.height <= 2 {
                     detail.clear();
                 }
                 let window = |primary: bool| {
@@ -512,32 +504,43 @@ impl Accounts {
                         }
                     })
                 };
-                let label = |fallback: &str, w: Option<&crate::monitor::CodexQuotaWindow>| match w
-                    .and_then(|w| w.window_minutes)
-                {
-                    Some(300) => "5h".into(),
-                    Some(10080) => "week".into(),
-                    Some(n) if (1..=525_600_000).contains(&n) => format!("{n}m"),
-                    _ => fallback.into(),
-                };
-                detail.push(super::usage_limits::compact_line(
-                    "ChatGPT",
-                    Style::default(),
-                    [
+                let compact =
+                    |fallback: &str, w: Option<&crate::monitor::CodexQuotaWindow>, line| {
+                        let label = match w.and_then(|w| w.window_minutes) {
+                            Some(300) => "5h".into(),
+                            Some(10080) => "week".into(),
+                            Some(n) if (1..=525_600_000).contains(&n) => format!("{n}m"),
+                            _ => fallback.into(),
+                        };
                         super::usage_limits::CompactWindow {
-                            label: label("Primary", window(true)),
-                            line: primary,
-                            reset: window(true).and_then(|w| w.reset_at),
-                        },
-                        super::usage_limits::CompactWindow {
-                            label: label("Secondary", window(false)),
-                            line: secondary,
-                            reset: window(false).and_then(|w| w.reset_at),
-                        },
-                    ],
-                    usize::from(inner.width),
-                    seconds,
-                ));
+                            label,
+                            line,
+                            reset: w.and_then(|w| w.reset_at),
+                        }
+                    };
+                let windows = [
+                    compact("Primary", window(true), primary),
+                    compact("Secondary", window(false), secondary),
+                ];
+                if layout == QuotaLayout::TwoLines {
+                    for window in windows {
+                        detail.push(super::usage_limits::compact_line(
+                            "",
+                            Style::default(),
+                            [window],
+                            usize::from(inner.width),
+                            seconds,
+                        ));
+                    }
+                } else {
+                    detail.push(super::usage_limits::compact_line(
+                        "",
+                        Style::default(),
+                        windows,
+                        usize::from(inner.width),
+                        seconds,
+                    ));
+                }
             }
             if self.local {
                 detail.push(Line::from(saved));
@@ -562,6 +565,7 @@ impl Accounts {
 
 #[cfg(test)]
 mod tests {
+    use super::super::usage_limits::{QuotaLayout, quota_layout};
     use super::*;
     use crate::monitor::{CodexQuotaSnapshot, CodexQuotaWindow};
     use std::time::{Duration, SystemTime};
@@ -607,22 +611,12 @@ mod tests {
         let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(40, 7, |f| {
             accounts.render_at(f, f.area(), &state, now, jiff::tz::TimeZone::UTC)
         }));
-        let first = super::super::cells::format_system_time_in_zone(
-            SystemTime::UNIX_EPOCH + Duration::from_secs(reset),
-            jiff::tz::TimeZone::UTC,
-        );
-        let second = super::super::cells::format_system_time_in_zone(
-            SystemTime::UNIX_EPOCH + Duration::from_secs(reset + 3600),
-            jiff::tz::TimeZone::UTC,
-        );
         assert!(
-            text.lines()
-                .any(|line| line.contains("5h") && line.contains(&first)),
+            text.lines().any(|line| line.contains("5h 42.0% 1h0m")),
             "{text}"
         );
         assert!(
-            text.lines()
-                .any(|line| line.contains("120m") && line.contains(&second)),
+            text.lines().any(|line| line.contains("120m 12.0% 2h0m")),
             "{text}"
         );
     }
@@ -694,6 +688,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compact_two_line_windows_use_relative_resets() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut state: crate::monitor::snapshot::MonitorSnapshot =
+            crate::monitor::mock_state().into();
+        state.codex_quota = Some(CodexQuotaSnapshot {
+            observed_at: now - Duration::from_secs(901),
+            primary: Some(CodexQuotaWindow {
+                used_percent: Some(42.0),
+                window_minutes: Some(120),
+                reset_at: Some(1_700_003_600),
+            }),
+            secondary: Some(CodexQuotaWindow {
+                used_percent: Some(12.0),
+                window_minutes: Some(240),
+                reset_at: Some(1_700_007_200),
+            }),
+        });
+        let mut app = crate::tui::mouse_tests::app_for_accounts_test(Accounts::new(false));
+        let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(100, 10, |f| {
+            crate::tui::render_at(f, &mut app, &state, now, jiff::tz::TimeZone::UTC);
+        }));
+        assert!(
+            text.contains("120m 42.0% 1h0m") && text.contains("240m 12.0% 2h0m"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn compact_single_line_budgets_both_long_windows() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut state: crate::monitor::snapshot::MonitorSnapshot =
+            crate::monitor::mock_state().into();
+        state.codex_quota = Some(CodexQuotaSnapshot {
+            observed_at: now - Duration::from_secs(901),
+            primary: Some(CodexQuotaWindow {
+                used_percent: Some(100.0),
+                window_minutes: Some(1440),
+                reset_at: Some(1_700_129_600),
+            }),
+            secondary: Some(CodexQuotaWindow {
+                used_percent: Some(100.0),
+                window_minutes: Some(2880),
+                reset_at: Some(1_700_216_000),
+            }),
+        });
+        let mut app = crate::tui::mouse_tests::app_for_accounts_test(Accounts::new(false));
+        let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(90, 8, |f| {
+            crate::tui::render_at(f, &mut app, &state, now, jiff::tz::TimeZone::UTC);
+        }));
+        assert!(
+            text.contains("1440m 100.0% 1d12h") && text.contains("2880m 100.0% 2d12h"),
+            "{text}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn usage_size_sweep_preserves_names_windows_resets_and_staleness() {
@@ -738,57 +788,168 @@ mod tests {
             }),
         });
         let mut app = crate::tui::mouse_tests::app_for_accounts_test(accounts);
-        for width in (60..=140).step_by(5) {
-            for height in 8..=30 {
-                let text =
-                    crate::tui::tests::buffer_text(&crate::tui::tests::draw(width, height, |f| {
-                        crate::tui::render_at(f, &mut app, &state, now, jiff::tz::TimeZone::UTC);
-                    }));
-                if app.accounts.rows.height >= 3 {
-                    for name in ["abcdefghijkl", "mnopqrstuvwx", "yzabcdefghij"] {
-                        assert!(text.contains(name), "{width}x{height}: {text}");
-                    }
-                    for line in text
-                        .lines()
-                        .filter(|line| line.contains("20%") || line.contains("40%"))
-                    {
-                        if line.contains("20%") {
-                            assert!(line.contains("5h"), "{width}x{height}: {text}");
+        for (lengths, resets, percents) in [
+            ([120, 240], [3600, 7200], [42.0, 12.0]),
+            ([1440, 2880], [129600, 216000], [100.0, 100.0]),
+        ] {
+            let quota = state.codex_quota.as_mut().unwrap();
+            for (i, window) in [
+                quota.primary.as_mut().unwrap(),
+                quota.secondary.as_mut().unwrap(),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                window.window_minutes = Some(lengths[i]);
+                window.reset_at = Some(seconds + resets[i]);
+                window.used_percent = Some(percents[i]);
+            }
+            for width in (60..=140).step_by(5) {
+                for height in 8..=30 {
+                    let text = crate::tui::tests::buffer_text(&crate::tui::tests::draw(
+                        width,
+                        height,
+                        |f| {
+                            crate::tui::render_at(
+                                f,
+                                &mut app,
+                                &state,
+                                now,
+                                jiff::tz::TimeZone::UTC,
+                            );
+                        },
+                    ));
+                    let lines: Vec<_> = text.lines().collect();
+                    let rows = app.accounts.rows;
+                    if rows.height >= 3 {
+                        for (i, name) in ["abcdefghijkl", "mnopqrstuvwx", "yzabcdefghij"]
+                            .iter()
+                            .enumerate()
+                        {
+                            let index = usize::from(rows.y) + i * app.accounts.row_height;
+                            let line = lines[index];
+                            assert!(line.contains(name), "{width}x{height}: {text}");
+                            if app.accounts.row_height == 1 {
+                                let reset = if i == 1 { ["-", "-"] } else { ["1h0m", "2h0m"] };
+                                assert!(
+                                    line.contains(&format!("5h 20% {}", reset[0]))
+                                        && line.contains(&format!("week 40% {}", reset[1])),
+                                    "{width}x{height}: {text}"
+                                );
+                            } else {
+                                let five = lines[index + 1];
+                                let week = lines[index + 2];
+                                let reset = if i == 1 {
+                                    ["Unknown", "Unknown"]
+                                } else {
+                                    ["1h0m", "2h0m"]
+                                };
+                                assert!(
+                                    five.contains("5h")
+                                        && five.contains("20%")
+                                        && five.contains(reset[0]),
+                                    "{width}x{height}: {text}"
+                                );
+                                assert!(
+                                    week.contains("week")
+                                        && week.contains("40%")
+                                        && week.contains(reset[1]),
+                                    "{width}x{height}: {text}"
+                                );
+                            }
                         }
-                        if line.contains("40%") {
-                            assert!(line.contains("week"), "{width}x{height}: {text}");
-                        }
                     }
-                    let five = text
-                        .lines()
-                        .filter(|line| {
-                            line.contains("20%")
-                                && line.split("week").next().unwrap_or("").contains("1h0m")
-                        })
-                        .count();
-                    let week = text
-                        .lines()
-                        .filter(|line| {
-                            line.contains("40%")
-                                && line.split("week").nth(1).unwrap_or("").contains("2h0m")
-                        })
-                        .count();
-                    assert!(five >= 2 && week >= 2, "{width}x{height}: {text}");
-                }
-                let lines: Vec<_> = text.lines().collect();
-                for (value, label, relative, date) in [
-                    ("42.0%", "120m", "1h0m", "23:13:20"),
-                    ("12.0%", "240m", "2h0m", "00:13:20"),
-                ] {
-                    if let Some(index) = lines.iter().position(|line| line.contains(value)) {
-                        let line = lines[index];
-                        let next = lines.get(index + 1).copied().unwrap_or("");
-                        assert!(line.contains(label), "{width}x{height}: {text}");
-                        assert!(
-                            line.contains(relative) || line.contains(date) || next.contains(date),
-                            "{width}x{height}: {text}"
-                        );
-                        assert!(text.contains("Stale"), "{width}x{height}: {text}");
+                    let pane = app.accounts.subscription;
+                    let inner_width = pane.width.saturating_sub(2);
+                    let inner_height = pane.height.saturating_sub(2);
+                    let quota = state.codex_quota.as_ref().unwrap();
+                    let full = [
+                        ratatui::text::Line::from(quota_summary(Some(quota), now)),
+                        super::super::usage_limits::codex_in_zone(
+                            "Primary",
+                            quota.primary.as_ref(),
+                            now,
+                            jiff::tz::TimeZone::UTC,
+                        ),
+                        super::super::usage_limits::codex_in_zone(
+                            "Secondary",
+                            quota.secondary.as_ref(),
+                            now,
+                            jiff::tz::TimeZone::UTC,
+                        ),
+                    ];
+                    let layout = quota_layout(
+                        super::super::usage_limits::wrapped_height(&full, inner_width),
+                        inner_height,
+                    );
+                    let start = usize::from(pane.y) + 1;
+                    let relative = if lengths[0] == 120 {
+                        ["1h0m", "2h0m"]
+                    } else {
+                        ["1d12h", "2d12h"]
+                    };
+                    assert!(
+                        lines[usize::from(pane.y)].contains("Stale"),
+                        "{width}x{height}: {text}"
+                    );
+                    match layout {
+                        QuotaLayout::OneLine | QuotaLayout::TwoLines => {
+                            let offset =
+                                usize::from(layout == QuotaLayout::TwoLines && inner_height > 2);
+                            for i in 0..2 {
+                                let line = lines[start
+                                    + offset
+                                    + if layout == QuotaLayout::TwoLines {
+                                        i
+                                    } else {
+                                        0
+                                    }];
+                                assert!(
+                                    line.contains(&format!(
+                                        "{}m {:.1}% {}",
+                                        lengths[i], percents[i], relative[i]
+                                    )),
+                                    "{width}x{height}: {text}"
+                                );
+                                assert!(
+                                    !line.contains("2023-")
+                                        && !line.contains("23:13:20")
+                                        && !line.contains("00:13:20"),
+                                    "{width}x{height}: {text}"
+                                );
+                            }
+                        }
+                        QuotaLayout::Full => {
+                            let content = lines[start..start + usize::from(inner_height)].join(" ");
+                            let mut offset = usize::from(
+                                super::super::usage_limits::wrapped_height(&full[..1], inner_width),
+                            );
+                            for i in 0..2 {
+                                let count =
+                                    usize::from(super::super::usage_limits::wrapped_height(
+                                        &full[i + 1..i + 2],
+                                        inner_width,
+                                    ));
+                                let window =
+                                    lines[start + offset..start + offset + count].join(" ");
+                                let reset = full[i + 1].to_string();
+                                let date = reset
+                                    .split("reset ")
+                                    .nth(1)
+                                    .unwrap()
+                                    .split(" (in ")
+                                    .next()
+                                    .unwrap();
+                                assert!(
+                                    window.contains(&format!("{}m", lengths[i]))
+                                        && window.contains(&format!("{:.1}%", percents[i]))
+                                        && window.contains(date),
+                                    "{width}x{height}: {text}"
+                                );
+                                offset += count;
+                            }
+                            assert!(content.contains("Stale"), "{width}x{height}: {text}");
+                        }
                     }
                 }
             }

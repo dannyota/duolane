@@ -177,9 +177,11 @@ session.
 - A compact line gives its parts room in this order: the name, at least 12 cells
   and ellipsized beyond its share; then for each window a short label, the
   percent, and the time left until the reset, such as `5h 42% 1h54m`; then a
-  bar, only when cells remain. A window with no reset time shows `-` there. A
-  non-standard ChatGPT window uses its length as the label, such as `120m`. The
-  stale marker is never dropped while a value shows.
+  bar, only when cells remain. A window with no reset time shows `-` there, and
+  one whose reset has passed shows `passed`. The ChatGPT pane has its name in
+  its title, so its compact lines start at the windows, on one line or one line
+  per window. A non-standard ChatGPT window uses its length as the label, such
+  as `120m`. The stale marker is never dropped while a value shows.
 - The confirmation for a profile change is an overlay, so it fits a terminal of
   80 by 24. `Enter` saves only when the terminal still has the size of the frame
   that showed the confirmation. The Claude pane keeps showing the saved profile
