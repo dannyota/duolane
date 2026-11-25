@@ -204,21 +204,12 @@ fn run_monitor_events(
         app.tick = app.tick.wrapping_add(1);
         let mut targets = MouseTargets::default();
         terminal.draw(|frame| {
-            targets = render(frame, app, state);
-            if let Some(error) = update.connection_error() {
-                let area = frame.area();
-                let banner = Rect::new(
-                    area.x,
-                    area.y + area.height.saturating_sub(1),
-                    area.width,
-                    1,
-                );
-                frame.render_widget(
-                    Paragraph::new(format!("Reconnecting; showing last snapshot: {error}"))
-                        .style(Style::default().fg(YELLOW).bg(BG)),
-                    banner,
-                );
-            }
+            targets = render_with_banner(
+                frame,
+                app,
+                state,
+                update.connection_error().map(|e| e.to_string()).as_deref(),
+            );
         })?;
         if app.shutdown_is_complete() {
             return Ok(MonitorExit::ShutdownComplete);
@@ -231,7 +222,9 @@ fn run_monitor_events(
                     }
                 }
                 Event::Mouse(mouse) => {
-                    if let Some(exit) = app.handle_mouse(mouse, state, &targets) {
+                    if let Some(exit) =
+                        app.handle_mouse_sized(mouse, state, &targets, crossterm::terminal::size()?)
+                    {
                         return Ok(exit);
                     }
                 }
@@ -309,6 +302,19 @@ struct MonitorApp {
 }
 
 impl MonitorApp {
+    fn handle_mouse_sized(
+        &mut self,
+        mouse: MouseEvent,
+        state: &MonitorSnapshot,
+        targets: &MouseTargets,
+        size: (u16, u16),
+    ) -> Option<MonitorExit> {
+        if targets.size != size {
+            return None;
+        }
+        self.handle_mouse(mouse, state, targets)
+    }
+
     fn handle_mouse(
         &mut self,
         mouse: MouseEvent,
@@ -317,6 +323,7 @@ impl MonitorApp {
     ) -> Option<MonitorExit> {
         if mouse.kind != MouseEventKind::Down(MouseButton::Left)
             || self.show_help
+            || self.accounts.confirming()
             || self.show_setup
             || self.phase != MonitorPhase::Running
         {
@@ -485,6 +492,31 @@ fn setup_terminal() -> Result<(TerminalGuard, Terminal<CrosstermBackend<Stdout>>
     Ok((guard, terminal))
 }
 
+fn render_with_banner(
+    frame: &mut ratatui::Frame<'_>,
+    app: &mut MonitorApp,
+    state: &MonitorSnapshot,
+    error: Option<&str>,
+) -> MouseTargets {
+    let mut targets = render(frame, app, state);
+    if let Some(error) = error {
+        let area = frame.area();
+        let banner = Rect::new(
+            area.x,
+            area.y + area.height.saturating_sub(1),
+            area.width,
+            1,
+        );
+        targets.keys.retain(|(rect, _)| rect.y != banner.y);
+        frame.render_widget(
+            Paragraph::new(format!("Reconnecting; showing last snapshot: {error}"))
+                .style(Style::default().fg(YELLOW).bg(BG)),
+            banner,
+        );
+    }
+    targets
+}
+
 fn render(
     frame: &mut ratatui::Frame<'_>,
     app: &mut MonitorApp,
@@ -506,7 +538,10 @@ fn render(
         ])
         .split(area);
 
-    let mut targets = MouseTargets::default();
+    let mut targets = MouseTargets {
+        size: (area.width, area.height),
+        ..Default::default()
+    };
     chrome::render_chrome_header(frame, root[0], app, terminal_state, &mut targets);
     if app.usage_open {
         let body = Rect::new(
@@ -515,15 +550,11 @@ fn render(
             area.width,
             root[5].y.saturating_sub(root[1].y),
         );
-        let panes = Layout::vertical([
-            Constraint::Percentage(45),
-            Constraint::Percentage(27),
-            Constraint::Percentage(28),
-        ])
-        .split(body);
+        let panes = usage_stats::layout(body, state);
         app.accounts.render(frame, panes[0], terminal_state);
-        usage_stats::render(frame, panes[1], panes[2], terminal_state);
+        usage_stats::render(frame, panes[1], panes[2], terminal_state, &state.recent);
         chrome::render_chrome_footer(frame, root[5], app, &mut targets);
+        app.accounts.render_confirmation(frame, area);
         if app.show_setup {
             render_setup_overlay(frame, area, &app.setup_text);
         }

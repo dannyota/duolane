@@ -49,11 +49,13 @@ project values are ellipsized.
 ## Views
 
 The header shows two tabs, `1 Overview` and `2 Usage`, with the open one
-highlighted. The key or a left click on a tab opens that view. A footer hint
-that names one key is a click target that acts as that key; the navigation hint
-is not a target. A click on a tab or a hint is ignored while the help, setup, or
-shutdown overlay is visible. Tab and hint targets come from the last rendered
-frame, and only a table row opens a detail.
+highlighted. The key or a left click on a tab opens that view. The footer hints
+for `q`, `?`, `b`, `Tab`, `1`, `2`, and `r` are click targets that act as their
+keys. The `Enter` and navigation hints are not targets, because they act on a
+selection. A click on a tab or a hint is ignored while the help, setup, or
+shutdown overlay is visible, while a banner covers the footer, and when the
+terminal size differs from the frame the targets came from. Only a table row
+opens a detail.
 
 Dim text uses a color with a contrast of at least 4.5 to 1 on the background.
 
@@ -166,6 +168,12 @@ session.
   two medians at one cell per half second.
 - Tokens by session lists each session's input and output tokens and its share
   of all output tokens, as a number and a bar.
+- The bars take the width the other columns leave. The two tables share the
+  height below the limits by their row counts, and a table that does not fit
+  shows the rows that fit and the number left out.
+- The confirmation for a profile change is an overlay, so it fits a terminal of
+  80 by 24. The Claude pane keeps showing the saved profile and the
+  `CLAUDE_CONFIG_DIR` message.
 
 Arrow keys or a row click move the focus without changing the selected profile.
 `Enter` opens a confirmation for a different Claude profile; `Enter` confirms it

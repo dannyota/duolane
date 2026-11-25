@@ -76,28 +76,82 @@ fn number(value: Option<f64>, suffix: &str) -> String {
         .unwrap_or_else(|| "-".into())
 }
 
+pub(super) fn layout(area: Rect, state: &MonitorSnapshot) -> [Rect; 3] {
+    let accounts = area.height.saturating_mul(45) / 100;
+    let remaining = area.height.saturating_sub(accounts);
+    let speed_rows = groups(&state.recent).len();
+    let token_rows = state.sessions.len();
+    let total = speed_rows + token_rows;
+    let mut speed = (usize::from(remaining) * speed_rows)
+        .checked_div(total)
+        .map_or(remaining / 2, |height| height as u16);
+    if remaining >= 8 {
+        speed = speed.clamp(4, remaining - 4);
+    }
+    [
+        Rect::new(area.x, area.y, area.width, accounts),
+        Rect::new(area.x, area.y + accounts, area.width, speed),
+        Rect::new(
+            area.x,
+            area.y + accounts + speed,
+            area.width,
+            remaining - speed,
+        ),
+    ]
+}
+
+fn fit_rows<'a>(mut rows: Vec<Row<'a>>, height: u16) -> (Vec<Row<'a>>, Option<String>) {
+    let capacity = usize::from(height.saturating_sub(3));
+    if rows.len() > capacity && capacity > 0 {
+        let omitted = rows.len() - (capacity - 1);
+        rows.truncate(capacity - 1);
+        return (rows, Some(format!("… {omitted} more")));
+    }
+    (rows, None)
+}
+
 pub(super) fn render(
     frame: &mut ratatui::Frame<'_>,
     speed: Rect,
     tokens: Rect,
     state: &MonitorSnapshot,
+    recent: &[CompletedSnapshot],
 ) {
-    let rows = groups(&state.recent)
+    let rows = groups(recent)
         .into_iter()
         .map(|((lane, model, effort), mut group)| {
             let wait = median(&mut group.waits);
             let generation = median(&mut group.generations);
             let output = median(&mut group.outputs);
             let rate = (group.rate_seconds > 0.0).then_some(group.rate_tokens / group.rate_seconds);
-            let width = usize::from(speed.width.saturating_sub(95));
+            let width =
+                usize::from(
+                    speed
+                        .width
+                        .saturating_sub(if speed.width >= 100 { 71 } else { 61 }),
+                );
             let waits = wait.map_or(0, |n| (n * 2.0).round().min(width as f64) as usize);
             let generation_cells = generation.map_or(0, |n| {
                 (n * 2.0).round().min(width.saturating_sub(waits) as f64) as usize
             });
             Row::new(vec![
-                Cell::from(lane),
-                Cell::from(model),
-                Cell::from(effort),
+                Cell::from(if lane == "anthropic" {
+                    "claude".into()
+                } else {
+                    lane.chars().filter(|c| !c.is_control()).collect::<String>()
+                }),
+                Cell::from(
+                    model
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .collect::<String>(),
+                ),
+                Cell::from(
+                    effort
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .collect::<String>(),
+                ),
                 Cell::from(group.count.to_string()),
                 Cell::from(number(wait, "s")),
                 Cell::from(number(generation, "s")),
@@ -108,18 +162,20 @@ pub(super) fn render(
                     Span::styled("█".repeat(generation_cells), Style::default().fg(GREEN)),
                 ])),
             ])
-        });
+        })
+        .collect();
+    let (rows, omitted) = fit_rows(rows, speed.height);
     let table = Table::new(
         rows,
         [
-            Constraint::Length(8),
-            Constraint::Length(24),
             Constraint::Length(6),
-            Constraint::Length(8),
+            Constraint::Length(if speed.width >= 100 { 24 } else { 14 }),
+            Constraint::Length(5),
+            Constraint::Length(4),
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Length(5),
             Constraint::Length(7),
-            Constraint::Length(10),
-            Constraint::Length(7),
-            Constraint::Length(11),
             Constraint::Fill(1),
         ],
     )
@@ -139,41 +195,56 @@ pub(super) fn render(
     )
     .block(cells::panel("Speed by model", false));
     frame.render_widget(table, speed);
+    if let Some(text) = omitted {
+        frame.render_widget(
+            Paragraph::new(text),
+            Rect::new(
+                speed.x + 1,
+                speed.bottom() - 2,
+                speed.width.saturating_sub(2),
+                1,
+            ),
+        );
+    }
     let mut sessions: Vec<_> = state.sessions.iter().collect();
     sessions.sort_by_key(|row| std::cmp::Reverse(row.output_tokens));
     let total: u128 = sessions
         .iter()
         .map(|row| u128::from(row.output_tokens))
         .sum();
-    let rows = sessions.into_iter().map(|row| {
-        let share = if total == 0 {
-            0.0
-        } else {
-            row.output_tokens as f64 * 100.0 / total as f64
-        };
-        let width = usize::from(tokens.width.saturating_sub(89));
-        let bars = ((share / 100.0) * width as f64).round() as usize;
-        Row::new(vec![
-            row.project.clone().unwrap_or_else(|| "-".into()),
-            row.label(),
-            row.provider.clone().unwrap_or_else(|| "-".into()),
-            row.model.clone().unwrap_or_else(|| "-".into()),
-            cells::compact_tokens(row.input_tokens),
-            cells::compact_tokens(row.output_tokens),
-            format!("{share:.1}%"),
-            "█".repeat(bars),
-        ])
-    });
+    let rows = sessions
+        .into_iter()
+        .map(|row| {
+            let share = if total == 0 {
+                0.0
+            } else {
+                row.output_tokens as f64 * 100.0 / total as f64
+            };
+            let width = usize::from(tokens.width.saturating_sub(66));
+            let bars = ((share / 100.0) * width as f64).round() as usize;
+            Row::new(vec![
+                row.project.clone().unwrap_or_else(|| "-".into()),
+                row.label(),
+                row.provider.clone().unwrap_or_else(|| "-".into()),
+                row.model.clone().unwrap_or_else(|| "-".into()),
+                cells::compact_tokens(row.input_tokens),
+                cells::compact_tokens(row.output_tokens),
+                format!("{share:.1}%"),
+                "█".repeat(bars),
+            ])
+        })
+        .collect();
+    let (rows, omitted) = fit_rows(rows, tokens.height);
     let table = Table::new(
         rows,
         [
-            Constraint::Length(12),
             Constraint::Length(9),
             Constraint::Length(8),
-            Constraint::Length(24),
-            Constraint::Length(9),
-            Constraint::Length(9),
+            Constraint::Length(6),
+            Constraint::Length(14),
             Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(6),
             Constraint::Fill(1),
         ],
     )
@@ -192,6 +263,17 @@ pub(super) fn render(
     )
     .block(cells::panel("Tokens by session", false));
     frame.render_widget(table, tokens);
+    if let Some(text) = omitted {
+        frame.render_widget(
+            Paragraph::new(text),
+            Rect::new(
+                tokens.x + 1,
+                tokens.bottom() - 2,
+                tokens.width.saturating_sub(2),
+                1,
+            ),
+        );
+    }
 }
 
 #[cfg(test)]

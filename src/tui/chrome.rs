@@ -108,10 +108,16 @@ pub(super) fn render_chrome_footer(
         let width = (label.len() as u16).min(area.right().saturating_sub(x));
         let rect = Rect::new(x, area.y, width, area.height);
         frame.render_widget(
-            Paragraph::new(label).style(Style::default().fg(TEAL).bg(SELECTED_BG)),
+            Paragraph::new(label).style(if key == KeyCode::Enter {
+                Style::default().fg(DIM)
+            } else {
+                Style::default().fg(TEAL).bg(SELECTED_BG)
+            }),
             rect,
         );
-        targets.keys.push((rect, key));
+        if key != KeyCode::Enter {
+            targets.keys.push((rect, key));
+        }
         x = x.saturating_add(width);
         let width = (description.len() as u16).min(area.right().saturating_sub(x));
         frame.render_widget(

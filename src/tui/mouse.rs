@@ -24,6 +24,7 @@ pub(super) enum MouseTarget {
 
 #[derive(Default)]
 pub(super) struct MouseTargets {
+    pub(super) size: (u16, u16),
     pub(super) sessions: VisibleRows,
     pub(super) recent: VisibleRows,
     pub(super) events: VisibleRows,

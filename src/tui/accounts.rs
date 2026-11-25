@@ -142,7 +142,7 @@ impl Accounts {
     }
 }
 
-fn quota_text(
+fn quota_summary(
     quota: Option<&crate::monitor::CodexQuotaSnapshot>,
     now: std::time::SystemTime,
 ) -> String {
@@ -153,10 +153,7 @@ fn quota_text(
     let Ok(age) = now.duration_since(quota.observed_at) else {
         return "Last reported: Unknown".into();
     };
-    let now_secs = now
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|value| value.as_secs());
+    let now_secs = now.duration_since(UNIX_EPOCH).ok().map(|v| v.as_secs());
     let stale = age >= Duration::from_secs(900)
         || [quota.primary.as_ref(), quota.secondary.as_ref()]
             .into_iter()
@@ -168,60 +165,50 @@ fn quota_text(
                     .zip(now_secs)
                     .is_some_and(|(reset, now)| reset <= now)
             });
-    let mut lines = vec![format!(
+    format!(
         "Last reported: {} ago{}",
         super::cells::format_duration(age),
         if stale { "  Stale" } else { "" }
-    )];
-    for (title, window) in [
-        ("Primary", quota.primary.as_ref()),
-        ("Secondary", quota.secondary.as_ref()),
-    ] {
-        let Some(window) = window else {
-            lines.push(format!("{title}: Unknown"));
-            continue;
-        };
-        let title = match window.window_minutes {
-            Some(300) => "5h",
-            Some(10_080) => "week",
-            _ => title,
-        };
-        let length = window
-            .window_minutes
-            .filter(|v| (1..=525_600_000).contains(v))
-            .map(|v| format!("{v} min"))
-            .unwrap_or_else(|| "Unknown".into());
-        let used = window
-            .used_percent
-            .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
-            .map(|v| {
-                let filled = (v / 10.0).round() as usize;
-                format!(
-                    "{v:.1}% used [{}{}]",
-                    "█".repeat(filled),
-                    "░".repeat(10 - filled)
-                )
-            })
-            .unwrap_or_else(|| "Unknown used".into());
-        let reset = window
-            .reset_at
-            .filter(|v| (1..=253_402_300_799).contains(v))
-            .and_then(|v| UNIX_EPOCH.checked_add(Duration::from_secs(v)))
-            .and_then(|time| {
-                let text = super::cells::format_system_time(time);
-                (text != "-").then(|| match time.duration_since(now) {
-                    Ok(left) => format!("{text} (in {})", super::cells::format_duration(left)),
-                    Err(_) => format!("{text} (passed)"),
-                })
-            })
-            .unwrap_or_else(|| "Unknown".into());
-        lines.push(format!("{title}  {length}  {used}"));
-        lines.push(format!("Reset: {reset}"));
-    }
-    lines.join("\n")
+    )
 }
 
 impl Accounts {
+    pub(super) fn render_confirmation(
+        &mut self,
+        frame: &mut ratatui::Frame<'_>,
+        area: ratatui::layout::Rect,
+    ) {
+        use ratatui::{
+            layout::{Alignment, Rect},
+            widgets::{Block, Borders, Clear, Paragraph},
+        };
+        self.confirmation_visible = false;
+        let Some((name, _)) = &self.pending else {
+            return;
+        };
+        let width = 44.min(area.width);
+        let height = 5.min(area.height);
+        let popup = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        );
+        self.confirmation_visible = name.is_ascii()
+            && usize::from(width.saturating_sub(2)) >= name.len().max(22)
+            && height >= 5;
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(format!("Select profile?\n{name}\nEnter save  Esc cancel"))
+                .alignment(Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .style(ratatui::style::Style::default().bg(super::BG)),
+                ),
+            popup,
+        );
+    }
     pub(super) fn click(&mut self, x: u16, y: u16) {
         if self.pending.is_none()
             && self
@@ -240,7 +227,7 @@ impl Accounts {
             return;
         }
         let index = self.first + usize::from(y - self.rows.y) / 3;
-        if index <= self.names.len() {
+        if index < self.names.len() {
             self.focus = index;
         }
     }
@@ -272,6 +259,33 @@ impl Accounts {
             .style(Style::default().fg(super::SEPARATOR));
         self.rows = block.inner(panes[0]);
         frame.render_widget(block, panes[0]);
+        if self.local {
+            let info = ratatui::layout::Rect::new(
+                self.rows.x,
+                self.rows.y,
+                self.rows.width,
+                self.rows.height.min(2),
+            );
+            let saved = if self.selected.is_empty() {
+                "Unknown"
+            } else {
+                &self.selected
+            };
+            let message = if self.overridden {
+                "CLAUDE_CONFIG_DIR overrides selection"
+            } else {
+                "CLAUDE_CONFIG_DIR does not override selection"
+            };
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(format!("Saved: {saved}")),
+                    Line::from(message),
+                ]),
+                info,
+            );
+            self.rows.y += info.height;
+            self.rows.height -= info.height;
+        }
         let count = usize::from(self.rows.height).div_ceil(3);
         self.first = self
             .focus
@@ -284,6 +298,9 @@ impl Accounts {
             .unwrap_or_default()
             .as_secs();
         let mut lines: Vec<Line<'_>> = Vec::new();
+        if !self.local && self.names.is_empty() {
+            lines.push(Line::from("Claude profiles: Unknown"));
+        }
         for (index, name) in self.names.iter().enumerate().skip(self.first).take(count) {
             let style = if index == self.focus {
                 Style::default()
@@ -336,29 +353,12 @@ impl Accounts {
             }
         );
         let mut detail: Vec<Line<'_>> = Vec::new();
-        if let Some((name, _)) = &self.pending {
-            let actions = "Enter save  Esc cancel";
-            self.confirmation_visible = name.is_ascii()
-                && usize::from(inner.width) >= saved.len().max(name.len()).max(actions.len())
-                && inner.height >= 4;
-            detail.push(Line::from(saved));
-            if self.confirmation_visible {
-                detail.push(Line::from("Select profile?"));
-                detail.push(Line::from(name.clone()));
-                detail.push(Line::from(actions));
-            } else {
-                detail.push(Line::from("Resize to confirm"));
-            }
-        } else {
-            let quota = snapshot.codex_quota.as_ref();
-            let summary = quota_text(quota, now);
-            detail.push(Line::from(
-                summary
-                    .lines()
-                    .next()
-                    .unwrap_or("Last reported: Unknown")
-                    .to_owned(),
-            ));
+        {
+            let quota = snapshot
+                .codex_quota
+                .as_ref()
+                .filter(|q| now.duration_since(q.observed_at).is_ok());
+            detail.push(Line::from(quota_summary(quota, now)));
             detail.push(super::usage_limits::codex(
                 "Primary",
                 quota.and_then(|q| q.primary.as_ref()),
@@ -399,15 +399,52 @@ mod tests {
     #[test]
     fn attached_profiles_are_unknown_and_never_load_limits() {
         let mut accounts = Accounts::new(false);
-        accounts.names.push("example".into());
+        accounts.enter();
         accounts.refresh_with(|| panic!("read-only monitor loaded limits"));
         let state = crate::monitor::mock_state().into();
         let buffer = crate::tui::tests::draw(100, 20, |frame| {
             accounts.render(frame, frame.area(), &state)
         });
         let text = crate::tui::tests::buffer_text(&buffer);
-        assert!(text.contains("example"));
-        assert!(text.contains("5h    Unknown"));
+        assert!(text.contains("Claude profiles: Unknown"));
+        assert!(!text.contains("Claude example"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confirmation_overlay_fits_short_terminal() {
+        let mut accounts = Accounts::new(true);
+        accounts.names = vec!["default".into(), "backup".into()];
+        accounts.selected = "default".into();
+        accounts.focus = 1;
+        accounts.confirm();
+        let state = crate::monitor::mock_state().into();
+        let mut app = crate::tui::MonitorApp {
+            accounts,
+            usage_open: true,
+            listen_url: String::new(),
+            setup_text: String::new(),
+            show_setup: false,
+            show_help: false,
+            detail: None,
+            focus: crate::tui::FocusPane::Sessions,
+            selected: 0,
+            recent_selected: 0,
+            tick: 0,
+            phase: crate::tui::MonitorPhase::Running,
+            shutdown: None,
+            shutdown_complete: None,
+        };
+        let screen =
+            crate::tui::tests::draw(80, 24, |frame| crate::tui::render(frame, &mut app, &state));
+        let text = crate::tui::tests::buffer_text(&screen);
+        assert!(text.contains("Enter save  Esc cancel"));
+        assert!(text.contains("Saved: default"));
+        app.accounts.confirm_with(|name, expected| {
+            assert_eq!((name, expected), ("backup", "default"));
+            Ok(())
+        });
+        assert_eq!(app.accounts.selected, "backup");
     }
 
     #[cfg(unix)]
@@ -423,6 +460,22 @@ mod tests {
         accounts.cancel();
         assert!(!accounts.confirming());
         assert_eq!(accounts.selected, "default");
+    }
+
+    #[test]
+    fn clicks_only_focus_profile_rows_or_subscription() {
+        let mut accounts = Accounts::new(true);
+        accounts.names = vec!["default".into()];
+        let state = crate::monitor::mock_state().into();
+        crate::tui::tests::draw(100, 20, |frame| {
+            accounts.render(frame, frame.area(), &state)
+        });
+        accounts.click(accounts.rows.x, accounts.rows.y + 3);
+        assert_eq!(accounts.focus, 0);
+        accounts.click(accounts.subscription.x, accounts.subscription.y);
+        assert_eq!(accounts.focus, 1);
+        accounts.click(accounts.rows.x, accounts.rows.y);
+        assert_eq!(accounts.focus, 0);
     }
 
     #[test]
@@ -445,24 +498,6 @@ mod tests {
         assert!(text.contains("Stale"));
         assert!(text.contains("42.0%"));
         assert!(text.contains("Unknown"));
-    }
-
-    #[test]
-    fn invalid_snapshot_bounds_are_unknown_and_do_not_make_report_stale() {
-        let now = SystemTime::now();
-        let quota = CodexQuotaSnapshot {
-            observed_at: now,
-            primary: Some(CodexQuotaWindow {
-                used_percent: None,
-                window_minutes: Some(525_600_001),
-                reset_at: Some(0),
-            }),
-            secondary: None,
-        };
-        let text = quota_text(Some(&quota), now);
-        assert!(!text.contains("Stale"));
-        assert!(!text.contains("525600001"));
-        assert!(text.contains("Reset: Unknown"));
     }
 
     #[cfg(unix)]
@@ -502,13 +537,16 @@ mod tests {
         });
         assert!(!called);
         let full = crate::tui::tests::draw(100, 20, |frame| {
-            accounts.render(frame, frame.area(), &state)
+            accounts.render(frame, frame.area(), &state);
+            accounts.render_confirmation(frame, frame.area());
         });
         let full_text = crate::tui::tests::buffer_text(&full);
         assert!(full_text.contains("backup"));
         assert!(full_text.contains("Enter save  Esc cancel"));
-        let screen =
-            crate::tui::tests::draw(20, 4, |frame| accounts.render(frame, frame.area(), &state));
+        let screen = crate::tui::tests::draw(20, 4, |frame| {
+            accounts.render(frame, frame.area(), &state);
+            accounts.render_confirmation(frame, frame.area());
+        });
         assert!(!crate::tui::tests::buffer_text(&screen).contains("Enter save"));
         accounts.confirm_with(|_, _| {
             called = true;
@@ -518,7 +556,8 @@ mod tests {
         assert!(accounts.confirming());
         assert_eq!(accounts.selected, "default");
         crate::tui::tests::draw(100, 20, |frame| {
-            accounts.render(frame, frame.area(), &state)
+            accounts.render(frame, frame.area(), &state);
+            accounts.render_confirmation(frame, frame.area());
         });
         accounts.confirm_with(|_, _| {
             called = true;
@@ -547,47 +586,157 @@ mod tests {
     }
 
     #[test]
-    fn reported_windows_use_labels_only_for_known_lengths() {
-        let now = SystemTime::now();
-        let mut quota = CodexQuotaSnapshot {
-            observed_at: now,
+    fn future_quota_hides_bars_and_valid_nonstandard_window_shows_length() {
+        let mut accounts = Accounts::new(false);
+        let mut state: crate::monitor::snapshot::MonitorSnapshot =
+            crate::monitor::mock_state().into();
+        state.codex_quota = Some(CodexQuotaSnapshot {
+            observed_at: SystemTime::now() + Duration::from_secs(3600),
             primary: Some(CodexQuotaWindow {
                 used_percent: Some(42.0),
-                window_minutes: Some(300),
+                window_minutes: Some(120),
                 reset_at: None,
             }),
-            secondary: Some(CodexQuotaWindow {
-                used_percent: Some(12.0),
-                window_minutes: Some(10080),
-                reset_at: None,
-            }),
+            secondary: None,
+        });
+        let buffer = crate::tui::tests::draw(100, 20, |frame| {
+            accounts.render(frame, frame.area(), &state)
+        });
+        let text = crate::tui::tests::buffer_text(&buffer);
+        assert!(text.contains("Last reported: Unknown"));
+        assert!(!text.contains("42.0%"));
+        state.codex_quota.as_mut().unwrap().observed_at = SystemTime::now();
+        let buffer = crate::tui::tests::draw(100, 20, |frame| {
+            accounts.render(frame, frame.area(), &state)
+        });
+        let text = crate::tui::tests::buffer_text(&buffer);
+        assert!(text.contains("Primary (120m)"));
+        assert!(text.contains("42.0%"));
+        let quota = state.codex_quota.as_mut().unwrap();
+        quota.observed_at = SystemTime::now() - Duration::from_secs(900);
+        quota.primary.as_mut().unwrap().window_minutes = Some(300);
+        quota.secondary = Some(CodexQuotaWindow {
+            used_percent: Some(12.0),
+            window_minutes: Some(10080),
+            reset_at: None,
+        });
+        let screen = crate::tui::tests::draw(100, 20, |frame| {
+            accounts.render(frame, frame.area(), &state)
+        });
+        let text = crate::tui::tests::buffer_text(&screen);
+        assert!(text.contains("Stale") && text.contains("5h") && text.contains("week"));
+        let quota = state.codex_quota.as_mut().unwrap();
+        quota.primary.as_mut().unwrap().window_minutes = Some(525_600_001);
+        quota.primary.as_mut().unwrap().used_percent = Some(f64::NAN);
+        quota.primary.as_mut().unwrap().reset_at = Some(0);
+        quota.observed_at = SystemTime::now();
+        let screen = crate::tui::tests::draw(100, 20, |frame| {
+            accounts.render(frame, frame.area(), &state)
+        });
+        let text = crate::tui::tests::buffer_text(&screen);
+        assert!(!text.contains("525600001") && !text.contains("Stale"));
+        assert!(text.contains("Unknown"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod event_tests {
+    use super::*;
+    use crate::tui::{self, *};
+    use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    #[ignore]
+    fn confirmation_event_probe() {
+        unsafe {
+            std::env::set_var(
+                "DUOLANE_CONFIG_DIR",
+                std::env::var_os("TEST_CONFIG").unwrap(),
+            );
+        }
+        let state = crate::monitor::mock_state().into();
+        let mut accounts = Accounts::new(true);
+        accounts.enter();
+        accounts.focus = 1;
+        let mut app = MonitorApp {
+            accounts,
+            usage_open: true,
+            listen_url: String::new(),
+            setup_text: String::new(),
+            show_setup: false,
+            show_help: false,
+            detail: None,
+            focus: FocusPane::Sessions,
+            selected: 0,
+            recent_selected: 0,
+            tick: 0,
+            phase: MonitorPhase::Running,
+            shutdown: None,
+            shutdown_complete: None,
         };
-        let text = quota_text(Some(&quota), now);
-        assert!(text.contains("5h  "));
-        assert!(text.contains("week  "));
-        quota.primary.as_mut().unwrap().window_minutes = None;
-        assert!(quota_text(Some(&quota), now).contains("Primary  "));
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.handle_key(key(KeyCode::Enter), &state);
+        let mut targets = MouseTargets::default();
+        let screen = tui::tests::draw(80, 24, |frame| {
+            targets = tui::render(frame, &mut app, &state)
+        });
+        let text = tui::tests::buffer_text(&screen);
+        assert!(text.contains("CLAUDE_CONFIG_DIR does not override selection"));
+        for label in ["1 Overview", "?"] {
+            let (column, row) = tui::tests::placeholder_position(&screen, label).unwrap();
+            app.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                },
+                &state,
+                &targets,
+            );
+        }
+        assert!(app.usage_open && !app.show_help);
+        app.handle_key(key(KeyCode::Esc), &state);
+        assert!(!app.accounts.confirming());
+        assert_eq!(
+            crate::claude_accounts::monitor_roster().unwrap().selected,
+            "default"
+        );
+        app.handle_key(key(KeyCode::Enter), &state);
+        tui::tests::draw(80, 24, |frame| tui::render(frame, &mut app, &state));
+        app.handle_key(key(KeyCode::Enter), &state);
+        assert_eq!(
+            crate::claude_accounts::monitor_roster().unwrap().selected,
+            "backup"
+        );
     }
 
     #[test]
-    fn reported_limits_mark_stale_and_unknown() {
-        let now = SystemTime::now();
-        let quota = CodexQuotaSnapshot {
-            observed_at: now - Duration::from_secs(900),
-            primary: Some(CodexQuotaWindow {
-                used_percent: Some(42.0),
-                window_minutes: Some(300),
-                reset_at: None,
-            }),
-            secondary: Some(CodexQuotaWindow {
-                used_percent: Some(f64::NAN),
-                window_minutes: None,
-                reset_at: None,
-            }),
-        };
-        let text = quota_text(Some(&quota), now);
-        assert!(text.contains("Stale"));
-        assert!(text.contains("42"));
-        assert!(text.contains("Unknown"));
+    fn confirmation_keys_and_clicks_work_at_80_by_24() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config");
+        let profile = config.join("claude-accounts/backup");
+        std::fs::create_dir_all(&profile).unwrap();
+        for path in [&config, &config.join("claude-accounts"), &profile] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let marker = profile.join(".duolane-ready");
+        std::fs::write(&marker, b"ready\n").unwrap();
+        std::fs::set_permissions(marker, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .env_clear()
+                .env("HOME", root.path())
+                .env("TEST_CONFIG", config)
+                .args([
+                    "--exact",
+                    "--ignored",
+                    "tui::accounts::event_tests::confirmation_event_probe"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 }

@@ -75,6 +75,42 @@ fn help_hint_is_clickable_but_navigation_hint_is_not() {
 }
 
 #[test]
+fn enter_hint_is_never_clickable_but_help_remains_clickable() {
+    let state: MonitorSnapshot = mock_state().into();
+    let mut app = app();
+    click(&mut app, &state, |screen| left_click(screen, "Enter"));
+    assert!(app.detail.is_none());
+    click(&mut app, &state, |screen| left_click(screen, "?"));
+    assert!(app.show_help);
+    app.show_help = false;
+    app.usage_open = true;
+    click(&mut app, &state, |screen| left_click(screen, "Enter"));
+    assert!(!app.accounts.confirming());
+}
+
+#[test]
+fn usage_groups_raw_models_before_sanitizing_labels() {
+    let mut state: MonitorSnapshot = mock_state().into();
+    let mut first = state.recent[0].clone();
+    first.model = Some("model".into());
+    let mut second = first.clone();
+    second.model = Some("mo\u{7}del".into());
+    state.recent = vec![first, second];
+    let mut app = app();
+    app.usage_open = true;
+    let text = detail_text(&mut app, &state);
+    let speed = text
+        .split("Speed by model")
+        .nth(1)
+        .unwrap()
+        .split("Tokens by session")
+        .next()
+        .unwrap();
+    assert_eq!(speed.matches("model").count(), 2);
+    assert!(!text.contains('\u{7}'));
+}
+
+#[test]
 fn usage_displays_speed_and_session_tokens() {
     let state: MonitorSnapshot = mock_state().into();
     let mut app = app();
@@ -240,4 +276,79 @@ fn only_left_button_down_on_an_uncovered_data_row_opens_detail() {
     app.phase = MonitorPhase::Running;
     click(&mut app, &state, row_click);
     assert!(app.detail.is_some());
+}
+
+#[test]
+fn banner_covers_all_footer_targets() {
+    let state: MonitorSnapshot = mock_state().into();
+    let mut app = app();
+    let mut hits = MouseTargets::default();
+    let screen = draw(120, 48, |frame| {
+        hits = render_with_banner(frame, &mut app, &state, Some("offline"));
+    });
+    assert!(
+        app.handle_mouse(left_click(&screen, "Reconnecting"), &state, &hits)
+            .is_none()
+    );
+    let screen = draw(120, 48, |frame| {
+        hits = render_with_banner(frame, &mut app, &state, None);
+    });
+    assert_eq!(
+        app.handle_mouse(
+            MouseEvent {
+                column: 1,
+                row: 47,
+                ..left_click(&screen, "q")
+            },
+            &state,
+            &hits
+        ),
+        Some(MonitorExit::Detached)
+    );
+}
+
+#[test]
+fn click_requires_frame_size_to_match_current_size() {
+    let state: MonitorSnapshot = mock_state().into();
+    let mut app = app();
+    let mut hits = MouseTargets::default();
+    let screen = draw(120, 48, |frame| hits = render(frame, &mut app, &state));
+    let event = left_click(&screen, "2 Usage");
+    app.handle_mouse_sized(event, &state, &hits, (80, 24));
+    assert!(!app.usage_open);
+    app.handle_mouse_sized(event, &state, &hits, (120, 48));
+    assert!(app.usage_open);
+}
+
+#[test]
+fn usage_tables_use_remaining_width_and_show_omitted_rows() {
+    let mut state: MonitorSnapshot = mock_state().into();
+    state.sessions = (0..12)
+        .map(|n| {
+            let mut s = state.sessions[0].clone();
+            s.project = Some(format!("p{n}"));
+            s
+        })
+        .collect();
+    state.recent = (0..12)
+        .map(|n| {
+            let mut r = state.recent[0].clone();
+            r.model = Some(format!("m{n}"));
+            r
+        })
+        .collect();
+    let mut app = app();
+    app.usage_open = true;
+    let text = buffer_text(&draw(80, 24, |frame| render(frame, &mut app, &state)));
+    let speed = text
+        .split("Speed by model")
+        .nth(1)
+        .unwrap()
+        .split("Tokens by session")
+        .next()
+        .unwrap();
+    let tokens = text.split("Tokens by session").nth(1).unwrap();
+    assert!(speed.contains('█') || speed.contains('░'), "{text}");
+    assert!(tokens.contains('█'), "{text}");
+    assert!(speed.contains("more") && tokens.contains("more"), "{text}");
 }
