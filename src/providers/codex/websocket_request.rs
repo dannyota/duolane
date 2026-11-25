@@ -84,6 +84,7 @@ pub(super) async fn codex_websocket_request(
     } else {
         Arc::new(new_pool_entry(
             connect_with_timeout(
+                &ctx.req_id,
                 websocket_client,
                 proxy_config,
                 &ws_url,
@@ -111,6 +112,7 @@ pub(super) async fn codex_websocket_request(
         }
         entry = Arc::new(new_pool_entry(
             connect_with_timeout(
+                &ctx.req_id,
                 websocket_client,
                 proxy_config,
                 &ws_url,
@@ -139,6 +141,7 @@ pub(super) async fn codex_websocket_request(
             ctx.recovery_budget.mark_ambiguous_hosted();
             websocket_transport_error("send", &error)
         })?;
+    super::websocket_pool::record_websocket_send(used_pooled);
 
     let collected = collect_ws_events_tracked(
         &mut guard,
@@ -148,6 +151,7 @@ pub(super) async fn codex_websocket_request(
         traffic,
         &ctx.recovery_budget,
         used_pooled,
+        Some(ctx),
     )
     .await;
     drop(guard);
@@ -287,6 +291,7 @@ pub(super) struct ReadyWebSocket {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn prepare_codex_websocket(
+    request_id: &str,
     websocket_client: &reqwest::Client,
     proxy_config: &WebSocketProxyConfig,
     url: &str,
@@ -318,6 +323,7 @@ pub(super) async fn prepare_codex_websocket(
         entry
     } else {
         let stream = connect_with_timeout(
+            request_id,
             websocket_client,
             proxy_config,
             &ws_url,
@@ -373,6 +379,7 @@ pub(super) fn start_codex_websocket_events(
     headers: &HeaderMap,
     reservation: Option<&ContinuationReservation>,
     websocket_sent: Arc<std::sync::atomic::AtomicBool>,
+    ctx: Option<RequestContext>,
 ) -> CodexWebSocketEventStream {
     if let Some(tc) = ready.traffic.as_deref() {
         write_websocket_metadata_capture(tc, &ready.ws_url, reservation, ready.used_pooled);
@@ -441,7 +448,8 @@ pub(super) fn start_codex_websocket_events(
             }
             return;
         }
-        let (reusable, terminal_item) = stream_ws_events(
+        super::websocket_pool::record_websocket_send(used_pooled);
+        let (reusable, terminal_item) = stream_ws_events_monitored(
             &mut guard,
             idle_timeout_ms,
             traffic,
@@ -449,6 +457,7 @@ pub(super) fn start_codex_websocket_events(
             &budget,
             used_pooled,
             Some(&entry),
+            ctx.as_ref(),
         )
         .await;
         drop(guard);
@@ -547,6 +556,7 @@ pub(super) async fn codex_websocket_event_stream_prepared(
         Some(ready) => ready,
         None => {
             prepare_codex_websocket(
+                &ctx.req_id,
                 websocket_client,
                 proxy_config,
                 url,
@@ -569,6 +579,7 @@ pub(super) async fn codex_websocket_event_stream_prepared(
         headers,
         reservation,
         websocket_sent,
+        Some(ctx.clone()),
     ))
 }
 
@@ -735,6 +746,7 @@ mod tests {
             }
         });
         let ready = prepare_codex_websocket(
+            "",
             &test_websocket_client(),
             &WebSocketProxyConfig::direct(),
             &format!("http://{addr}/responses"),
@@ -756,6 +768,7 @@ mod tests {
             &HeaderMap::new(),
             None,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(weak_entry.upgrade().is_some());
@@ -805,6 +818,7 @@ mod tests {
             }
         });
         let mut ready = prepare_codex_websocket(
+            "",
             &test_websocket_client(),
             &WebSocketProxyConfig::direct(),
             &format!("http://{addr}/responses"),
@@ -827,6 +841,7 @@ mod tests {
             &HeaderMap::new(),
             Some(&reservation),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
         );
         let error = tokio::time::timeout(Duration::from_secs(2), events.recv())
             .await

@@ -8,8 +8,14 @@ mod mouse;
 #[cfg(test)]
 mod mouse_tests;
 mod overlay;
+#[cfg(test)]
+mod overview_tests;
+#[cfg(test)]
+mod phase_tests;
+mod request_phases;
 mod requests;
 mod sessions;
+mod summary;
 mod usage_limits;
 mod usage_stats;
 
@@ -22,8 +28,7 @@ use overlay::{
     render_help_overlay, render_setup_overlay, render_shutdown_confirmation,
     render_shutdown_overlay,
 };
-use requests::{render_active, render_events, render_recent};
-use sessions::render_sessions;
+use requests::{render_active_at, render_events, render_recent};
 
 use std::{
     io::{self, Stdout},
@@ -603,6 +608,15 @@ fn render_at(
         }
         return targets;
     }
+    let body = Rect::new(
+        area.x,
+        root[1].y,
+        area.width,
+        root[5].y.saturating_sub(root[1].y),
+    );
+    let parts = summary::layout(body, state, detail::height(app, state));
+    summary::render(frame, parts[0], terminal_state, &app.accounts, now, zone);
+    let root = [root[0], parts[1], parts[2], parts[3], parts[4], root[5]];
     let sessions = match &app.detail {
         Some(DetailView::Session(detail)) => {
             let index = detail.index(
@@ -620,16 +634,17 @@ fn render_at(
             render_request_detail(frame, root[1], terminal_state, index);
             VisibleRows::default()
         }
-        None => render_sessions(
+        None => sessions::render_sessions_with_queue(
             frame,
             root[1],
             &terminal_state.sessions,
+            &terminal_state.active,
             app.selected,
             app.focus == FocusPane::Sessions,
             terminal_state.snapshot_at,
         ),
     };
-    render_active(frame, root[2], &terminal_state.active, app.tick);
+    render_active_at(frame, root[2], &terminal_state.active, app.tick, now);
     let recent = render_recent(
         frame,
         root[3],
@@ -813,7 +828,7 @@ mod tests {
     fn request_tables_share_time_status_provider_model_rhythm() {
         assert_eq!(
             headers(&active_columns(LayoutTier::Medium))[..4],
-            ["Started", "Status", "Provider", "Model"]
+            ["Started", "Phase", "Provider", "Model"]
         );
         assert_eq!(
             headers(&recent_columns(LayoutTier::Medium))[..4],
@@ -909,7 +924,7 @@ mod tests {
                     .iter()
                     .filter(|column| column.header.is_empty())
                     .count(),
-                usize::from(matches!(tier, LayoutTier::Expanded | LayoutTier::Wide))
+                0
             );
             assert_eq!(
                 recent

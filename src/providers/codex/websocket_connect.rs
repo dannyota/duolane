@@ -199,6 +199,7 @@ async fn connect_via_http_upgrade(
     if response.status() != http::StatusCode::SWITCHING_PROTOCOLS {
         let status = response.status().as_u16();
         if status == http::StatusCode::FORBIDDEN.as_u16() {
+            super::websocket_pool::ORIGIN_403_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
             gate.record_forbidden(forbidden_cooldown);
             forbidden_seen.store(true, AtomicOrdering::Release);
         }
@@ -322,6 +323,7 @@ fn connect_timeout_error(connect_timeout: Duration) -> CodexError {
 }
 
 async fn connect_with_policy<T, P, PFut, F, Fut>(
+    request_id: &str,
     gate: &WebSocketConnectGate,
     connect_timeout: Duration,
     forbidden_cooldown: Duration,
@@ -343,7 +345,7 @@ where
             budget_deadline.map_or(queue_deadline, |deadline| deadline.min(queue_deadline));
         let permit = match tokio::time::timeout_at(
             deadline,
-            gate.wait_to_start_until(before_start(), deadline),
+            gate.wait_to_start_until(request_id, before_start(), deadline),
         )
         .await
         {
@@ -398,6 +400,7 @@ where
             .is_err_and(ConnectAttemptError::is_origin_forbidden)
         {
             if !forbidden_seen.load(AtomicOrdering::Acquire) {
+                super::websocket_pool::ORIGIN_403_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
                 gate.record_forbidden(forbidden_cooldown);
             }
             drop(permit);
@@ -420,6 +423,7 @@ where
 }
 
 pub(super) async fn connect_with_timeout(
+    request_id: &str,
     websocket_client: &reqwest::Client,
     proxy_config: &WebSocketProxyConfig,
     url: &str,
@@ -428,6 +432,7 @@ pub(super) async fn connect_with_timeout(
     budget: &super::recovery::RecoveryBudget,
 ) -> Result<CodexWebSocketStream, CodexError> {
     connect_with_policy(
+        request_id,
         &WS_CONNECT_GATE,
         Duration::from_millis(connect_timeout_ms),
         WEBSOCKET_CONNECT_FORBIDDEN_COOLDOWN,
@@ -502,6 +507,7 @@ mod tests {
         let gate = WebSocketConnectGate::new(Duration::ZERO);
         let mut client = Some(client);
         let error = match connect_with_policy(
+            "",
             &gate,
             Duration::from_millis(100),
             Duration::ZERO,
@@ -549,6 +555,7 @@ mod tests {
         }
         let started = tokio::time::Instant::now();
         let result = connect_with_policy(
+            "",
             &gate,
             Duration::from_secs(1),
             Duration::from_secs(3),
@@ -584,6 +591,7 @@ mod tests {
             let mut release_rx = Some(release_rx);
             let mut started_tx = Some(started_tx);
             connect_with_policy(
+                "",
                 &connecting_gate,
                 Duration::from_secs(10),
                 Duration::from_secs(3),
@@ -628,6 +636,7 @@ mod tests {
         let budget = super::super::recovery::RecoveryBudget::with_window(Duration::from_secs(1));
         tokio::time::advance(Duration::from_secs(2)).await;
         connect_with_policy(
+            "",
             &gate,
             Duration::from_secs(1),
             Duration::from_secs(3),
@@ -650,6 +659,7 @@ mod tests {
         gate.record_forbidden(Duration::from_secs(5));
         let calls = AtomicUsize::new(0);
         let result = connect_with_policy(
+            "",
             &gate,
             Duration::from_secs(10),
             Duration::from_secs(3),
@@ -671,6 +681,7 @@ mod tests {
         let gate = WebSocketConnectGate::new(Duration::from_secs(1));
         let budget = super::super::recovery::RecoveryBudget::default();
         let result = connect_with_policy(
+            "",
             &gate,
             Duration::from_secs(1),
             Duration::from_secs(31),
@@ -693,6 +704,7 @@ mod tests {
         }
         let attempts = AtomicUsize::new(0);
         let result = connect_with_policy(
+            "",
             &gate,
             Duration::from_secs(1),
             Duration::ZERO,
@@ -715,6 +727,7 @@ mod tests {
         let starts = Mutex::new(Vec::new());
 
         let error = connect_with_policy(
+            "",
             &gate,
             Duration::from_secs(10),
             Duration::from_secs(3),
@@ -736,6 +749,7 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
 
         connect_with_policy(
+            "",
             &gate,
             Duration::from_secs(10),
             Duration::from_secs(3),
@@ -755,11 +769,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn origin_403_waits_for_cooldown_retries_once_and_returns_second_error() {
+        let before = codex_connection_counters().origin_403;
         let gate = WebSocketConnectGate::new(Duration::from_secs(1));
         let attempts = AtomicUsize::new(0);
         let starts = Mutex::new(Vec::new());
 
         let error = connect_with_policy(
+            "",
             &gate,
             Duration::from_secs(10),
             Duration::from_secs(3),
@@ -793,6 +809,7 @@ mod tests {
         assert_eq!(error.retry_after.as_deref(), Some("7"));
         assert_eq!(error.origin, CodexErrorOrigin::WebSocketHandshake);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(codex_connection_counters().origin_403, before + 2);
         assert_eq!(gate.spacing_for_tests(), Duration::from_secs(4));
         let starts = starts.lock().unwrap();
         assert!(starts[1].duration_since(starts[0]) >= Duration::from_secs(3));
@@ -800,10 +817,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn proxy_connect_403_is_not_retried() {
+        let before = codex_connection_counters().origin_403;
         let gate = WebSocketConnectGate::new(Duration::ZERO);
         let attempts = AtomicUsize::new(0);
 
         let error = connect_with_policy(
+            "",
             &gate,
             Duration::from_secs(10),
             Duration::from_secs(3),
@@ -823,6 +842,7 @@ mod tests {
 
         assert_eq!(error.status, http::StatusCode::FORBIDDEN.as_u16());
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(codex_connection_counters().origin_403, before);
         assert_eq!(gate.spacing_for_tests(), Duration::ZERO);
     }
 
@@ -855,6 +875,7 @@ mod tests {
         let budget = super::super::recovery::RecoveryBudget::default();
         let attempts = AtomicUsize::new(0);
         let request = connect_with_policy(
+            "",
             &gate,
             Duration::from_secs(60),
             Duration::from_millis(20),
@@ -978,6 +999,7 @@ mod tests {
         let gate = WebSocketConnectGate::new(Duration::ZERO);
 
         let error = match connect_with_policy(
+            "",
             &gate,
             Duration::from_secs(1),
             Duration::ZERO,
@@ -1016,6 +1038,7 @@ mod tests {
         let started_at = tokio::time::Instant::now();
 
         let error = connect_with_policy(
+            "",
             &gate,
             Duration::from_secs(2),
             Duration::from_secs(3),
@@ -1133,6 +1156,7 @@ mod tests {
 
         let client = test_websocket_client();
         let err = match connect_with_timeout(
+            "",
             &client,
             &WebSocketProxyConfig::direct(),
             &format!("ws://{addr}/backend-api/codex/responses"),
@@ -1173,6 +1197,7 @@ mod tests {
 
         let client = test_websocket_client();
         let err = match connect_with_timeout(
+            "",
             &client,
             &WebSocketProxyConfig::direct(),
             &format!("ws://{addr}/backend-api/codex/responses"),
@@ -1216,6 +1241,7 @@ mod tests {
             let budget = super::super::recovery::RecoveryBudget::with_gate(ReplayGate::new(false));
             budget.enable_typed_websocket();
             let result = connect_with_timeout(
+                "",
                 &test_websocket_client(),
                 &WebSocketProxyConfig::direct(),
                 &format!("ws://{addr}/responses"),
@@ -1259,6 +1285,7 @@ mod tests {
         budget.enable_typed_websocket();
         let client = test_websocket_client();
         let result = connect_with_timeout(
+            "",
             &client,
             &WebSocketProxyConfig::direct(),
             &format!("ws://{addr}/responses"),
@@ -1273,6 +1300,7 @@ mod tests {
         };
         assert_eq!(error.origin, CodexErrorOrigin::WebSocketTransient);
         let result = connect_with_timeout(
+            "",
             &client,
             &WebSocketProxyConfig::direct(),
             "invalid url",

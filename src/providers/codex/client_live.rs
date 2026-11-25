@@ -1078,6 +1078,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn live_nested_missing_response_retries_once_without_stale_previous_id() {
+        let counters_before = super::super::websocket::codex_connection_counters();
         let _registry_guard =
             super::super::continuation::lock_continuation_registry_for_async_tests().await;
         let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
@@ -1184,6 +1185,15 @@ pub(crate) mod tests {
         assert_eq!(retry_payload["input"].as_array().unwrap().len(), 2);
         assert!(request_rx.try_recv().is_err());
         server.await.unwrap();
+        let counters_after = super::super::websocket::codex_connection_counters();
+        assert_eq!(
+            counters_after.websocket_new,
+            counters_before.websocket_new + 2
+        );
+        assert_eq!(
+            counters_after.websocket_reused,
+            counters_before.websocket_reused + 1
+        );
 
         super::super::websocket::invalidate_codex_websocket_pool_owner(&owner);
         super::super::continuation::abort_continuation_for_owner(&second_candidate);

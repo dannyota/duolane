@@ -98,10 +98,12 @@ where
         traffic,
         &Default::default(),
         false,
+        None,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn collect_ws_events_tracked<S>(
     ws: &mut WebSocketStream<S>,
     idle_timeout_ms: u64,
@@ -110,6 +112,7 @@ pub(super) async fn collect_ws_events_tracked<S>(
     traffic: Option<&TrafficCapture>,
     budget: &super::recovery::RecoveryBudget,
     reused: bool,
+    ctx: Option<&crate::provider::RequestContext>,
 ) -> Result<(Vec<u8>, Option<WsEvent>), CodexError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -123,6 +126,7 @@ where
         WEBSOCKET_KEEPALIVE_INTERVAL,
         budget,
         reused,
+        ctx,
     )
     .await
 }
@@ -137,6 +141,7 @@ async fn collect_ws_events_with_keepalive_interval<S>(
     keepalive_interval: Duration,
     budget: &super::recovery::RecoveryBudget,
     reused: bool,
+    ctx: Option<&crate::provider::RequestContext>,
 ) -> Result<(Vec<u8>, Option<WsEvent>), CodexError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -239,6 +244,11 @@ where
                     }
                     budget.mark_ambiguous_hosted();
                     break Err(stale_response_error());
+                }
+                if let Some(ctx) = ctx
+                    && let Some(monitor) = ctx.monitor.as_ref()
+                {
+                    monitor.first_upstream_event(&ctx.req_id);
                 }
                 if parsed.get("type").and_then(|v| v.as_str()) == Some("response.created") {
                     conflicting_created |= different_created_id(&parsed, created_id.as_deref());
@@ -394,6 +404,7 @@ fn completed_response_matches(event: &serde_json::Value, created_id: Option<&str
         && event.pointer("/response/id").and_then(|v| v.as_str()) == created_id
 }
 
+#[cfg(test)]
 pub(super) async fn stream_ws_events<S>(
     ws: &mut WebSocketStream<S>,
     idle_timeout_ms: u64,
@@ -402,6 +413,33 @@ pub(super) async fn stream_ws_events<S>(
     budget: &super::recovery::RecoveryBudget,
     reused: bool,
     pool_entry: Option<&Arc<PoolEntry>>,
+) -> (bool, Option<Result<serde_json::Value, CodexError>>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    stream_ws_events_monitored(
+        ws,
+        idle_timeout_ms,
+        traffic,
+        tx,
+        budget,
+        reused,
+        pool_entry,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn stream_ws_events_monitored<S>(
+    ws: &mut WebSocketStream<S>,
+    idle_timeout_ms: u64,
+    traffic: Option<Arc<TrafficCapture>>,
+    tx: &mpsc::Sender<Result<serde_json::Value, CodexError>>,
+    budget: &super::recovery::RecoveryBudget,
+    reused: bool,
+    pool_entry: Option<&Arc<PoolEntry>>,
+    ctx: Option<&crate::provider::RequestContext>,
 ) -> (bool, Option<Result<serde_json::Value, CodexError>>)
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -500,6 +538,11 @@ where
                         error
                     }));
                     break;
+                }
+                if let Some(ctx) = ctx
+                    && let Some(monitor) = ctx.monitor.as_ref()
+                {
+                    monitor.first_upstream_event(&ctx.req_id);
                 }
                 if parsed.get("type").and_then(|v| v.as_str()) == Some("response.created") {
                     conflicting_created |= different_created_id(&parsed, created_id.as_deref());
@@ -732,6 +775,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_websocket_frame_does_not_mark_first_upstream_event() {
+        for buffered in [false, true] {
+            let monitor = crate::monitor::MonitorHandle::new(10);
+            monitor.request_started(
+                "ws-test",
+                None,
+                None,
+                crate::monitor::EndpointKind::Messages,
+            );
+            let ctx = crate::provider::RequestContext {
+                recovery_budget: Default::default(),
+                req_id: "ws-test".into(),
+                session_id: None,
+                traffic: None,
+                monitor: Some(monitor.clone()),
+                passthrough: None,
+            };
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            server
+                .send(Message::text(
+                    r#"{"type":"response.output_text.delta","delta":"stale"}"#,
+                ))
+                .await
+                .unwrap();
+            if buffered {
+                let _ = collect_ws_events_tracked(
+                    &mut client,
+                    1000,
+                    None,
+                    None,
+                    None,
+                    &Default::default(),
+                    true,
+                    Some(&ctx),
+                )
+                .await;
+            } else {
+                let (tx, _rx) = mpsc::channel(2);
+                let _ = stream_ws_events_monitored(
+                    &mut client,
+                    1000,
+                    None,
+                    &tx,
+                    &Default::default(),
+                    true,
+                    None,
+                    Some(&ctx),
+                )
+                .await;
+            }
+            assert!(
+                monitor.snapshot().active[0]
+                    .first_upstream_event_at
+                    .is_none()
+            );
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            server
+                .send(Message::text(
+                    r#"{"type":"response.completed","response":{"id":"new","status":"completed"}}"#,
+                ))
+                .await
+                .unwrap();
+            if buffered {
+                let _ = collect_ws_events_tracked(
+                    &mut client,
+                    1000,
+                    None,
+                    None,
+                    None,
+                    &Default::default(),
+                    false,
+                    Some(&ctx),
+                )
+                .await;
+            } else {
+                let (tx, _rx) = mpsc::channel(2);
+                let _ = stream_ws_events_monitored(
+                    &mut client,
+                    1000,
+                    None,
+                    &tx,
+                    &Default::default(),
+                    false,
+                    None,
+                    Some(&ctx),
+                )
+                .await;
+            }
+            assert!(
+                monitor.snapshot().active[0]
+                    .first_upstream_event_at
+                    .is_some()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn reused_socket_rejects_stale_output_before_delivery() {
         let (client_io, server_io) = tokio::io::duplex(2048);
         let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
@@ -783,11 +927,19 @@ mod tests {
             } else {
                 Default::default()
             };
-            let error =
-                collect_ws_events_tracked(&mut client, 1_000, None, None, None, &budget, true)
-                    .await
-                    .err()
-                    .unwrap();
+            let error = collect_ws_events_tracked(
+                &mut client,
+                1_000,
+                None,
+                None,
+                None,
+                &budget,
+                true,
+                None,
+            )
+            .await
+            .err()
+            .unwrap();
             assert_eq!(error.detail.as_deref(), Some("hosted_tool_executed"));
             let result = Err(error);
             assert!(!super::super::recovery::buffered_replay_allowed(
@@ -1292,6 +1444,7 @@ mod tests {
             WEBSOCKET_KEEPALIVE_INTERVAL,
             &Default::default(),
             false,
+            None,
         )
         .await
         {
@@ -1333,6 +1486,7 @@ mod tests {
             Duration::from_millis(10),
             &Default::default(),
             false,
+            None,
         )
         .await
         {
