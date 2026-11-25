@@ -67,6 +67,11 @@ stays saved; fix the problem and run `duolane claude --continue`. `switch`
 refuses when `CLAUDE_CONFIG_DIR` is set, and asks first when run inside a Claude
 Code session or an IDE terminal that sets `CLAUDECODE`.
 
+The first interactive launch of a new profile runs Claude Code's first-run
+setup, which can ask you to choose a login method even though the profile is
+signed in. Choose the Claude subscription and sign in to the same account, in a
+private window if the browser holds another one. This happens once per profile.
+
 The first named launch in a project asks you to type `yes` before it shares that
 project's history folder in `~/.claude/projects/` with the profile. The resumed
 session continues in the same transcript file, with the same session ID.

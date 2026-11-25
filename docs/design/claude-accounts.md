@@ -183,10 +183,6 @@ session. With several sessions in one project, the most recent may not be the
 one that ran out; pass `-- --resume <session-id>` instead. duolane cannot see a
 previous process in another terminal; close it first.
 
-Unverified: the live checks below resumed by ID only. Before release, confirm on
-the current Claude Code that `--continue` under a named profile finds the latest
-session that another login wrote through the linked project folder.
-
 ## Alternatives and evidence
 
 A one-shot `duolane claude --account <name>` would leave the exhausted login
@@ -208,5 +204,14 @@ second transcript. A second check ran the duolane wrapper with the default login
 and a profile created by `duolane accounts login`: a session started under the
 default login, `accounts use` switched profiles, and `duolane claude --resume`
 asked for consent, linked the folder, recalled the first turn, and appended to
-the same file. Neither check establishes cross-account compatibility for every
-model or stored tool state.
+the same file. A third check on Claude Code 2.1.332 quit a session under the
+default login and ran `duolane accounts switch` to a named profile: the launch
+linked the folder after consent and `--continue` resumed that session. Neither
+check establishes cross-account compatibility for every model or stored tool
+state.
+
+`claude auth login` stores the login without completing Claude Code's first-run
+setup. Observed on Claude Code 2.1.332, the first interactive launch of such a
+profile runs that setup, including the login method screen, even though
+`claude auth status` reports the profile as signed in. duolane does not edit
+Claude Code's state to skip it.
