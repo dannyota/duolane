@@ -179,10 +179,15 @@ impl CodexHttpClient {
         {
             let auth = if ctx.recovery_budget.is_tracked() {
                 self.auth_for_buffered_http(&body.reasoning_account, &ctx.recovery_budget)
-                    .await?
+                    .await
             } else {
-                self.auth_for(&body.reasoning_account).await?
-            };
+                self.auth_for(&body.reasoning_account).await
+            }
+            .inspect_err(|error| {
+                if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
+                    super::client_live::invalidate_live_continuation_pool(continuation);
+                }
+            })?;
             let quota = super::client_live::quota_for_auth(ctx, &auth);
             if super::client_live::should_reset_websocket_pool(continuation)
                 && let Some(owner) = super::client_live::websocket_pool_owner(continuation)

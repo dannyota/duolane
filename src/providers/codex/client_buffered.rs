@@ -726,6 +726,134 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn auto_gzip_account_change_at_bind_removes_pooled_socket() {
+        let _registry =
+            super::super::continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            send_completed_websocket_response(&mut ws, "first").await;
+            futures_util::future::pending::<()>().await;
+        });
+        let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let context = http_test_context();
+        let request = buffered_request_with_texts(&["one"]);
+        let owner = ConversationIdentity::Main("auto-gzip-bind-change".into());
+        let initial = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            true,
+        );
+        let response = client
+            .post_codex_with_transport(
+                &request,
+                &context,
+                Some(&initial),
+                crate::config::CodexTransport::WebSocket,
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+        super::super::update_continuation_from_upstream(
+            None,
+            &initial,
+            None,
+            &request,
+            &response.body,
+            response.socket_id,
+            false,
+        );
+        assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_some());
+        let mut changed = buffered_request_with_texts(&["one", "two"]);
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &changed,
+            true,
+        );
+        assert!(reservation.candidate().previous_response_id.is_some());
+        changed.reasoning_account =
+            super::super::translate::reasoning_signature::ReasoningAccount::new(Some("other"));
+        client.request_compression = crate::config::CodexRequestCompression::Gzip;
+        client.auto_ws_max_bytes = 100_000;
+        let client = std::sync::Arc::new(client);
+        let error = client
+            .stream_codex_auto_events_for_owner(
+                &changed,
+                &context,
+                &Default::default(),
+                Some(&reservation),
+                true,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.detail.as_deref(), Some(CODEX_ACCOUNT_CHANGED_DETAIL));
+        assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn native_compaction_account_change_at_bind_removes_pooled_socket() {
+        let _registry =
+            super::super::continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        for enabled in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _ = next_websocket_json(&mut ws).await;
+                send_completed_websocket_response(&mut ws, "first").await;
+                futures_util::future::pending::<()>().await;
+            });
+            let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+            let context = http_test_context();
+            let request = buffered_test_request();
+            let owner = ConversationIdentity::Main(format!("compact-bind-change-{enabled}"));
+            let reservation = super::super::continuation::continuation_candidate_for_owner(
+                Some(&owner),
+                &request,
+                enabled,
+            );
+            client
+                .post_codex_with_transport(
+                    &request,
+                    &context,
+                    Some(&reservation),
+                    crate::config::CodexTransport::WebSocket,
+                    &Default::default(),
+                )
+                .await
+                .unwrap();
+            assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_some());
+            let mut changed = request.clone();
+            changed.reasoning_account =
+                super::super::translate::reasoning_signature::ReasoningAccount::new(Some("other"));
+            let error = super::super::compaction::request_compaction_for_turn(
+                &client,
+                &changed,
+                &context,
+                Some(&owner),
+                crate::config::CodexTransport::WebSocket,
+                Default::default(),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(
+                matches!(error, super::super::compaction::CompactionError::Upstream(ref error) if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL))
+            );
+            assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_none());
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
     async fn account_change_at_bind_removes_pooled_socket() {
         let _registry_guard =
             super::super::continuation::lock_continuation_registry_for_async_tests().await;

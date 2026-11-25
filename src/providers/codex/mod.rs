@@ -105,7 +105,6 @@ impl CodexProvider {
     pub fn new() -> Self {
         Self::with_first_source(Some(config::codex_auth::AuthSource::ChatGpt))
     }
-
     pub(crate) fn with_first_source(first_source: Option<config::codex_auth::AuthSource>) -> Self {
         Self {
             client: Arc::new(CodexHttpClient::new()),
@@ -281,6 +280,7 @@ impl CodexProvider {
                 self.client.as_ref(),
                 &translated,
                 &compaction_ctx,
+                conversation_identity.as_ref(),
                 configured_transport,
                 compaction_websocket_sent,
             )

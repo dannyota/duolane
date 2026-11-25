@@ -75,6 +75,7 @@ pub async fn request_compaction(
         client,
         request,
         ctx,
+        None,
         crate::config::codex_transport(),
         std::sync::Arc::default(),
     )
@@ -85,6 +86,7 @@ pub(super) async fn request_compaction_for_turn(
     client: &CodexHttpClient,
     request: &ResponsesRequest,
     ctx: &RequestContext,
+    owner: Option<&crate::request_identity::ConversationIdentity>,
     transport: crate::config::CodexTransport,
     websocket_sent: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<Vec<ResponsesInputItem>, CompactionError> {
@@ -110,6 +112,13 @@ pub(super) async fn request_compaction_for_turn(
             &super::client_body::CodexHttpBodyCache::with_websocket_sent(websocket_sent),
         )
         .await
+        .inspect_err(|error| {
+            if error.detail.as_deref() == Some(super::client::CODEX_ACCOUNT_CHANGED_DETAIL)
+                && let Some(owner) = owner
+            {
+                super::websocket::invalidate_codex_websocket_pool_owner(owner);
+            }
+        })
         .map_err(CompactionError::Upstream)?;
     let compaction = parse_compaction_response(&response.body)?;
     Ok(build_compacted_history(&conversation, compaction))
