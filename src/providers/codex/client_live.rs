@@ -142,7 +142,7 @@ impl CodexHttpClient {
 
         'attempt: loop {
             let sent_before_attempt = websocket_sent.load(std::sync::atomic::Ordering::Acquire);
-            socket_id_publisher.publish(None);
+            socket_id_publisher.publish_return(None, None);
             let ws_headers = match build_codex_headers(&auth, &ctx, body.client_metadata.is_some())
             {
                 Ok(headers) => super::websocket::codex_websocket_headers(&headers),
@@ -258,8 +258,13 @@ impl CodexHttpClient {
                         if let Some(reservation) = continuation.as_ref() {
                             super::websocket::invalidate_codex_websocket_pool_return(
                                 reservation,
-                                stream.return_id(),
+                                stream.close_and_return_id(),
                             );
+                        }
+                        #[cfg(test)]
+                        if let Some(hook) = tests::race_hook(continuation.as_ref()) {
+                            hook.coordinator_reached.add_permits(1);
+                            hook.coordinator_release.acquire().await.unwrap().forget();
                         }
                         abort_abandoned_live_continuation(
                             continuation.as_ref(),
@@ -273,7 +278,7 @@ impl CodexHttpClient {
                     if let Some(reservation) = continuation.as_ref() {
                         super::websocket::invalidate_codex_websocket_pool_return(
                             reservation,
-                            stream.return_id(),
+                            stream.close_and_return_id(),
                         );
                     }
                     abort_abandoned_live_continuation(continuation.as_ref(), &socket_id_publisher);
@@ -285,7 +290,7 @@ impl CodexHttpClient {
                 if let (Some(quota), Ok(payload)) = (&quota, &item) {
                     quota.observe(payload);
                 }
-                socket_id_publisher.publish(stream.socket_id());
+                socket_id_publisher.publish_return(stream.socket_id(), stream.return_id());
 
                 hosted_tool_executed |= item
                     .as_ref()
@@ -327,7 +332,7 @@ impl CodexHttpClient {
                                 if let Some(reservation) = continuation.as_ref() {
                                     super::websocket::invalidate_codex_websocket_pool_return(
                                         reservation,
-                                        stream.return_id(),
+                                        stream.close_and_return_id(),
                                     );
                                 }
                                 abort_abandoned_live_continuation(
@@ -352,7 +357,7 @@ impl CodexHttpClient {
                                 if let Some(reservation) = continuation.as_ref() {
                                     super::websocket::invalidate_codex_websocket_pool_return(
                                         reservation,
-                                        stream.return_id(),
+                                        stream.close_and_return_id(),
                                     );
                                 }
                                 abort_abandoned_live_continuation(
@@ -409,7 +414,7 @@ impl CodexHttpClient {
                             if tx.send(Ok(payload)).await.is_err() {
                                 cleanup_failed_live_forward(
                                     continuation.as_ref(),
-                                    stream.return_id(),
+                                    stream.close_and_return_id(),
                                     &socket_id_publisher,
                                 );
                                 return;
@@ -420,7 +425,7 @@ impl CodexHttpClient {
                                 if tx.send(Ok(pending)).await.is_err() {
                                     cleanup_failed_live_forward(
                                         continuation.as_ref(),
-                                        stream.return_id(),
+                                        stream.close_and_return_id(),
                                         &socket_id_publisher,
                                     );
                                     return;
@@ -429,7 +434,7 @@ impl CodexHttpClient {
                             if tx.send(Ok(payload)).await.is_err() {
                                 cleanup_failed_live_forward(
                                     continuation.as_ref(),
-                                    stream.return_id(),
+                                    stream.close_and_return_id(),
                                     &socket_id_publisher,
                                 );
                                 return;
@@ -442,7 +447,7 @@ impl CodexHttpClient {
                                     if tx.send(Ok(pending)).await.is_err() {
                                         cleanup_failed_live_forward(
                                             continuation.as_ref(),
-                                            stream.return_id(),
+                                            stream.close_and_return_id(),
                                             &socket_id_publisher,
                                         );
                                         return;
@@ -452,7 +457,7 @@ impl CodexHttpClient {
                             if tx.send(Ok(payload)).await.is_err() {
                                 cleanup_failed_live_forward(
                                     continuation.as_ref(),
-                                    stream.return_id(),
+                                    stream.close_and_return_id(),
                                     &socket_id_publisher,
                                 );
                                 return;
@@ -462,7 +467,7 @@ impl CodexHttpClient {
                             if tx.send(Ok(payload)).await.is_err() {
                                 cleanup_failed_live_forward(
                                     continuation.as_ref(),
-                                    stream.return_id(),
+                                    stream.close_and_return_id(),
                                     &socket_id_publisher,
                                 );
                                 return;
@@ -473,7 +478,7 @@ impl CodexHttpClient {
                                 if tx.send(Ok(payload)).await.is_err() {
                                     cleanup_failed_live_forward(
                                         continuation.as_ref(),
-                                        stream.return_id(),
+                                        stream.close_and_return_id(),
                                         &socket_id_publisher,
                                     );
                                     return;
@@ -487,7 +492,7 @@ impl CodexHttpClient {
                         if tx.send(Err(err)).await.is_err() {
                             cleanup_failed_live_forward(
                                 continuation.as_ref(),
-                                stream.return_id(),
+                                stream.close_and_return_id(),
                                 &socket_id_publisher,
                             );
                             return;
@@ -578,7 +583,31 @@ fn unauthorized_event_policy(payload: &serde_json::Value) -> (bool, bool) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use std::sync::Mutex;
+    use tokio::sync::Semaphore;
+
+    pub(crate) struct RaceHook {
+        pub inserted: Semaphore,
+        pub worker_release: Semaphore,
+        pub worker_done: Semaphore,
+        pub coordinator_reached: Semaphore,
+        pub coordinator_release: Semaphore,
+    }
+
+    static RACE_HOOK: Mutex<Option<Arc<RaceHook>>> = Mutex::new(None);
+
+    pub(crate) fn race_hook(
+        reservation: Option<&super::super::continuation::ContinuationReservation>,
+    ) -> Option<Arc<RaceHook>> {
+        if reservation.and_then(|r| r.owner())
+            != Some(&super::ConversationIdentity::Main("publish-race".into()))
+        {
+            return None;
+        }
+        RACE_HOOK.lock().unwrap().clone()
+    }
+
     #[test]
     fn plain_unauthorized_event_remains_refreshable() {
         let payload =
@@ -611,6 +640,61 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn downstream_disconnect_before_return_token_publication_removes_socket() {
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+        let hook = Arc::new(RaceHook {
+            inserted: Semaphore::new(0),
+            worker_release: Semaphore::new(0),
+            worker_done: Semaphore::new(0),
+            coordinator_reached: Semaphore::new(0),
+            coordinator_release: Semaphore::new(0),
+        });
+        *RACE_HOOK.lock().unwrap() = Some(hook.clone());
+        let owner = ConversationIdentity::Main("publish-race".into());
+        let request = buffered_test_request();
+        let reservation = super::super::continuation::continuation_candidate_for_owner(
+            Some(&owner),
+            &request,
+            false,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_websocket_json(&mut ws).await;
+            send_completed_websocket_response(&mut ws, "response").await;
+        });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let events = client
+            .stream_codex_websocket_events_for_owner(
+                &request,
+                &http_test_context(),
+                Some(&reservation),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            hook.inserted.acquire().await.unwrap().forget();
+            assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_some());
+            drop(events);
+            hook.coordinator_reached.acquire().await.unwrap().forget();
+            hook.worker_release.add_permits(1);
+            hook.worker_done.acquire().await.unwrap().forget();
+            hook.coordinator_release.add_permits(1);
+            server.await.unwrap();
+            assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_none());
+        })
+        .await
+        .unwrap();
+        *RACE_HOOK.lock().unwrap() = None;
+        super::super::websocket::clear_codex_websocket_pool_for_tests();
+    }
 
     #[tokio::test]
     async fn downstream_disconnect_during_buffered_terminal_forwarding_removes_socket() {
@@ -1255,10 +1339,12 @@ mod tests {
         let terminal_a = attempt_a.recv().await.unwrap().unwrap();
         assert_eq!(terminal_a["response"]["id"], "resp_attempt_a");
         let socket_a = attempt_a.socket_id().expect("attempt A socket ID");
+        let return_a = attempt_a.return_id().expect("attempt A return ID");
         super::super::websocket::invalidate_codex_websocket_pool_return(
             &continuation,
-            Some(socket_a),
+            Some(return_a),
         );
+        assert!(super::super::websocket::pooled_socket_id_for_tests(&owner).is_none());
 
         let mut attempt_b = client
             .stream_codex_websocket_events_for_owner(
@@ -1294,7 +1380,7 @@ mod tests {
             cleanup_task_barrier.wait().await;
             super::super::websocket::invalidate_codex_websocket_pool_return(
                 &cleanup_continuation,
-                Some(socket_a),
+                Some(return_a),
             );
             abort_abandoned_live_continuation(Some(&cleanup_continuation), &handoff_publisher);
         });

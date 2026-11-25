@@ -150,6 +150,7 @@ where
 
     let mut created_id: Option<String> = None;
     let mut seen_created = false;
+    let mut conflicting_created = false;
     let terminal_event = loop {
         let response_deadline_started = if response_started {
             last_response_event_at
@@ -231,9 +232,7 @@ where
                     }
                 };
 
-                if (reused && stale_event(&parsed, seen_created, created_id.as_deref(), pool_entry))
-                    || different_created_id(&parsed, created_id.as_deref())
-                {
+                if reused && stale_event(&parsed, seen_created, created_id.as_deref(), pool_entry) {
                     hosted_tool_executed |= super::client_sse::payload_confirms_hosted(&parsed);
                     if hosted_tool_executed {
                         budget.mark_hosted();
@@ -242,6 +241,7 @@ where
                     break Err(stale_response_error());
                 }
                 if parsed.get("type").and_then(|v| v.as_str()) == Some("response.created") {
+                    conflicting_created |= different_created_id(&parsed, created_id.as_deref());
                     seen_created = true;
                     if created_id.is_none() {
                         created_id = parsed
@@ -273,7 +273,8 @@ where
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown")
                             .to_string(),
-                        reusable: completed_response_matches(&parsed, created_id.as_deref())
+                        reusable: !conflicting_created
+                            && completed_response_matches(&parsed, created_id.as_deref())
                             && pool_entry.is_none_or(|entry| {
                                 entry.record_completed(created_id.as_deref().unwrap_or_default())
                             }),
@@ -416,6 +417,7 @@ where
     let mut hosted_tool_executed = false;
     let mut created_id: Option<String> = None;
     let mut seen_created = false;
+    let mut conflicting_created = false;
     let mut terminal_item = None;
 
     loop {
@@ -490,9 +492,7 @@ where
                 if hosted_tool_executed {
                     budget.mark_hosted();
                 }
-                if (reused && stale_event(&parsed, seen_created, created_id.as_deref(), pool_entry))
-                    || different_created_id(&parsed, created_id.as_deref())
-                {
+                if reused && stale_event(&parsed, seen_created, created_id.as_deref(), pool_entry) {
                     let error = stale_response_error();
                     terminal_item = Some(Err(if hosted_tool_executed {
                         error.after_hosted_tool_execution()
@@ -502,6 +502,7 @@ where
                     break;
                 }
                 if parsed.get("type").and_then(|v| v.as_str()) == Some("response.created") {
+                    conflicting_created |= different_created_id(&parsed, created_id.as_deref());
                     seen_created = true;
                     if created_id.is_none() {
                         created_id = parsed
@@ -539,7 +540,8 @@ where
                     } else {
                         completed = parsed.get("type").and_then(|value| value.as_str())
                             == Some("response.completed");
-                        reusable = completed_response_matches(&parsed, created_id.as_deref())
+                        reusable = !conflicting_created
+                            && completed_response_matches(&parsed, created_id.as_deref())
                             && pool_entry.is_none_or(|entry| {
                                 entry.record_completed(created_id.as_deref().unwrap_or_default())
                             });
@@ -885,7 +887,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_socket_rejects_second_created_with_different_id() {
+    async fn fresh_socket_accepts_conflicting_created_ids_without_reuse() {
         let (client_io, server_io) = tokio::io::duplex(2048);
         let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
         let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
@@ -897,6 +899,12 @@ mod tests {
                 .await
                 .unwrap();
         }
+        server
+            .send(Message::text(
+                r#"{"type":"response.output_text.delta","delta":"hello"}"#,
+            ))
+            .await
+            .unwrap();
         server
             .send(Message::text(
                 r#"{"type":"response.completed","response":{"id":"second","status":"completed"}}"#,
@@ -915,15 +923,52 @@ mod tests {
         )
         .await;
         assert!(!reusable);
-        assert!(matches!(
-            terminal,
-            Some(Err(CodexError {
-                origin: CodexErrorOrigin::WebSocketTransient,
-                ..
-            }))
-        ));
-        assert!(rx.try_recv().is_ok());
-        assert!(rx.try_recv().is_err());
+        assert!(matches!(terminal, Some(Ok(_))));
+        assert_eq!(rx.try_recv().unwrap().unwrap()["type"], "response.created");
+        assert_eq!(rx.try_recv().unwrap().unwrap()["type"], "response.created");
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap()["type"],
+            "response.output_text.delta"
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_created_ids_do_not_pool_when_terminal_matches_first() {
+        for buffered in [false, true] {
+            let (client_io, server_io) = tokio::io::duplex(2048);
+            let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            for id in ["first", "second"] {
+                server
+                    .send(Message::text(
+                        serde_json::json!({"type":"response.created","response":{"id":id}})
+                            .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            server.send(Message::text(r#"{"type":"response.completed","response":{"id":"first","status":"completed"}}"#)).await.unwrap();
+            if buffered {
+                let (_, terminal) = collect_ws_events(&mut client, 1_000, None, None, None)
+                    .await
+                    .unwrap();
+                assert!(!terminal.unwrap().reusable);
+            } else {
+                let (tx, _rx) = mpsc::channel(3);
+                let (reusable, terminal) = stream_ws_events(
+                    &mut client,
+                    1_000,
+                    None,
+                    &tx,
+                    &Default::default(),
+                    false,
+                    None,
+                )
+                .await;
+                assert!(!reusable);
+                assert!(matches!(terminal, Some(Ok(_))));
+            }
+        }
     }
 
     #[tokio::test]

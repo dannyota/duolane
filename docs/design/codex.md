@@ -149,8 +149,10 @@ native server compaction retain their configured transport.
 - An `error` event without a response id keeps its own result at any point, such
   as a usage limit or a rejected login, along with the evidence that the request
   was sent. So does a terminal event that reports a failure before
-  `response.created`. A terminal event without an id ends the response as it
-  does on a new socket. In each of these cases the socket is closed.
+  `response.created`. After `response.created`, a terminal event without an id
+  ends the response as it does on a new socket. In each of these cases the
+  socket is closed. A new socket keeps the results it had before reuse existed,
+  and is not pooled when its events disagree on the response id.
 - The pool holds at most the [idle sockets](security.md#limits) the limits
   allow, counted over all conversations. A socket that returns to the pool first
   closes the pooled sockets opened more than 30 minutes ago, and then, if the

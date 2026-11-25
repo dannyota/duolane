@@ -463,12 +463,23 @@ pub(super) fn start_codex_websocket_events(
             }
             None
         };
+        #[cfg(test)]
+        let race_hook = super::client_live::tests::race_hook(reservation.as_ref());
+        #[cfg(test)]
+        if let Some(hook) = &race_hook {
+            hook.inserted.add_permits(1);
+            hook.worker_release.acquire().await.unwrap().forget();
+        }
         socket_id_publisher.publish_return(return_id.map(|_| entry.socket_id), return_id);
         if let Some(item) = terminal_item
             && tx.send(item).await.is_err()
             && let Some(reservation) = reservation.as_ref()
         {
             invalidate_codex_websocket_pool_return(reservation, return_id);
+        }
+        #[cfg(test)]
+        if let Some(hook) = &race_hook {
+            hook.worker_done.add_permits(1);
         }
     });
     receiver

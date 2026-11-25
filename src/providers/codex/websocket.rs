@@ -93,6 +93,11 @@ impl CodexWebSocketEventStream {
         }
     }
 
+    pub(crate) fn close_and_return_id(&mut self) -> Option<u64> {
+        self.receiver.close();
+        self.return_id()
+    }
+
     pub(crate) fn return_id(&self) -> Option<u64> {
         match self.return_id.load(Ordering::Acquire) {
             0 => None,
