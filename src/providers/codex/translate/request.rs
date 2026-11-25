@@ -962,7 +962,6 @@ mod tests {
             json!("You are a helpful AI assistant tasked with summarizing conversations"),
         );
         cases.push((compact, true));
-        cases.push((base, false));
         for (req, lite) in cases {
             let options = || TranslateOptions {
                 use_responses_lite: lite,

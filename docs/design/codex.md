@@ -92,23 +92,30 @@ The official Codex client adds its model's base instructions, when they are not
 empty, to the start of a request's input as a developer message, and sends no
 `instructions` field, as
 [`build_responses_request`](https://github.com/openai/codex/blob/main/codex-rs/core/src/client.rs)
-shows. On the Lite lane a tools item comes first. The text is the
+shows, on both lanes. On the Lite lane a tools item comes first; on the full
+lane the tools stay in the `tools` field. The text is the
 `model_messages.instructions_template` of the model's [catalog](#model-catalog)
 entry, unchanged. duolane sends the same text in the same place, before Claude
 Code's system prompt.
 
 - The template goes only into a `/v1/messages` request that the ChatGPT source
-  sends on the Lite lane, that is not a
-  [compaction request](#compaction-requests), and that gives the model a tool it
-  may call: a tool in the tools item or loaded later in the history, with a
-  `tool_choice` other than `none`. A deferred placeholder is not a tool.
+  sends, that is not a [compaction request](#compaction-requests), and that
+  gives the model a function or custom tool it may call, with a `tool_choice`
+  other than `none` that does not force hosted search. A hosted search tool next
+  to such a tool does not change this, as it does not for the official client.
+  On the Lite lane the tool is in the tools item or loaded later in the history;
+  on the full lane it is in the `tools` field. A deferred placeholder is not a
+  tool.
 - The input then reads: the tools item when there is one, the template, the
   client's system prompt when there is one, and the history unchanged. Each of
-  the two texts is its own developer message.
+  the two texts is its own developer message. On the full lane the system prompt
+  then leaves the `instructions` field, so the request has none, as the official
+  client's has none.
 - Every other request is unchanged: one without a callable tool, such as a title
-  or a classifier, a compaction request and native server compaction, the full
-  lane, hosted search, native Responses, Chat Completions, and any attempt with
-  an OpenAI API key.
+  or a classifier, a compaction request and native server compaction, standalone
+  search, native Responses, Chat Completions, and any attempt with an OpenAI API
+  key. A `/v1/messages` request on the full lane that does not get the template
+  keeps its system prompt in `instructions`.
 - The template is sent as the catalog gives it. duolane does not edit it and
   does not log it directly. It is part of the request, so an opt-in traffic
   capture records it, continuation keeps it in memory with the rest of the
