@@ -111,6 +111,43 @@ native server compaction retain their configured transport.
 
 ## Transport and retries
 
+- A WebSocket whose response completed returns to an idle pool, with or without
+  [continuation](#continuation). The pool keeps one socket per conversation,
+  account, and continuation setting, so a request with continuation off neither
+  takes nor overwrites the slot of a socket that a stored response needs. The
+  conversation's next request takes the socket out of the pool, so a socket
+  carries one response at a time. Without continuation the reused socket carries
+  the full context and no `previous_response_id`, which OpenAI's
+  [WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode)
+  defines as the start of a new chain.
+- A socket is bound to the credential that authenticated its handshake and to
+  the handshake headers that carry identity, lane, and protocol. The access
+  token, the WebSocket key, and the headers that only serve the HTTP upgrade are
+  not compared. A request reuses a socket only when the credential and those
+  headers equal its own, so a socket never serves another login, and a socket
+  opened on the Lite lane never serves the full lane. A socket that does not
+  match is closed.
+- A pooled socket is closed instead of reused when it was opened more than 30
+  minutes ago or does not answer a ping. The request then counts as a WebSocket
+  attempt that failed before it was sent, and the rules below choose a new
+  socket, HTTP, or an error.
+- Reuse never changes how a request ends: errors, limits, and incomplete
+  responses keep the results the rules below give them. It only decides what
+  happens to the socket. A socket returns to the pool when its stream showed a
+  `response.created` and then a terminal event that carries the same response id
+  and reports a completed response. In every other case the socket is closed
+  when the request ends, including a cancelled request and a stream without a
+  terminal event.
+- On a reused socket, an output event or a completed terminal event that arrives
+  before this request's `response.created` belongs to an earlier response.
+  duolane passes nothing from it to the client, closes the socket, and treats
+  the attempt as failed before output. An `error` event, and a terminal event
+  that reports a failure, keep their own result even before `response.created`,
+  such as a usage limit, along with the evidence that the request was sent; the
+  socket is closed.
+- The pool holds at most the [idle sockets](security.md#limits) the limits
+  allow, counted over all conversations. A socket that returns to a full pool
+  closes the idle socket used least recently.
 - Fresh WebSocket handshakes share a process-wide queue, with at most four in
   flight and a 30-second queue deadline. Starts are spaced by one second
   initially and at minimum. An origin upgrade 403 doubles spacing up to eight

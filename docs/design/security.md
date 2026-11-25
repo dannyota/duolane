@@ -140,6 +140,7 @@ Rejections use the Anthropic error shape and never echo request values:
 | Monitor recent requests             | 200                       |
 | Monitor per-session usage entries   | 1,000, for 24 hours       |
 | Session state entries               | 10,000                    |
+| Idle Codex WebSockets               | 2,048                     |
 | Logged string                       | 4,000 bytes               |
 | Log file before rotation            | 20 MiB, keeping 5 rotated |
 | Error capture                       | 256 KiB per file          |
@@ -155,6 +156,11 @@ are debugging aids the owner turns on deliberately.
 A streamed Claude response has no total size limit, because duolane forwards it
 without buffering. The limit on idle time between bytes still applies. Text is
 truncated on a character boundary.
+
+The idle Codex WebSocket limit is lower when descriptors are short: at most half
+of what the soft open-file limit leaves after the
+[intercept listener](intercept.md#listener) deducts its 192 descriptors and two
+per slot of its pools. Sockets in use are not counted.
 
 ## Stored data
 
