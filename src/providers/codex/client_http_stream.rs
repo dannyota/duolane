@@ -157,6 +157,7 @@ impl CodexHttpClient {
                     .auto_large_full_context(body, ctx, continuation, http_body)
                     .await?)
         {
+            super::client_live::invalidate_live_continuation_pool(continuation);
             http_body
                 .size_http_selected
                 .store(true, std::sync::atomic::Ordering::Release);
@@ -219,6 +220,7 @@ impl CodexHttpClient {
                         if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
                             return Err(CodexError::recovery_exhausted());
                         }
+                        super::client_live::invalidate_live_continuation_pool(continuation);
                         http_body
                             .size_http_selected
                             .store(true, std::sync::atomic::Ordering::Release);
@@ -251,6 +253,7 @@ impl CodexHttpClient {
                 if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
                     return Err(CodexError::recovery_exhausted());
                 }
+                super::client_live::invalidate_live_continuation_pool(continuation);
                 self.stream_codex_http_events_for_owner_tracked(body, ctx, http_body)
                     .await
             }

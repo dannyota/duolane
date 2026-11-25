@@ -36,11 +36,11 @@ duolane records the response as something to continue from only when the lists
 have the same length and each pair of items is equal under these rules, and only
 these:
 
-| Stored item   | Recorded only when                                                                                                  |
-| ------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Message       | It is from the assistant, every part is output text without annotations, and the echoed text is the same            |
-| Reasoning     | The echoed item has the same id and the same encrypted content                                                      |
-| Function call | It has no namespace, and the echoed call has the same call id, the same name, and the same arguments as JSON values |
+| Stored item   | Recorded only when                                                                                                             |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Message       | It is from the assistant, every part is output text without annotations, and the echoed text is the same                       |
+| Reasoning     | The echoed item has the same id and the same encrypted content                                                                 |
+| Function call | It has no namespace, and the echoed call has the same call id, the same name, and arguments that are [equal](#equal-arguments) |
 
 Every other stored item records nothing: a custom tool call, a hosted tool call,
 a refusal, a message with a citation, a function call in a namespace, and any
@@ -76,9 +76,9 @@ sent, and its full context otherwise:
 - The translated input begins with the recorded transcript and adds at least one
   item. Each item is compared whole, every field of it, so a changed image,
   instruction, tool list, or tool result does not match. The one exception is
-  `function_call.arguments`, compared as JSON values, because the recorded
-  transcript keeps the text the model streamed while the next request
-  re-serializes the client's parsed input.
+  `function_call.arguments`, compared as [equal arguments](#equal-arguments),
+  because the recorded transcript keeps the text the model streamed while the
+  next request re-serializes the client's parsed input.
 
 The comparison is on the translated request. A change sends the full context
 when it changes a request field or breaks the translated prefix, as a changed
@@ -92,6 +92,22 @@ kept, still continues.
   duolane then sends the full context at most once, under the replay rules of
   [transport and retries](codex.md#transport-and-retries); after output or a
   hosted tool ran, the request fails instead.
+
+## Equal arguments
+
+Two argument texts are equal when they are the same text. Otherwise they are
+equal only when both parse as JSON without a repeated key in any object, every
+number in both is one that a 64-bit float holds exactly as written, and the
+parsed values are equal. A number with more precision, or a repeated key, makes
+the texts unequal, because parsing would hide the difference.
+
+## The socket without continuation
+
+A request that sends its full context still reuses the conversation's pooled
+socket, as [transport and retries](codex.md#transport-and-retries) allows with
+continuation off. Not continuing never closes the socket by itself. A retry with
+full context after a failure, and a request that moves to HTTP, still remove the
+conversation's socket from the pool first, as they do today.
 
 ## Limits of the proof
 

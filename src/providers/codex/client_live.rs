@@ -577,7 +577,7 @@ pub(super) fn should_reset_websocket_pool(
     else {
         return false;
     };
-    reason != "disabled"
+    reason == "full_context_retry"
 }
 
 fn unauthorized_event_policy(payload: &serde_json::Value) -> (bool, bool) {
@@ -1625,16 +1625,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn websocket_pool_reset_clears_initial_stale_state() {
+    fn websocket_pool_reset_only_for_full_context_retry() {
         let owner = Some(ConversationIdentity::Main("session".into()));
         let missing_state =
             test_continuation(owner.clone(), None, None, None, Some("missing_state"));
         let disabled = test_continuation(owner.clone(), None, None, None, Some("disabled"));
-        let prompt_changed = test_continuation(owner, None, None, None, Some("prompt_changed"));
+        let prompt_changed =
+            test_continuation(owner.clone(), None, None, None, Some("prompt_changed"));
+        let retry = test_continuation(owner, None, None, None, Some("full_context_retry"));
 
-        assert!(should_reset_websocket_pool(Some(&missing_state)));
+        assert!(!should_reset_websocket_pool(Some(&missing_state)));
         assert!(!should_reset_websocket_pool(Some(&disabled)));
-        assert!(should_reset_websocket_pool(Some(&prompt_changed)));
+        assert!(!should_reset_websocket_pool(Some(&prompt_changed)));
+        assert!(should_reset_websocket_pool(Some(&retry)));
     }
 
     #[test]

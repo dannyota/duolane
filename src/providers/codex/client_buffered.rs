@@ -1,9 +1,8 @@
 use super::auth::token_store::StoredAuth;
-use super::client::*;
 use super::client_body::{CodexHttpBody, CodexHttpBodyCache};
-use super::client_live::*;
 use super::recovery::buffered_transient_exhausted;
 use super::translate::request::ResponsesRequest;
+use super::{client::*, client_live::*};
 use crate::config::CodexTransport;
 use crate::provider::RequestContext;
 #[cfg(test)]
@@ -39,7 +38,7 @@ impl CodexHttpClient {
             self.auth_for(&body.reasoning_account).await?
         };
         let initial_pool_owner = websocket_pool_owner(continuation).cloned();
-        if should_reset_websocket_pool(continuation)
+        if (transport == CodexTransport::Http || should_reset_websocket_pool(continuation))
             && let Some(owner) = initial_pool_owner.as_ref()
         {
             super::websocket::invalidate_codex_websocket_pool_turn_for_owner(
@@ -117,6 +116,7 @@ impl CodexHttpClient {
                                 )
                                 .await?) =>
                 {
+                    invalidate_live_continuation_pool(active_continuation.as_ref());
                     actual_http = true;
                     ctx.recovery_budget.begin_http_attempt();
                     http_body
@@ -181,6 +181,7 @@ impl CodexHttpClient {
                             if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
                                 return Err(CodexError::recovery_exhausted());
                             }
+                            invalidate_live_continuation_pool(active_continuation.as_ref());
                             actual_http = true;
                             ctx.recovery_budget.begin_http_attempt();
                             let http_body = http_body.get_or_try_init(prepare_http_body).await?;
@@ -280,6 +281,7 @@ impl CodexHttpClient {
                 auth = refreshed.inspect_err(|error| {
                     if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
                         ctx.recovery_budget.cancel_unspent_start();
+                        invalidate_live_continuation_pool(active_continuation.as_ref());
                     }
                     if !sent_before_attempt
                         && result.as_ref().is_ok_and(|response| {

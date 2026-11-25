@@ -27,10 +27,7 @@ use crate::request_identity::ConversationIdentity;
 use crate::retry::{compute_backoff_delay, sleep};
 use axum::response::Response;
 use bytes::Bytes;
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration, time::Instant};
 const LIVE_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 enum LiveStreamStart {
     Response(Response),
@@ -75,6 +72,7 @@ pub(super) async fn live_stream_response(
     loop {
         let upstream_events = match transport {
             config::CodexTransport::Http => {
+                super::client_live::invalidate_live_continuation_pool(continuation.as_ref());
                 client
                     .stream_codex_http_events_for_owner_tracked(&request_body, &ctx, &http_body)
                     .await

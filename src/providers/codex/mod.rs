@@ -20,6 +20,7 @@ mod client_sse;
 mod client_test_support;
 pub mod compaction;
 pub mod continuation;
+mod continuation_arguments;
 mod continuation_record;
 pub mod count_tokens;
 mod error_response;
@@ -684,19 +685,6 @@ fn codex_generation_event(payload: &serde_json::Value) -> bool {
         payload.get("type").and_then(|value| value.as_str()),
         Some("codex.rate_limits" | "keepalive") | None
     )
-}
-
-#[cfg(test)]
-mod provider_constructor_test_support {
-    use super::*;
-    impl CodexProvider {
-        pub(super) fn with_client(client: Arc<CodexHttpClient>) -> Self {
-            Self {
-                client,
-                first_source: Some(config::codex_auth::AuthSource::ChatGpt),
-            }
-        }
-    }
 }
 
 #[cfg(test)]

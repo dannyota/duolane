@@ -7,37 +7,65 @@ pub(super) fn may_record(stored: Option<&[Value]>, echoed: &[ResponsesInputItem]
         && stored.iter().zip(echoed).all(|(stored, echoed)| {
             match (stored.get("type").and_then(Value::as_str), echoed) {
                 (Some("message"), ResponsesInputItem::Message { role, content })
-                    if role == "assistant" && stored.get("role").and_then(Value::as_str) == Some("assistant") =>
+                    if role == "assistant"
+                        && stored.get("role").and_then(Value::as_str) == Some("assistant") =>
                 {
-                    let stored_text = stored.get("content").and_then(Value::as_array).and_then(|parts| {
-                        parts.iter().try_fold(String::new(), |mut text, part| {
-                            if part.get("type").and_then(Value::as_str) != Some("output_text")
-                                || !part.get("annotations").is_none_or(|v| v.as_array().is_some_and(Vec::is_empty))
-                            {
-                                return None;
-                            }
-                            text.push_str(part.get("text")?.as_str()?);
-                            Some(text)
-                        })
-                    });
+                    let stored_text =
+                        stored
+                            .get("content")
+                            .and_then(Value::as_array)
+                            .and_then(|parts| {
+                                parts.iter().try_fold(String::new(), |mut text, part| {
+                                    if part.get("type").and_then(Value::as_str)
+                                        != Some("output_text")
+                                        || !part
+                                            .get("annotations")
+                                            .is_none_or(|v| v.as_array().is_some_and(Vec::is_empty))
+                                    {
+                                        return None;
+                                    }
+                                    text.push_str(part.get("text")?.as_str()?);
+                                    Some(text)
+                                })
+                            });
                     let echoed_text = content.iter().try_fold(String::new(), |mut joined, part| {
-                        let ResponsesContentPart::OutputText { text } = part else { return None };
+                        let ResponsesContentPart::OutputText { text } = part else {
+                            return None;
+                        };
                         joined.push_str(text);
                         Some(joined)
                     });
                     stored_text.is_some() && stored_text == echoed_text
                 }
-                (Some("reasoning"), ResponsesInputItem::Reasoning { id, encrypted_content, .. }) => {
+                (
+                    Some("reasoning"),
+                    ResponsesInputItem::Reasoning {
+                        id,
+                        encrypted_content,
+                        ..
+                    },
+                ) => {
                     stored.get("id").and_then(Value::as_str) == Some(id.as_str())
-                        && stored.get("encrypted_content").and_then(Value::as_str) == Some(encrypted_content.as_str())
+                        && stored.get("encrypted_content").and_then(Value::as_str)
+                            == Some(encrypted_content.as_str())
                 }
-                (Some("function_call"), ResponsesInputItem::FunctionCall { call_id, name, arguments }) => {
+                (
+                    Some("function_call"),
+                    ResponsesInputItem::FunctionCall {
+                        call_id,
+                        name,
+                        arguments,
+                    },
+                ) => {
                     stored.get("namespace").is_none()
                         && stored.get("call_id").and_then(Value::as_str) == Some(call_id.as_str())
                         && stored.get("name").and_then(Value::as_str) == Some(name.as_str())
-                        && stored.get("arguments").and_then(Value::as_str).is_some_and(|a| {
-                            a == arguments || matches!((serde_json::from_str::<Value>(a), serde_json::from_str::<Value>(arguments)), (Ok(a), Ok(b)) if a == b)
-                        })
+                        && stored
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .is_some_and(|a| {
+                                super::continuation_arguments::arguments_equal(a, arguments)
+                            })
                 }
                 _ => false,
             }
@@ -108,6 +136,11 @@ mod tests {
         different_encrypted_content,
         reasoning("one"),
         reasoning("two")
+    );
+    reject!(
+        precision_loss_blocks_recording,
+        call("{\"n\":1.0000000000000000001}"),
+        call("{\"n\":1.0}")
     );
     reject!(
         different_argument_value,
