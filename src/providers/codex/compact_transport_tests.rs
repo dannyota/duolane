@@ -167,7 +167,7 @@ fn test_completion(id: &str) -> [serde_json::Value; 4] {
         serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_up"}}),
         serde_json::json!({"type":"response.output_text.delta","output_index":0,"delta":"ok"}),
         serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}),
-        serde_json::json!({"type":"response.completed","response":{"id":id,"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}}),
+        serde_json::json!({"type":"response.completed","response":{"id":id,"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":5,"output_tokens":2}}}),
     ]
 }
 

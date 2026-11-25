@@ -18,7 +18,7 @@ mod reducer_test_support;
 mod reducer_usage;
 pub mod request;
 mod request_base;
-mod request_input;
+pub(super) mod request_input;
 mod request_options;
 #[cfg(test)]
 mod request_test_support;

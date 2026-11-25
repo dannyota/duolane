@@ -672,7 +672,7 @@ async fn spawn_websocket_sequence_upstream(captured: Arc<Mutex<Vec<Value>>>) -> 
                     }),
                     json!({
                         "type":"response.completed",
-                        "response":{"id":response_id,"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}
+                        "response":{"id":response_id,"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":response_text}]}],"usage":{"input_tokens":5,"output_tokens":2}}
                     }),
                 ];
 
@@ -764,7 +764,7 @@ async fn spawn_websocket_previous_missing_then_retry_upstream(
                     }),
                     json!({
                         "type":"response.completed",
-                        "response":{"id":response_id,"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}
+                        "response":{"id":response_id,"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":response_text}]}],"usage":{"input_tokens":5,"output_tokens":2}}
                     }),
                 ];
 
@@ -857,7 +857,7 @@ async fn spawn_websocket_close_then_retry_upstream(captured: Arc<Mutex<Vec<Value
                     }),
                     json!({
                         "type":"response.completed",
-                        "response":{"id":response_id,"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}
+                        "response":{"id":response_id,"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":response_text}]}],"usage":{"input_tokens":5,"output_tokens":2}}
                     }),
                 ];
 
@@ -946,7 +946,7 @@ async fn spawn_websocket_empty_completion_then_retry_upstream(
                     }),
                     json!({
                         "type":"response.completed",
-                        "response":{"id":response_id,"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}
+                        "response":{"id":response_id,"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":response_text}]}],"usage":{"input_tokens":5,"output_tokens":2}}
                     }),
                 ];
 

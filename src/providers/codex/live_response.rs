@@ -27,11 +27,10 @@ use crate::request_identity::ConversationIdentity;
 use crate::retry::{compute_backoff_delay, sleep};
 use axum::response::Response;
 use bytes::Bytes;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-const MAX_RETRYABLE_LIVE_STREAM_RETRIES: u32 = 3;
-pub(super) const MAX_EMPTY_COMPLETION_RETRIES: u32 = 2;
-pub(super) const EMPTY_CODEX_COMPLETION_DETAIL: &str = "empty_codex_completion";
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 const LIVE_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 enum LiveStreamStart {
     Response(Response),
@@ -311,6 +310,7 @@ async fn live_stream_response_once(
         .with_http_tool_commits(is_http);
     let mut upstream_sse_body = Vec::new();
     let mut pending_chunk = Vec::new();
+    let mut echoed = super::live_echo::LiveEcho::default();
     let mut generation_started = false;
     let mut hosted_tool_executed = false;
     while let Some(item) = upstream_events.recv().await {
@@ -474,8 +474,9 @@ async fn live_stream_response_once(
             }
             record_live_stream_downstream_capture(&ctx, &pending_chunk);
             record_live_stream_progress(&ctx, &pending_chunk);
+            echoed.push(&pending_chunk);
             if terminal {
-                update_continuation_from_upstream(
+                update_live_continuation(
                     ctx.session_id.as_deref(),
                     &request_continuation,
                     compaction.attempt,
@@ -483,6 +484,7 @@ async fn live_stream_response_once(
                     &upstream_sse_body,
                     upstream_events.socket_id(),
                     compaction.compact_boundary,
+                    echoed,
                 );
                 return LiveStreamStart::Response(single_live_stream_response(pending_chunk));
             }
@@ -494,14 +496,16 @@ async fn live_stream_response_once(
                 request_continuation,
                 request_body,
                 upstream_sse_body,
+                echoed,
                 compaction,
             ));
         }
         if terminal {
+            echoed.push(&pending_chunk);
             if tracked_http && is_codex_success_terminal_event(&payload) {
                 ctx.recovery_budget.mark_committed();
             }
-            update_continuation_from_upstream(
+            update_live_continuation(
                 ctx.session_id.as_deref(),
                 &request_continuation,
                 compaction.attempt,
@@ -509,6 +513,7 @@ async fn live_stream_response_once(
                 &upstream_sse_body,
                 upstream_events.socket_id(),
                 compaction.compact_boundary,
+                echoed,
             );
             if pending_chunk.is_empty() {
                 return LiveStreamStart::Response(event_stream_response(
@@ -520,7 +525,6 @@ async fn live_stream_response_once(
             return LiveStreamStart::Response(single_live_stream_response(pending_chunk));
         }
     }
-
     let mut error = websocket::missing_terminal_error();
     if tracked_http && !is_http {
         ctx.recovery_budget.body_uncertain();
@@ -536,7 +540,6 @@ async fn live_stream_response_once(
     }
     provider_retry(&upstream_events, error)
 }
-
 #[allow(clippy::too_many_arguments)]
 fn remaining_live_stream_response(
     mut upstream_events: websocket::CodexWebSocketEventStream,
@@ -546,6 +549,7 @@ fn remaining_live_stream_response(
     request_continuation: ContinuationReservation,
     request_body: translate::request::ResponsesRequest,
     mut upstream_sse_body: Vec<u8>,
+    mut echoed: super::live_echo::LiveEcho,
     compaction: LiveStreamCompaction,
 ) -> Response {
     let is_http = upstream_events.is_http();
@@ -629,6 +633,7 @@ fn remaining_live_stream_response(
                         }
                     };
                     if !chunk.is_empty() {
+                        echoed.push(&chunk);
                         record_live_stream_progress(&ctx, &chunk);
                         if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
                             abort_request_state(
@@ -640,7 +645,7 @@ fn remaining_live_stream_response(
                         }
                     }
                     if terminal {
-                        update_continuation_from_upstream(
+                        update_live_continuation(
                             ctx.session_id.as_deref(),
                             &request_continuation,
                             compaction.attempt,
@@ -648,6 +653,7 @@ fn remaining_live_stream_response(
                             &upstream_sse_body,
                             upstream_events.socket_id(),
                             compaction.compact_boundary,
+                            echoed,
                         );
                         return;
                     }
@@ -672,7 +678,6 @@ fn remaining_live_stream_response(
                 }
             }
         }
-
         abort_request_state(
             ctx.session_id.as_deref(),
             &request_continuation,
@@ -688,13 +693,11 @@ fn remaining_live_stream_response(
             let _ = tx.send(Ok(Bytes::from(chunk))).await;
         }
     });
-
     let stream = futures_util::stream::unfold(rx, |mut rx| async {
         rx.recv().await.map(|item| (item, rx))
     });
     event_stream_response(stream)
 }
-
 #[cfg(test)]
 mod tests {
     use futures_util::StreamExt;

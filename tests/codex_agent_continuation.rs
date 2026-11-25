@@ -665,6 +665,7 @@ async fn emit_completion(
             "response": {
                 "id": response_id,
                 "status": "completed",
+                "output": [{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}],
                 "usage": {"input_tokens": 5, "output_tokens": 2}
             }
         }),
@@ -715,6 +716,7 @@ async fn emit_function_call(
             "response": {
                 "id": response_id,
                 "status": "completed",
+                "output": [{"type":"function_call", "call_id":call.call_id, "name":call.name, "arguments":call.arguments}],
                 "usage": {"input_tokens": 5, "output_tokens": 2}
             }
         }),
@@ -2162,6 +2164,189 @@ async fn tool_turn_with_noncanonical_arguments_continues_with_delta() {
     assert_eq!(delta[0]["type"], "function_call_output");
     assert_eq!(delta[0]["call_id"], call_id.as_str());
     assert_eq!(harness.upstream.snapshot().len(), 2);
+    harness.shutdown().await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn missing_stored_output_sends_full_context() {
+    let _environment_lock = env_lock();
+    let mut harness = TestHarness::start().await;
+    for stream in [false, true] {
+        let headers = IdentityHeaders::main(&unique("missing-output"));
+        let request = harness.start_request(
+            messages_body(stream, vec![message("user", "one")]),
+            headers.clone(),
+        );
+        let first = harness.pending("one", &headers).await.respond_with_events(vec![
+            json!({"type":"response.created","response":{"id":"response-one"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"message-one"}}),
+            json!({"type":"response.output_text.delta","output_index":0,"delta":"reply"}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}),
+            json!({"type":"response.completed","response":{"id":"response-one","status":"completed"}}),
+        ]).await;
+        drained(request).await.assert_success("reply");
+        let second = harness
+            .round_trip(
+                messages_body(
+                    stream,
+                    vec![
+                        message("user", "one"),
+                        message("assistant", "reply"),
+                        message("user", "two"),
+                    ],
+                ),
+                headers,
+                "two",
+                "response-two",
+                "done",
+            )
+            .await;
+        assert!(first.previous_response_id().is_none());
+        assert!(second.previous_response_id().is_none());
+        assert!(
+            second.body["input"]
+                == json!([
+                    upstream_item("user", "one"),
+                    upstream_item("assistant", "reply"),
+                    upstream_item("user", "two")
+                ])
+        );
+    }
+    harness.shutdown().await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn matching_streamed_output_continues_with_new_items() {
+    let _environment_lock = env_lock();
+    let mut harness = TestHarness::start().await;
+    let headers = IdentityHeaders::main(&unique("matching-output"));
+    let request = harness.start_request(
+        messages_body(true, vec![message("user", "one")]),
+        headers.clone(),
+    );
+    harness.pending("one", &headers).await.respond_with_events(vec![
+        json!({"type":"response.created","response":{"id":"response-one"}}),
+        json!({"type":"response.output_text.delta","output_index":0,"delta":"reply"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}),
+        json!({"type":"response.completed","response":{"id":"response-one","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"reply"}]}]}}),
+    ]).await;
+    drained(request).await.assert_success("reply");
+    let second = harness
+        .round_trip(
+            messages_body(
+                true,
+                vec![
+                    message("user", "one"),
+                    message("assistant", "reply"),
+                    message("user", "two"),
+                ],
+            ),
+            headers,
+            "two",
+            "response-two",
+            "done",
+        )
+        .await;
+    assert!(second.previous_response_id() == Some("response-one"));
+    assert!(second.body["input"] == json!([upstream_item("user", "two")]));
+    harness.shutdown().await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stored_web_search_sends_full_context() {
+    let _environment_lock = env_lock();
+    let mut harness = TestHarness::start().await;
+    let headers = IdentityHeaders::main(&unique("stored-search"));
+    let request = harness.start_request(
+        messages_body(true, vec![message("user", "one")]),
+        headers.clone(),
+    );
+    harness.pending("one", &headers).await.respond_with_events(vec![
+        json!({"type":"response.created","response":{"id":"response-one"}}),
+        json!({"type":"response.output_text.delta","output_index":0,"delta":"reply"}),
+        json!({"type":"response.completed","response":{"id":"response-one","status":"completed","output":[
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"reply"}]},
+            {"type":"web_search_call","id":"search-one"}
+        ]}}),
+    ]).await;
+    drained(request).await.assert_success("reply");
+    let second = harness
+        .round_trip(
+            messages_body(
+                true,
+                vec![
+                    message("user", "one"),
+                    message("assistant", "reply"),
+                    message("user", "two"),
+                ],
+            ),
+            headers,
+            "two",
+            "response-two",
+            "done",
+        )
+        .await;
+    assert!(second.previous_response_id().is_none());
+    assert!(
+        second.body["input"]
+            == json!([
+                upstream_item("user", "one"),
+                upstream_item("assistant", "reply"),
+                upstream_item("user", "two")
+            ])
+    );
+    harness.shutdown().await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rewritten_read_sends_full_context() {
+    let _environment_lock = env_lock();
+    let mut harness = TestHarness::start().await;
+    let headers = IdentityHeaders::main(&unique("rewritten-read"));
+    let request = harness.start_request(
+        messages_body(true, vec![message("user", "one")]),
+        headers.clone(),
+    );
+    harness
+        .pending("one", &headers)
+        .await
+        .respond_with_function_call(
+            "response-one",
+            FunctionCallReply {
+                call_id: "call-one".into(),
+                name: "Read".into(),
+                arguments: r#"{"file_path":"/tmp/x","offset":1000000}"#.into(),
+            },
+        )
+        .await;
+    drained(request).await.assert_success("call-one");
+    let second = harness.round_trip_any(messages_body(true, vec![message("user", "one"),
+        json!({"role":"assistant","content":[{"type":"tool_use","id":"call-one","name":"Read","input":{"file_path":"/tmp/x"}}]}),
+        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"call-one","content":"done"}]})]),
+        headers, "response-two", "done").await;
+    assert!(second.previous_response_id().is_none());
+    assert!(
+        second.body["input"]
+            .as_array()
+            .is_some_and(|input| input.len() == 3)
+    );
+    assert!(second.body["input"][0] == upstream_item("user", "one"));
+    assert!(second.body["input"][1]["type"] == "function_call");
+    assert!(second.body["input"][1]["call_id"] == "call-one");
+    assert!(second.body["input"][1]["name"] == "Read");
+    let arguments = second.body["input"][1]["arguments"].as_str().unwrap();
+    assert!(serde_json::from_str::<Value>(arguments).unwrap() == json!({"file_path":"/tmp/x"}));
+    assert!(second.body["input"][2]["type"] == "function_call_output");
+    assert!(second.body["input"][2]["call_id"] == "call-one");
+    assert!(
+        second.body["input"][2]["output"]
+            .as_str()
+            .is_some_and(|output| output.starts_with("done\n\nProxy Read offset note:"))
+    );
     harness.shutdown().await;
 }
 

@@ -20,13 +20,16 @@ mod client_sse;
 mod client_test_support;
 pub mod compaction;
 pub mod continuation;
-#[cfg(test)]
 mod continuation_record;
 pub mod count_tokens;
 mod error_response;
 pub(crate) mod events;
 pub mod images;
 mod live_completion;
+const MAX_RETRYABLE_LIVE_STREAM_RETRIES: u32 = 3;
+pub(super) const MAX_EMPTY_COMPLETION_RETRIES: u32 = 2;
+pub(super) const EMPTY_CODEX_COMPLETION_DETAIL: &str = "empty_codex_completion";
+mod live_echo;
 mod live_response;
 pub mod native;
 #[cfg(test)]
@@ -1011,7 +1014,7 @@ mod tests {
                     serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_first"}}),
                     serde_json::json!({"type":"response.output_text.delta","output_index":0,"delta":"first"}),
                     serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}),
-                    serde_json::json!({"type":"response.completed","response":{"id":"resp_first","status":"completed"}}),
+                    serde_json::json!({"type":"response.completed","response":{"id":"resp_first","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first"}]}]}}),
                 ] {
                     emit_live_event(&mut ws, &event).await;
                 }
