@@ -116,8 +116,10 @@ fn observe(
     }
     let previous = observed.get(name).copied();
     let limits = Limits {
-        five_hour: five_hour.or(previous.and_then(|limits| limits.five_hour)),
-        seven_day: seven_day.or(previous.and_then(|limits| limits.seven_day)),
+        five_hour: five_hour.or(previous
+            .and_then(|limits| limits.five_hour.filter(|window| window.resets_at.is_some()))),
+        seven_day: seven_day.or(previous
+            .and_then(|limits| limits.seven_day.filter(|window| window.resets_at.is_some()))),
         observed_at: now,
     };
     let changed = previous.is_none_or(|previous| {
@@ -266,6 +268,7 @@ mod tests {
             100 + REFRESH_SECONDS
         ));
         assert_eq!(observed["backup"].five_hour.unwrap().used, 0.8);
+        assert_eq!(observed["backup"].seven_day, None);
         assert!(observe(
             &mut observed,
             Some("backup"),
@@ -283,6 +286,9 @@ mod tests {
         assert_eq!(backup.seven_day.unwrap().resets_at, None);
         let partial = headers(&[("anthropic-ratelimit-unified-7d-utilization", "0.5")]);
         assert!(observe(&mut observed, None, &partial, 200));
+        assert_eq!(observed["default"].five_hour, None);
+        assert!(observe(&mut observed, None, &same_second, 201));
+        assert!(observe(&mut observed, None, &partial, 202));
         assert_eq!(observed["default"].five_hour, None);
         assert!(observe(&mut observed, Some("backup"), &partial, 300));
         assert_eq!(observed["backup"].five_hour, backup.five_hour);

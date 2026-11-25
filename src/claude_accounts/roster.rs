@@ -292,7 +292,7 @@ fn percent(window: &Window, observed_at: u64, length: u64, now: u64) -> u64 {
     {
         return 0;
     }
-    let value = (window.used * 100.0).floor() as u64;
+    let value = (window.used * 100.0 + 1e-9).floor() as u64;
     if window.used < 1.0 {
         value.min(99)
     } else {
@@ -707,6 +707,11 @@ mod tests {
         assert_eq!(
             status(Some(&limits(0.99, now + 60)), now),
             Status::Available
+        );
+        let decimal = limits(0.29, now + 60);
+        assert_eq!(
+            window_cell(decimal.five_hour.as_ref(), decimal.observed_at, 18_000, now),
+            "29% 1m"
         );
         let near = limits(0.996, now + 60);
         assert_eq!(status(Some(&near), now), Status::Available);

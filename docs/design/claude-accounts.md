@@ -172,8 +172,9 @@ credential to do so.
   value is out of range.
 - A value changes only when that account sends a request through the proxy.
   `SEEN` shows its age. Percentages round down, so 100% means full. A window
-  shows 0% once its reset has passed, or, when it has no reset, once its
-  observation is one window length old.
+  shows 0% once its reset has passed, or, when it has no reset, once its full
+  observation is one window length old. A response that omits a window drops its
+  previous value if that value has no reset.
 - `STATUS` summarizes the newest values. `limited` means a window is full and
   has not reset by the rule above; it shows the time until the latest such reset
   when every full window has one. `available` means at least one window was seen
