@@ -177,8 +177,8 @@ commands.
 The selection stays saved when the launch fails unless another selection
 replaced it. If the target is still selected, retry `duolane claude` with the
 same Claude arguments, adding `--continue` if `switch` added it. If the
-selection changed, nothing launched; run `duolane accounts switch <target>`
-again.
+selection changed or cannot be read, run `duolane accounts switch <target>`
+again with the same Claude arguments, keeping `-- <claude args>` if present.
 
 For interactive launches, `--continue` loads the most recent conversation in the
 current directory and skips `claude -p`, Agent SDK, and `/loop` sessions

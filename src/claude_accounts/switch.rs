@@ -94,10 +94,12 @@ fn retry_hint(target: &str, continued: bool, selection: Result<String>) -> Strin
             )
         }
         Ok(_) => format!(
-            "selection changed; nothing was launched; run `duolane accounts switch {target}` again"
+            "selection changed; nothing was launched; run `duolane accounts switch {target}` again with the same Claude arguments"
         ),
         Err(_) => {
-            format!("could not verify selection; run `duolane accounts switch {target}` again")
+            format!(
+                "could not verify selection; run `duolane accounts switch {target}` again with the same Claude arguments"
+            )
         }
     }
 }
@@ -177,6 +179,10 @@ mod tests {
         assert!(hint.contains("selection changed"));
         assert!(hint.contains("nothing was launched"));
         assert!(hint.contains("duolane accounts switch backup"));
+        assert!(hint.contains("same Claude arguments"));
+        let unreadable = retry_hint("backup", true, Err(anyhow::anyhow!("unreadable")));
+        assert!(unreadable.contains("duolane accounts switch backup"));
+        assert!(unreadable.contains("same Claude arguments"));
         assert!(!hint.contains("is now selected"));
         assert!(!hint.contains("duolane claude"));
         let hint = retry_hint("backup", false, Ok("backup".into()));
