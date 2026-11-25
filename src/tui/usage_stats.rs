@@ -37,7 +37,8 @@ fn groups(recent: &[CompletedSnapshot]) -> Vec<(GroupKey, Group)> {
         let group = groups.entry(key).or_default();
         group.count += 1;
         if let Some(wait) = row
-            .generation_started_at
+            .first_upstream_event_at
+            .or(row.generation_started_at)
             .and_then(|started| started.duration_since(row.started_at).ok())
         {
             group.waits.push(wait.as_secs_f64());

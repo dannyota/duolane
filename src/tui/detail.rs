@@ -132,6 +132,11 @@ pub(super) fn render_request_detail(
                 DIM_WHITE,
             ),
         ];
+        if let Some(error) = request.error.as_deref().filter(|error| !error.is_empty()) {
+            let status = lines.remove(7);
+            lines.insert(1, status);
+            lines.insert(2, detail_line("detail", error, YELLOW));
+        }
         let provider = request.provider.as_deref().unwrap_or("-");
         if let Some(source) = &request.codex_source {
             lines.insert(
@@ -140,9 +145,6 @@ pub(super) fn render_request_detail(
             );
         } else {
             lines.insert(8, detail_line("provider", provider, TEAL));
-        }
-        if let Some(error) = request.error.as_deref().filter(|error| !error.is_empty()) {
-            lines.push(detail_line("detail", error, YELLOW));
         }
         if let Some(path) = &request.traffic_capture_path {
             lines.push(detail_line(

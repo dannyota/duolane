@@ -209,3 +209,110 @@ fn expanded_claude_profile_ellipsizes_before_lane_stats() {
     assert!(text.contains("…  0 active 0 queued - wait -"));
     assert!(!text.contains(&"x".repeat(40)));
 }
+
+#[test]
+fn failed_request_detail_fits_single_session() {
+    let mut state: MonitorSnapshot = mock_state().into();
+    state.sessions.truncate(1);
+    state.recent.truncate(1);
+    state.recent[0].status = crate::monitor::RequestStatus::Failed;
+    state.recent[0].http_status = Some(502);
+    state.recent[0].error = Some("unique failure detail".into());
+    let mut app = app();
+    app.detail = Some(DetailView::Request(DetailSelection::Keyboard));
+    let text = buffer_text(&draw(120, 40, |frame| {
+        render_at(
+            frame,
+            &mut app,
+            &state,
+            std::time::UNIX_EPOCH,
+            jiff::tz::TimeZone::UTC,
+        );
+    }));
+    assert!(
+        text.lines()
+            .any(|line| line.contains("http status") && line.contains("502"))
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.contains("detail") && line.contains("unique failure detail"))
+    );
+}
+
+#[test]
+fn retry_only_events_keep_count_when_collapsed() {
+    let mut state: MonitorSnapshot = mock_state().into();
+    state.recent.truncate(1);
+    state.recent[0].retry_requested = true;
+    let mut app = app();
+    let text = buffer_text(&draw(120, 40, |frame| {
+        render_at(
+            frame,
+            &mut app,
+            &state,
+            std::time::UNIX_EPOCH,
+            jiff::tz::TimeZone::UTC,
+        );
+    }));
+    assert!(
+        text.lines()
+            .any(|line| line.contains("Events 0") && line.contains("Retry requested: 1"))
+    );
+}
+
+#[test]
+fn compact_summary_stacks_full_values() {
+    let mut state: MonitorSnapshot = mock_state().into();
+    state.active.clear();
+    state.recent.clear();
+    state.codex_connections = Some(crate::monitor::snapshot::CodexConnections {
+        queued_attempts: 2,
+        handshakes_in_flight: 3,
+        handshake_spacing_ms: 250,
+        websocket_reused: 3,
+        websocket_new: 1,
+        http_fallbacks: 7,
+        origin_403: 8,
+    });
+    for width in [78, 100] {
+        let mut app = app();
+        let text = buffer_text(&draw(width, 40, |frame| {
+            render_at(
+                frame,
+                &mut app,
+                &state,
+                std::time::UNIX_EPOCH,
+                jiff::tz::TimeZone::UTC,
+            );
+        }));
+        let lines: Vec<_> = text.lines().collect();
+        let claude = lines
+            .iter()
+            .position(|line| line.contains("Claude active 0 queued 0 -"))
+            .unwrap();
+        assert!(lines[claude + 1].contains("Codex active 0 queued 0 -"));
+        assert!(lines[claude + 2].contains("queue 2 reuse 75% fallback 7 403 8"));
+    }
+}
+
+#[test]
+fn retried_request_wait_uses_first_upstream_event() {
+    let mut state: MonitorSnapshot = mock_state().into();
+    state.recent.truncate(1);
+    let row = &mut state.recent[0];
+    row.provider = Some("codex".into());
+    row.started_at = std::time::UNIX_EPOCH;
+    row.first_upstream_event_at = Some(row.started_at + std::time::Duration::from_secs(1));
+    row.generation_started_at = Some(row.started_at + std::time::Duration::from_secs(8));
+    let mut app = app();
+    let text = buffer_text(&draw(160, 40, |frame| {
+        render_at(
+            frame,
+            &mut app,
+            &state,
+            std::time::UNIX_EPOCH,
+            jiff::tz::TimeZone::UTC,
+        );
+    }));
+    assert!(text.lines().any(|line| line.contains("wait 1.0s")));
+}

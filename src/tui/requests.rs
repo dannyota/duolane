@@ -386,7 +386,12 @@ pub(super) fn render_events(
         .take(12)
         .collect::<Vec<_>>();
     if events.is_empty() && area.height == 1 {
-        frame.render_widget(ratatui::widgets::Paragraph::new("Events 0  none"), area);
+        let line = if retry_count > 0 {
+            format!("Events 0  none  Retry requested: {retry_count}")
+        } else {
+            "Events 0  none".to_owned()
+        };
+        frame.render_widget(ratatui::widgets::Paragraph::new(line), area);
         return VisibleRows::default();
     }
     if events.is_empty() {
