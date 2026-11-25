@@ -111,6 +111,9 @@ pub enum MonitorEvent {
     GenerationStarted {
         request_id: String,
     },
+    FirstOutput {
+        request_id: String,
+    },
     TrafficCapturePath {
         request_id: String,
         path: PathBuf,
@@ -146,6 +149,7 @@ pub enum MonitorEvent {
 
 #[derive(Debug, Clone)]
 pub struct ActiveRequest {
+    pub queue_place: Option<u32>,
     pub request_id: String,
     pub session_id: Option<String>,
     pub session_seq: Option<u64>,
@@ -157,6 +161,8 @@ pub struct ActiveRequest {
     pub endpoint: EndpointKind,
     pub started_at: SystemTime,
     started_instant: Instant,
+    pub first_upstream_event_at: Option<SystemTime>,
+    pub first_output_at: Option<SystemTime>,
     pub generation_started_at: Option<SystemTime>,
     generation_started_instant: Option<Instant>,
     generation_initial_output_tokens: u64,
@@ -200,6 +206,8 @@ pub struct CompletedRequest {
     pub endpoint: EndpointKind,
     pub started_at: SystemTime,
     pub finished_at: SystemTime,
+    pub first_upstream_event_at: Option<SystemTime>,
+    pub first_output_at: Option<SystemTime>,
     pub generation_started_at: Option<SystemTime>,
     generation_started_instant: Option<Instant>,
     generation_initial_output_tokens: u64,
@@ -254,6 +262,7 @@ impl Throughput {
 
 #[derive(Debug, Clone)]
 pub struct MonitorState {
+    pub codex_connections: Option<snapshot::CodexConnections>,
     pub codex_quota: Option<CodexQuotaSnapshot>,
     pub started_at: SystemTime,
     pub uptime: Duration,
@@ -342,8 +351,27 @@ impl MonitorHandle {
 
     pub fn snapshot(&self) -> MonitorState {
         match self.store.lock() {
-            Ok(mut store) => store.snapshot(),
+            Ok(mut store) => {
+                let mut snapshot = store.snapshot();
+                snapshot.codex_connections =
+                    Some(crate::providers::codex::websocket::codex_connection_counters());
+                for (place, id) in
+                    crate::providers::codex::websocket::queued_codex_handshake_request_ids()
+                        .iter()
+                        .enumerate()
+                {
+                    if let Some(request) = snapshot
+                        .active
+                        .iter_mut()
+                        .find(|request| request.request_id == *id)
+                    {
+                        request.queue_place = u32::try_from(place + 1).ok();
+                    }
+                }
+                snapshot
+            }
             Err(_) => MonitorState {
+                codex_connections: None,
                 codex_quota: None,
                 started_at: SystemTime::now(),
                 uptime: Duration::ZERO,
@@ -419,6 +447,12 @@ impl MonitorHandle {
 
     pub fn generation_started(&self, request_id: impl Into<String>) {
         self.publish(MonitorEvent::GenerationStarted {
+            request_id: request_id.into(),
+        });
+    }
+
+    pub fn first_output(&self, request_id: impl Into<String>) {
+        self.publish(MonitorEvent::FirstOutput {
             request_id: request_id.into(),
         });
     }
@@ -849,6 +883,8 @@ mod tests {
             endpoint: EndpointKind::Messages,
             started_at: SystemTime::UNIX_EPOCH,
             finished_at: SystemTime::UNIX_EPOCH + latency,
+            first_upstream_event_at: None,
+            first_output_at: None,
             generation_started_at: generation_duration.map(|_| SystemTime::UNIX_EPOCH),
             generation_started_instant: None,
             generation_initial_output_tokens: 0,

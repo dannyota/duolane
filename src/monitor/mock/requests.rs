@@ -185,6 +185,7 @@ pub(super) fn active_request(
     status: RequestStatus,
 ) -> ActiveRequest {
     ActiveRequest {
+        queue_place: None,
         request_id: request_id.to_string(),
         session_id: session_id.map(str::to_string),
         session_seq,
@@ -196,6 +197,8 @@ pub(super) fn active_request(
         endpoint,
         started_at: now - elapsed,
         started_instant: instant_now - elapsed,
+        first_upstream_event_at: None,
+        first_output_at: None,
         generation_started_at: None,
         generation_started_instant: None,
         generation_initial_output_tokens: 0,
@@ -236,6 +239,8 @@ pub(super) fn completed_request(
         endpoint,
         started_at: finished_at - latency,
         finished_at,
+        first_upstream_event_at: None,
+        first_output_at: None,
         generation_started_at: None,
         generation_started_instant: None,
         generation_initial_output_tokens: 0,

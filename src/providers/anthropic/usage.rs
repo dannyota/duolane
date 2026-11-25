@@ -58,6 +58,13 @@ struct Document<'a> {
     kind: Option<&'a str>,
     usage: Option<Usage>,
     message: Option<Message>,
+    content_block: Option<ContentBlock<'a>>,
+}
+
+#[derive(Deserialize)]
+struct ContentBlock<'a> {
+    #[serde(rename = "type")]
+    kind: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -181,9 +188,6 @@ impl Observer {
     }
 
     fn dispatch(&mut self) {
-        if !may_contain_usage(&self.buffer) {
-            return;
-        }
         let mut read = 0;
         let mut write = 0;
         while read < self.buffer.len() {
@@ -202,6 +206,16 @@ impl Observer {
             read = end + 1;
         }
         if let Ok(document) = serde_json::from_slice::<Document<'_>>(&self.buffer[..write]) {
+            if document.kind == Some("content_block_delta")
+                || (document.kind == Some("content_block_start")
+                    && document
+                        .content_block
+                        .as_ref()
+                        .and_then(|block| block.kind)
+                        .is_some_and(|kind| kind == "tool_use" || kind.ends_with("_tool_use")))
+            {
+                self.monitor.first_output(&self.request_id);
+            }
             let usage = match document.kind {
                 Some("message_start") => document.message.and_then(|message| message.usage),
                 Some("message_delta") => document.usage,
@@ -258,6 +272,41 @@ impl Observer {
             self.update(usage);
             self.monitor
                 .usage_updated(&self.request_id, self.total_input(), self.output);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::monitor::EndpointKind;
+
+    #[tokio::test]
+    async fn output_events_are_observed_without_changing_bytes() {
+        for (event, output) in [
+            (r#"{"type":"message_start"}"#, false),
+            (r#"{"type":"ping"}"#, false),
+            (
+                r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}"#,
+                true,
+            ),
+            (
+                r#"{"type":"content_block_start","content_block":{"type":"tool_use"}}"#,
+                true,
+            ),
+        ] {
+            let monitor = MonitorHandle::default();
+            monitor.request_started("r", None, None, EndpointKind::Messages);
+            let bytes = Bytes::from(format!("data: {event}\n\n"));
+            let stream = futures_util::stream::iter(vec![Ok(bytes.clone())]);
+            let observed: Vec<_> = observe(stream, Some(monitor.clone()), "r".into(), true)
+                .collect()
+                .await;
+            assert_eq!(observed[0].as_ref().unwrap(), &bytes);
+            assert_eq!(
+                monitor.snapshot().active[0].first_output_at.is_some(),
+                output
+            );
         }
     }
 }

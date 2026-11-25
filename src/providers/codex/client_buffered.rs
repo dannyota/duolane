@@ -181,6 +181,8 @@ impl CodexHttpClient {
                             if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
                                 return Err(CodexError::recovery_exhausted());
                             }
+                            super::websocket_pool::HTTP_FALLBACK_COUNT
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             actual_http = true;
                             ctx.recovery_budget.begin_http_attempt();
                             let http_body = http_body.get_or_try_init(prepare_http_body).await?;

@@ -84,6 +84,7 @@ pub(super) async fn codex_websocket_request(
     } else {
         Arc::new(new_pool_entry(
             connect_with_timeout(
+                &ctx.req_id,
                 websocket_client,
                 proxy_config,
                 &ws_url,
@@ -111,6 +112,7 @@ pub(super) async fn codex_websocket_request(
         }
         entry = Arc::new(new_pool_entry(
             connect_with_timeout(
+                &ctx.req_id,
                 websocket_client,
                 proxy_config,
                 &ws_url,
@@ -139,6 +141,7 @@ pub(super) async fn codex_websocket_request(
             ctx.recovery_budget.mark_ambiguous_hosted();
             websocket_transport_error("send", &error)
         })?;
+    super::websocket_pool::record_websocket_send(used_pooled);
 
     let collected = collect_ws_events_tracked(
         &mut guard,
@@ -287,6 +290,7 @@ pub(super) struct ReadyWebSocket {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn prepare_codex_websocket(
+    request_id: &str,
     websocket_client: &reqwest::Client,
     proxy_config: &WebSocketProxyConfig,
     url: &str,
@@ -318,6 +322,7 @@ pub(super) async fn prepare_codex_websocket(
         entry
     } else {
         let stream = connect_with_timeout(
+            request_id,
             websocket_client,
             proxy_config,
             &ws_url,
@@ -441,6 +446,7 @@ pub(super) fn start_codex_websocket_events(
             }
             return;
         }
+        super::websocket_pool::record_websocket_send(used_pooled);
         let (reusable, terminal_item) = stream_ws_events(
             &mut guard,
             idle_timeout_ms,
@@ -547,6 +553,7 @@ pub(super) async fn codex_websocket_event_stream_prepared(
         Some(ready) => ready,
         None => {
             prepare_codex_websocket(
+                &ctx.req_id,
                 websocket_client,
                 proxy_config,
                 url,
@@ -735,6 +742,7 @@ mod tests {
             }
         });
         let ready = prepare_codex_websocket(
+            "",
             &test_websocket_client(),
             &WebSocketProxyConfig::direct(),
             &format!("http://{addr}/responses"),
@@ -805,6 +813,7 @@ mod tests {
             }
         });
         let mut ready = prepare_codex_websocket(
+            "",
             &test_websocket_client(),
             &WebSocketProxyConfig::direct(),
             &format!("http://{addr}/responses"),

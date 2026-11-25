@@ -194,6 +194,7 @@ impl CodexHttpClient {
             let headers = build_codex_headers(&auth, ctx, body.client_metadata.is_some())?;
             let headers = super::websocket::codex_websocket_headers(&headers);
             match super::websocket::prepare_codex_websocket(
+                &ctx.req_id,
                 &self.websocket_client,
                 &self.websocket_proxy_config,
                 &self.base_url,
@@ -251,6 +252,8 @@ impl CodexHttpClient {
                 if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
                     return Err(CodexError::recovery_exhausted());
                 }
+                super::websocket_pool::HTTP_FALLBACK_COUNT
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.stream_codex_http_events_for_owner_tracked(body, ctx, http_body)
                     .await
             }
@@ -1726,6 +1729,7 @@ mod tests {
     async fn tracked_auto_transient_upgrade_falls_back_for_both_modes() {
         use super::super::sources::{ReplayGate, SourceAttempt};
         for live in [false, true] {
+            let before = super::super::websocket::codex_connection_counters().http_fallbacks;
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let server = tokio::spawn(async move {
@@ -1783,6 +1787,10 @@ mod tests {
                 assert_eq!(response.status, 200);
             }
             server.await.unwrap();
+            assert_eq!(
+                super::super::websocket::codex_connection_counters().http_fallbacks,
+                before + 1
+            );
         }
     }
 

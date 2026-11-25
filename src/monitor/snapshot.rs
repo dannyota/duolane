@@ -69,8 +69,21 @@ impl SnapshotUpdate {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexConnections {
+    pub queued_attempts: u64,
+    pub handshakes_in_flight: u64,
+    pub handshake_spacing_ms: u64,
+    pub websocket_reused: u64,
+    pub websocket_new: u64,
+    pub http_fallbacks: u64,
+    pub origin_403: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MonitorSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_connections: Option<CodexConnections>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_quota: Option<super::CodexQuotaSnapshot>,
     pub started_at: SystemTime,
@@ -131,6 +144,7 @@ fn terminal_fields<const N: usize>(fields: [&mut Option<String>; N]) {
 impl From<MonitorState> for MonitorSnapshot {
     fn from(state: MonitorState) -> Self {
         Self {
+            codex_connections: state.codex_connections,
             codex_quota: state.codex_quota,
             started_at: state.started_at,
             snapshot_at: SystemTime::now(),
@@ -144,6 +158,8 @@ impl From<MonitorState> for MonitorSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActiveSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_place: Option<u32>,
     pub request_id: String,
     pub session_id: Option<String>,
     pub session_seq: Option<u64>,
@@ -155,6 +171,10 @@ pub struct ActiveSnapshot {
     pub effort: Option<String>,
     pub endpoint: EndpointKind,
     pub started_at: SystemTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_upstream_event_at: Option<SystemTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_output_at: Option<SystemTime>,
     pub generation_started_at: Option<SystemTime>,
     pub generation_finished_at: Option<SystemTime>,
     pub generation_duration: Option<Duration>,
@@ -183,6 +203,7 @@ impl From<ActiveRequest> for ActiveSnapshot {
         let throughput = value.rate();
         let elapsed = value.elapsed();
         Self {
+            queue_place: value.queue_place,
             request_id: value.request_id,
             session_id: value.session_id,
             session_seq: value.session_seq,
@@ -193,6 +214,8 @@ impl From<ActiveRequest> for ActiveSnapshot {
             effort: value.effort,
             endpoint: value.endpoint,
             started_at: value.started_at,
+            first_upstream_event_at: value.first_upstream_event_at,
+            first_output_at: value.first_output_at,
             generation_started_at: value.generation_started_at,
             generation_finished_at: value.generation_finished_at,
             generation_duration: value.generation_duration,
@@ -221,6 +244,10 @@ pub struct CompletedSnapshot {
     pub effort: Option<String>,
     pub endpoint: EndpointKind,
     pub started_at: SystemTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_upstream_event_at: Option<SystemTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_output_at: Option<SystemTime>,
     pub generation_started_at: Option<SystemTime>,
     pub generation_finished_at: Option<SystemTime>,
     pub generation_duration: Option<Duration>,
@@ -259,6 +286,8 @@ impl From<CompletedRequest> for CompletedSnapshot {
             effort: value.effort,
             endpoint: value.endpoint,
             started_at: value.started_at,
+            first_upstream_event_at: value.first_upstream_event_at,
+            first_output_at: value.first_output_at,
             generation_started_at: value.generation_started_at,
             generation_finished_at: value.generation_finished_at,
             generation_duration: value.generation_duration,
@@ -337,6 +366,82 @@ impl SessionSnapshot {
 mod tests {
     use super::*;
     use crate::monitor::MonitorHandle;
+
+    #[test]
+    fn codex_connections_are_optional_and_legacy_compatible() {
+        let snapshot: MonitorSnapshot = MonitorHandle::default().snapshot().into();
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        value.as_object_mut().unwrap().remove("codex_connections");
+        let decoded: MonitorSnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            serde_json::to_value(&decoded)
+                .unwrap()
+                .get("codex_connections")
+                .is_none()
+        );
+        value["codex_connections"] = serde_json::json!({
+            "queued_attempts": 2, "handshakes_in_flight": 1, "handshake_spacing_ms": 1000,
+            "websocket_reused": 4, "websocket_new": 3, "http_fallbacks": 2, "origin_403": 1
+        });
+        let decoded: MonitorSnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap()["codex_connections"],
+            value["codex_connections"]
+        );
+    }
+
+    #[test]
+    fn queue_place_is_optional_and_legacy_compatible() {
+        let monitor = MonitorHandle::default();
+        monitor.request_started("active", None, None, EndpointKind::Messages);
+        let mut value = serde_json::to_value(MonitorSnapshot::from(monitor.snapshot())).unwrap();
+        assert!(value["active"][0].get("queue_place").is_none());
+        value["active"][0]["queue_place"] = serde_json::json!(2);
+        let decoded: MonitorSnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(decoded.active[0].queue_place, Some(2));
+        value["active"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("queue_place");
+        let decoded: MonitorSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.active[0].queue_place, None);
+    }
+
+    #[test]
+    fn absent_phase_times_remain_compatible_with_legacy_snapshots() {
+        let monitor = MonitorHandle::default();
+        monitor.request_started("active", None, None, EndpointKind::Messages);
+        monitor.request_started("done", None, None, EndpointKind::Messages);
+        monitor.request_completed("done", 200, None, None);
+        let value = serde_json::to_value(MonitorSnapshot::from(monitor.snapshot())).unwrap();
+        for request in [&value["active"][0], &value["recent"][0]] {
+            assert!(request.get("first_upstream_event_at").is_none());
+            assert!(request.get("first_output_at").is_none());
+        }
+        let decoded: MonitorSnapshot = serde_json::from_value(value).unwrap();
+        assert!(decoded.active[0].first_output_at.is_none());
+        assert!(decoded.recent[0].first_upstream_event_at.is_none());
+    }
+
+    #[test]
+    fn first_upstream_event_survives_generation_restart() {
+        let monitor = MonitorHandle::default();
+        monitor.request_started("retry", None, None, EndpointKind::Messages);
+        monitor.generation_started("retry");
+        let first = serde_json::to_value(MonitorSnapshot::from(monitor.snapshot())).unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        monitor.generation_started("retry");
+        let second = serde_json::to_value(MonitorSnapshot::from(monitor.snapshot())).unwrap();
+        assert!(!first["active"][0]["first_upstream_event_at"].is_null());
+        assert_eq!(
+            first["active"][0]["first_upstream_event_at"],
+            second["active"][0]["first_upstream_event_at"]
+        );
+        assert_ne!(
+            first["active"][0]["generation_started_at"],
+            second["active"][0]["generation_started_at"]
+        );
+    }
 
     #[test]
     fn completed_source_round_trips_and_legacy_snapshot_defaults() {

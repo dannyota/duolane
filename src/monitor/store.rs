@@ -56,6 +56,7 @@ impl MonitorStore {
                 self.active.insert(
                     request_id.clone(),
                     ActiveRequest {
+                        queue_place: None,
                         request_id,
                         session_id,
                         session_seq,
@@ -67,6 +68,8 @@ impl MonitorStore {
                         endpoint,
                         started_at: SystemTime::now(),
                         started_instant: Instant::now(),
+                        first_upstream_event_at: None,
+                        first_output_at: None,
                         generation_started_at: None,
                         generation_started_instant: None,
                         generation_initial_output_tokens: 0,
@@ -132,11 +135,18 @@ impl MonitorStore {
             }
             MonitorEvent::GenerationStarted { request_id } => {
                 if let Some(active) = self.active.get_mut(&request_id) {
-                    active.generation_started_at = Some(SystemTime::now());
+                    let now = SystemTime::now();
+                    active.first_upstream_event_at.get_or_insert(now);
+                    active.generation_started_at = Some(now);
                     active.generation_started_instant = Some(Instant::now());
                     active.generation_initial_output_tokens = active.output_tokens.unwrap_or(0);
                     active.generation_finished_at = None;
                     active.generation_duration = None;
+                }
+            }
+            MonitorEvent::FirstOutput { request_id } => {
+                if let Some(active) = self.active.get_mut(&request_id) {
+                    active.first_output_at.get_or_insert_with(SystemTime::now);
                 }
             }
             MonitorEvent::TrafficCapturePath { request_id, path } => {
@@ -341,6 +351,7 @@ impl MonitorStore {
             .active
             .remove(request_id)
             .unwrap_or_else(|| ActiveRequest {
+                queue_place: None,
                 request_id: request_id.to_string(),
                 session_id: None,
                 session_seq: None,
@@ -352,6 +363,8 @@ impl MonitorStore {
                 endpoint: EndpointKind::Messages,
                 started_at: SystemTime::now(),
                 started_instant: Instant::now(),
+                first_upstream_event_at: None,
+                first_output_at: None,
                 generation_started_at: None,
                 generation_started_instant: None,
                 generation_initial_output_tokens: 0,
@@ -391,6 +404,8 @@ impl MonitorStore {
             endpoint: active.endpoint,
             started_at: active.started_at,
             finished_at: SystemTime::now(),
+            first_upstream_event_at: active.first_upstream_event_at,
+            first_output_at: active.first_output_at,
             generation_started_at: active.generation_started_at,
             generation_started_instant: active.generation_started_instant,
             generation_initial_output_tokens: active.generation_initial_output_tokens,
@@ -508,6 +523,7 @@ impl MonitorStore {
             now,
         );
         MonitorState {
+            codex_connections: None,
             codex_quota: self.quota.snapshot.clone(),
             started_at: self.started_at,
             uptime: self.started_instant.elapsed(),
