@@ -20,6 +20,8 @@ mod client_sse;
 mod client_test_support;
 pub mod compaction;
 pub mod continuation;
+#[cfg(test)]
+mod continuation_record;
 pub mod count_tokens;
 mod error_response;
 pub(crate) mod events;
