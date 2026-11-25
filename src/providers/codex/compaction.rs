@@ -66,6 +66,15 @@ struct CompactionRegistry {
 static REGISTRY: Mutex<Option<CompactionRegistry>> = Mutex::new(None);
 static NEXT_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
+type TestPause = (
+    crate::request_identity::ConversationIdentity,
+    std::sync::Arc<tokio::sync::Notify>,
+    std::sync::Arc<tokio::sync::Notify>,
+);
+#[cfg(test)]
+pub(super) static TEST_PAUSE: Mutex<Option<TestPause>> = Mutex::new(None);
+
 pub async fn request_compaction(
     client: &CodexHttpClient,
     request: &ResponsesRequest,
@@ -103,6 +112,20 @@ pub(super) async fn request_compaction_for_turn(
         .collect();
     compaction_request.include = Some(vec!["reasoning.encrypted_content".to_string()]);
 
+    let pooled = owner.map(super::websocket::snapshot_codex_websocket_pool);
+    #[cfg(test)]
+    {
+        let pause = TEST_PAUSE
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|(key, _, _)| Some(key) == owner);
+        if let Some((_, started, resume)) = pause {
+            started.notify_one();
+            resume.notified().await;
+        }
+    }
+
     let response = client
         .post_codex_for_owner(
             &compaction_request,
@@ -114,9 +137,9 @@ pub(super) async fn request_compaction_for_turn(
         .await
         .inspect_err(|error| {
             if error.detail.as_deref() == Some(super::client::CODEX_ACCOUNT_CHANGED_DETAIL)
-                && let Some(owner) = owner
+                && let (Some(owner), Some(pooled)) = (owner, pooled.as_ref())
             {
-                super::websocket::invalidate_codex_websocket_pool_owner(owner);
+                super::websocket::invalidate_codex_websocket_pool_snapshot(owner, pooled);
             }
         })
         .map_err(CompactionError::Upstream)?;

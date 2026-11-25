@@ -209,6 +209,28 @@ pub(crate) fn pooled_socket_id_for_tests(owner: &ConversationIdentity) -> Option
         .map(|(_, entry)| entry.socket_id)
 }
 
+pub(super) fn snapshot_codex_websocket_pool(owner: &ConversationIdentity) -> Vec<u64> {
+    WS_POOL
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|((pooled_owner, _, _), _)| pooled_owner == owner)
+        .map(|(_, entry)| entry.return_id.load(Ordering::Relaxed))
+        .collect()
+}
+
+pub(super) fn invalidate_codex_websocket_pool_snapshot(
+    owner: &ConversationIdentity,
+    return_ids: &[u64],
+) {
+    WS_POOL
+        .lock()
+        .unwrap()
+        .retain(|(pooled_owner, _, _), entry| {
+            pooled_owner != owner || !return_ids.contains(&entry.return_id.load(Ordering::Relaxed))
+        });
+}
+
 pub fn invalidate_codex_websocket_pool_owner(owner: &ConversationIdentity) {
     let mut guard = WS_POOL.lock().unwrap();
     guard.retain(|(pooled_owner, _, _), _| pooled_owner != owner);
