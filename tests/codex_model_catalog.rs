@@ -445,7 +445,7 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(body["model"], "gpt-6.1-sol");
+    assert_eq!(body["model"], "gpt-6.2-sol");
     assert!(!headers.contains_key("x-openai-internal-codex-responses-lite"));
     for model in catalog["models"].as_array_mut().unwrap() {
         if model["slug"] == "gpt-6.2-luna" {
@@ -554,6 +554,27 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
     assert_eq!(body["model"], "gpt-6.1-sol");
     assert_eq!(body["temperature"], 0.2);
     assert!(!headers.contains_key("x-openai-internal-codex-responses-lite"));
+    assert!(body.get("client_metadata").is_none());
+    assert!(body["reasoning"].get("context").is_none());
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"codex":{"fullLane":false}}"#,
+    )
+    .unwrap();
+    let response = client
+        .post(format!("{url}/v1/chat/completions"))
+        .json(&json!({"model":"sol","messages":[{"role":"user","content":"synthetic"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let (headers, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(headers.contains_key("x-openai-internal-codex-responses-lite"));
+    assert_eq!(body["client_metadata"]["lite"], "true");
+    assert_eq!(body["reasoning"]["context"], "all_turns");
     assert!(rx.try_recv().is_err());
     upstream_task.abort();
 }

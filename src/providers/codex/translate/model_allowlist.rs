@@ -389,7 +389,9 @@ fn full_lane_web_search_model_in(
             let catalog: Vec<_> = catalog()
                 .into_iter()
                 .filter(|entry| {
-                    !entry.use_responses_lite || ALLOWED_MODELS.contains(&entry.slug.as_str())
+                    !entry.use_responses_lite
+                        || ALLOWED_MODELS.contains(&entry.slug.as_str())
+                        || FULL_LANE_MODELS.contains(&entry.slug.as_str())
                 })
                 .collect();
             if ALLOWED_MODELS.contains(&sibling.as_str())
@@ -462,6 +464,26 @@ mod tests {
         assert_eq!(
             full_lane_web_search_model_in(&resolved, Vec::new),
             "gpt-6.1-sol"
+        );
+    }
+
+    #[test]
+    fn web_search_uses_known_full_lane_sibling_marked_lite() {
+        let catalog: Vec<_> = ["gpt-6.2-luna", "gpt-6.2-sol"]
+            .into_iter()
+            .map(|slug| CatalogModel {
+                slug: slug.to_string(),
+                use_responses_lite: true,
+                supported_in_api: true,
+                listed: true,
+                priority: None,
+                display_name: None,
+            })
+            .collect();
+        let resolved = resolve_family_in("luna", &catalog).unwrap();
+        assert_eq!(
+            full_lane_web_search_model_in(&resolved, || catalog),
+            "gpt-6.2-sol"
         );
     }
 
