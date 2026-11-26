@@ -33,6 +33,14 @@ async fn shutdown_signal_setup_and_receive_preserve_io_results() {
     assert_io_future(&receive);
 }
 
+#[cfg(unix)]
+#[test]
+fn shutdown_handles_hangup_and_termination() {
+    let signals = shutdown_signal_kinds();
+    assert!(signals.contains(&tokio::signal::unix::SignalKind::hangup()));
+    assert!(signals.contains(&tokio::signal::unix::SignalKind::terminate()));
+}
+
 #[test]
 fn monitor_token_travels_only_to_loopback_or_https() {
     for (url, expected) in [

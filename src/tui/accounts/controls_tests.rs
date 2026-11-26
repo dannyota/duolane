@@ -223,6 +223,17 @@ mod local {
     }
 
     #[test]
+    fn shutdown_cancels_scheduled_handoff() {
+        let mut app = crate::tui::mouse_tests::app_for_accounts_test(accounts());
+        app.accounts.action_key('l');
+        show(&mut app.accounts);
+        app.accounts
+            .confirm_action_with(roster(&["default", "backup", "work"], "work"), never);
+        app.begin_shutdown();
+        assert!(app.accounts.take_handoff().is_none());
+    }
+
+    #[test]
     fn long_unicode_account_does_not_block_confirmation() {
         let mut accounts = accounts();
         accounts.action_key('l');

@@ -113,6 +113,17 @@ fn retry_hint(
     }
 }
 
+fn switch_identity(
+    expected: Option<&str>,
+    save: impl FnOnce(bool) -> Result<Option<String>>,
+) -> Result<Option<String>> {
+    let identity = save(expected.is_some())?;
+    if expected.is_some() {
+        anyhow::ensure!(identity.is_some(), "profile identity unknown");
+    }
+    Ok(identity)
+}
+
 pub fn switch(
     name: Option<String>,
     next: bool,
@@ -163,24 +174,29 @@ pub fn switch(
         None => roster::entries(&profiles)?,
     };
     let summary = roster::describe(&entries, &target).0;
-    let identity = save_selection_identity(&target, Some(&current), expected.as_deref(), true)?
-        .context("profile identity unknown")?;
+    let identity = switch_identity(expected.as_deref(), |required| {
+        save_selection_identity(&target, Some(&current), expected.as_deref(), required)
+    })?;
     match summary {
         Some(summary) => println!("Switched to {target} ({summary})."),
         None => println!("Switched to {target}."),
     }
     std::io::stdout().flush()?;
     let (arguments, continued) = launch_arguments(args);
-    crate::intercept::run_claude(arguments, Some((&target, Some(&identity)))).with_context(|| {
-        let matches =
-            monitor_roster().is_ok_and(|roster| roster.identities.get(&target) == Some(&identity));
-        retry_hint(&target, continued, current_selection(), matches)
-    })
+    crate::intercept::run_claude(arguments, Some((&target, identity.as_deref()))).with_context(
+        || {
+            let matches = identity.as_ref().is_none_or(|identity| {
+                monitor_roster()
+                    .is_ok_and(|roster| roster.identities.get(&target) == Some(identity))
+            });
+            retry_hint(&target, continued, current_selection(), matches)
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{launch_arguments, retry_hint};
+    use super::{launch_arguments, retry_hint, switch_identity};
     use std::ffi::OsString;
 
     fn run(args: &[&str]) -> Vec<String> {
@@ -189,6 +205,18 @@ mod tests {
             .into_iter()
             .map(|arg| arg.into_string().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn unknown_identity_only_blocks_expected_switch() {
+        let save = |required| {
+            if required {
+                anyhow::bail!("profile identity unknown")
+            }
+            Ok(None)
+        };
+        assert!(switch_identity(None, save).is_ok());
+        assert!(switch_identity(Some("known"), save).is_err());
     }
 
     #[test]

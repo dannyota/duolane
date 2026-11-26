@@ -467,17 +467,29 @@ async fn run_service(config: ServerConfig, registry: std::sync::Arc<Registry>) -
 }
 
 #[cfg(unix)]
+fn shutdown_signal_kinds() -> [tokio::signal::unix::SignalKind; 3] {
+    [
+        tokio::signal::unix::SignalKind::interrupt(),
+        tokio::signal::unix::SignalKind::terminate(),
+        tokio::signal::unix::SignalKind::hangup(),
+    ]
+}
+
+#[cfg(unix)]
 struct ServiceShutdownSignals {
     interrupt: tokio::signal::unix::Signal,
     terminate: tokio::signal::unix::Signal,
+    hangup: tokio::signal::unix::Signal,
 }
 
 #[cfg(unix)]
 impl ServiceShutdownSignals {
     fn new() -> std::io::Result<Self> {
+        let [interrupt, terminate, hangup] = shutdown_signal_kinds();
         Ok(Self {
-            interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?,
-            terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
+            interrupt: tokio::signal::unix::signal(interrupt)?,
+            terminate: tokio::signal::unix::signal(terminate)?,
+            hangup: tokio::signal::unix::signal(hangup)?,
         })
     }
 
@@ -485,6 +497,7 @@ impl ServiceShutdownSignals {
         tokio::select! {
             _ = self.interrupt.recv() => Ok(()),
             _ = self.terminate.recv() => Ok(()),
+            _ = self.hangup.recv() => Ok(()),
         }
     }
 }

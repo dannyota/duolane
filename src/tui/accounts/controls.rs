@@ -302,6 +302,7 @@ impl Accounts {
     }
 
     pub(in crate::tui) fn stop_action(&mut self) {
+        self.controls.handoff = None;
         self.controls.runner.stop();
     }
 

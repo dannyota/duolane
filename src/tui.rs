@@ -237,7 +237,6 @@ fn run_monitor_events(
 ) -> Result<MonitorExit, anyhow::Error> {
     loop {
         if signal.load(std::sync::atomic::Ordering::Acquire) {
-            app.accounts.stop_action();
             app.begin_shutdown();
         }
         app.accounts.refresh_if_due();
@@ -380,6 +379,7 @@ impl MonitorApp {
             return;
         }
         self.phase = MonitorPhase::ShuttingDown;
+        self.accounts.stop_action();
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
