@@ -203,7 +203,7 @@ fn active_rows_do_not_change_layout_when_session_detail_is_open() {
         let mut before = MouseTargets::default();
         let screen = draw(160, 25, |frame| before = render(frame, &mut app, &state));
         let summary = placeholder_position(&screen, "Connections").is_some();
-        assert_eq!(summary, height == 3);
+        assert!(summary);
         state.active.push(active.clone());
         let mut after = MouseTargets::default();
         let screen = draw(160, 25, |frame| after = render(frame, &mut app, &state));
@@ -213,6 +213,48 @@ fn active_rows_do_not_change_layout_when_session_detail_is_open() {
             placeholder_position(&screen, "Connections").is_some()
         );
         state.active.clear();
+    }
+    state.recent.clear();
+    let screen = draw(160, 25, |frame| render(frame, &mut app, &state));
+    assert!(placeholder_position(&screen, "Connections").is_some());
+}
+
+#[test]
+fn dragging_active_border_keeps_summary_visible_with_session_detail() {
+    let mut state: MonitorSnapshot = mock_state().into();
+    state.active.clear();
+    state.recent.truncate(1);
+    state.recent[0].status = crate::monitor::RequestStatus::Completed;
+    state.recent[0].http_status = Some(200);
+    state.recent[0].error = None;
+    state.recent[0].retry_requested = false;
+    let mut app = app();
+    app.detail = Some(DetailView::Session(DetailSelection::Keyboard));
+    app.active_resize.height = 3;
+    let mut hits = MouseTargets::default();
+    let screen = draw(160, 25, |frame| hits = render(frame, &mut app, &state));
+    assert!(placeholder_position(&screen, "Connections").is_some());
+    assert_eq!(
+        placeholder_position(&screen, "Recent requests").unwrap().1,
+        19
+    );
+    app.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 18),
+        &state,
+        &hits,
+    );
+    for row in 19..=21 {
+        app.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), row),
+            &state,
+            &hits,
+        );
+        let screen = draw(160, 25, |frame| hits = render(frame, &mut app, &state));
+        assert!(placeholder_position(&screen, "Connections").is_some());
+        assert_eq!(
+            placeholder_position(&screen, "Recent requests").unwrap().1 - 1,
+            row.min(19)
+        );
     }
 }
 

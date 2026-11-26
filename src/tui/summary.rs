@@ -190,10 +190,7 @@ pub(super) fn layout(
     let detail_min = detail_height.min(body.height.saturating_sub(14).max(body.height.min(10)));
     let requested_summary = summary::height(body.width);
     let reserve = if detail_open {
-        detail_min
-            .saturating_add(chosen_active_height)
-            .saturating_add(u16::from(!state.recent.is_empty()) * 4)
-            .saturating_add(1)
+        detail_min.saturating_add(3 + 4 + 1)
     } else {
         0
     };
