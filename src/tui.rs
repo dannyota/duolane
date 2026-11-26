@@ -12,6 +12,9 @@ mod overlay;
 mod overview_tests;
 #[cfg(test)]
 mod phase_tests;
+mod pointer;
+#[cfg(test)]
+mod pointer_tests;
 mod request_phases;
 mod requests;
 mod sessions;
@@ -161,6 +164,7 @@ fn run_monitor_loop(
     mut snapshot: impl FnMut() -> SnapshotUpdate,
     config: UiSession,
 ) -> Result<MonitorExit, anyhow::Error> {
+    let pointer_supported = pointer::supported(&paths::environment_snapshot());
     let (_guard, mut terminal) = setup_terminal()?;
     let mut app = MonitorApp {
         accounts: accounts::Accounts::new(config.local_accounts),
@@ -180,6 +184,7 @@ fn run_monitor_loop(
         shutdown_complete: config.shutdown_complete,
     };
 
+    app.active_resize.pointer = pointer::Pointer::new(pointer_supported);
     app.accounts.enter();
     app.accounts.refresh_limits();
     let run_result = run_monitor_events(&mut terminal, &mut snapshot, &mut app);
@@ -191,8 +196,10 @@ fn run_monitor_loop(
         });
         app.wait_for_shutdown_completion();
     }
+    let pointer_result = app.active_resize.pointer.reset(terminal.backend_mut());
     let cursor_result = terminal.show_cursor();
     let exit = run_result?;
+    pointer_result?;
     cursor_result?;
     Ok(exit)
 }
@@ -230,9 +237,10 @@ fn run_monitor_events(
                     }
                 }
                 Event::Mouse(mouse) => {
-                    if let Some(exit) =
-                        app.handle_mouse_query(mouse, state, &targets, crossterm::terminal::size)
-                    {
+                    let exit =
+                        app.handle_mouse_query(mouse, state, &targets, crossterm::terminal::size);
+                    app.update_pointer(terminal.backend_mut(), mouse, &targets)?;
+                    if let Some(exit) = exit {
                         return Ok(exit);
                     }
                 }

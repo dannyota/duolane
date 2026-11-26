@@ -26,6 +26,7 @@ pub(super) enum MouseTarget {
 pub(super) struct ActiveResize {
     pub(super) height: u16,
     dragging: bool,
+    pub(super) pointer: super::pointer::Pointer,
 }
 
 impl Default for ActiveResize {
@@ -33,6 +34,7 @@ impl Default for ActiveResize {
         Self {
             height: 10,
             dragging: false,
+            pointer: Default::default(),
         }
     }
 }
@@ -48,6 +50,15 @@ pub(super) struct MouseTargets {
 }
 
 impl MouseTargets {
+    fn active_border(&self, column: u16, row: u16) -> bool {
+        self.active.is_some_and(|(active, _)| {
+            active.height >= 2
+                && row == active.y + active.height - 1
+                && column >= active.x
+                && column < active.right()
+        })
+    }
+
     pub(super) fn key(&self, column: u16, row: u16) -> Option<crossterm::event::KeyCode> {
         self.keys
             .iter()
@@ -99,6 +110,22 @@ pub(super) fn render_clickable_table(
 }
 
 impl super::MonitorApp {
+    pub(super) fn update_pointer(
+        &mut self,
+        writer: &mut impl std::io::Write,
+        mouse: MouseEvent,
+        targets: &MouseTargets,
+    ) -> std::io::Result<()> {
+        let available = !self.show_help
+            && !self.show_setup
+            && !self.accounts.confirming()
+            && self.phase == MonitorPhase::Running
+            && !self.usage_open;
+        let resize = self.active_resize.dragging
+            || available && targets.active_border(mouse.column, mouse.row);
+        self.active_resize.pointer.update(writer, resize)
+    }
+
     pub(super) fn handle_mouse_query(
         &mut self,
         mouse: MouseEvent,
@@ -180,12 +207,7 @@ impl super::MonitorApp {
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
             return None;
         }
-        if let Some((active, _)) = targets.active
-            && active.height >= 2
-            && mouse.row == active.y + active.height - 1
-            && mouse.column >= active.x
-            && mouse.column < active.right()
-        {
+        if targets.active_border(mouse.column, mouse.row) {
             self.active_resize.dragging = true;
             return None;
         }

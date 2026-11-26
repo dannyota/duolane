@@ -85,6 +85,14 @@ Events.
   lines and leaves Recent requests at least 3; a smaller terminal shrinks it to
   fit without forgetting the chosen height. Any other click on that border does
   nothing.
+- In Ghostty, Kitty, foot, and WezTerm the pointer shows `ns-resize` while it is
+  over that border or dragging it, through
+  [OSC 22](https://ghostty.org/docs/vt/osc/22), and returns to `default` when it
+  leaves, when a drag ends off the border, and when the monitor stops drawing.
+  The terminal is recognized from `TERM_PROGRAM` (`ghostty`, `WezTerm`) or
+  `TERM` (`xterm-ghostty`, `xterm-kitty`, `foot`, `foot-extra`); any other
+  terminal, including one inside tmux or screen, gets no sequence, because
+  terminals disagree on shape names and some print what they do not parse.
 - Sessions shows a Queue count after the active count. The row for requests
   without a session counts them too.
 - Below the expanded width the summary cells stack, each one full-width line
