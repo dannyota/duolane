@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.11.0
+
+### Changed
+
+- `/v1/messages` uses the full Responses lane by default for the built-in models
+  known to exist there, so they can call several tools at once. `gpt-6.2-sol`
+  and `gpt-6.2-astra` join that list, and the `sol`, `astra`, and `terra`
+  aliases follow it. `codex.fullLane: false` or `DUOLANE_CODEX_FULL_LANE=off`
+  turns it off. Chat Completions and native Responses keep Lite unless the full
+  lane is set.
+- The Codex base instructions are also sent on the full lane, before Claude
+  Code's system prompt, as the Codex client sends them.
+- A pooled WebSocket that returned less than 10 seconds ago is reused without a
+  ping round trip; a socket the server already closed is still caught before the
+  send.
+
+### Fixed
+
+- Chat Completions sends Lite-only fields only on Lite, and a Luna hosted search
+  moves to a known full-lane model.
+
 ## 0.10.0
 
 ### Changed
