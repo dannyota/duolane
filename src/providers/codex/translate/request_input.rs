@@ -11,7 +11,7 @@ use crate::providers::translate_shared::wrap_reasoning;
 use serde_json::Value;
 use std::collections::HashSet;
 
-pub(super) fn build_input(
+pub(in crate::providers::codex) fn build_input(
     req: &MessagesRequest,
     account: &ReasoningAccount,
 ) -> Vec<ResponsesInputItem> {

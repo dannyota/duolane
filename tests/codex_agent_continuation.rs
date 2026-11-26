@@ -453,9 +453,15 @@ impl InstrumentedUpstream {
             .collect::<Vec<_>>();
         expected_probe_sites.sort_unstable();
         actual_probe_sites.sort_unstable();
-        assert_eq!(
-            actual_probe_sites, expected_probe_sites,
-            "each successful pooled reuse must have one probe at its exact socket-local request boundary: {probes:?}"
+        assert!(
+            actual_probe_sites
+                .iter()
+                .all(|site| expected_probe_sites.binary_search(site).is_ok()),
+            "pooled validation probes must precede reuse at the socket-local request boundary: {probes:?}"
+        );
+        assert!(
+            actual_probe_sites.is_empty(),
+            "recently returned sockets must not receive validation probes: {probes:?}"
         );
         let unique = probes
             .iter()
@@ -665,6 +671,7 @@ async fn emit_completion(
             "response": {
                 "id": response_id,
                 "status": "completed",
+                "output": [{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}],
                 "usage": {"input_tokens": 5, "output_tokens": 2}
             }
         }),
@@ -715,6 +722,7 @@ async fn emit_function_call(
             "response": {
                 "id": response_id,
                 "status": "completed",
+                "output": [{"type":"function_call", "call_id":call.call_id, "name":call.name, "arguments":call.arguments}],
                 "usage": {"input_tokens": 5, "output_tokens": 2}
             }
         }),
@@ -1047,7 +1055,7 @@ async fn main_child_and_nested_child_interleave_independent_continuations() {
 
     let main_first = harness
         .round_trip(
-            messages_body(false, vec![message("user", &m1)]),
+            messages_body(true, vec![message("user", &m1)]),
             main.clone(),
             &m1,
             &resp_m1,
@@ -1056,7 +1064,7 @@ async fn main_child_and_nested_child_interleave_independent_continuations() {
         .await;
     let child_first = harness
         .round_trip(
-            messages_body(false, vec![message("user", &a1)]),
+            messages_body(true, vec![message("user", &a1)]),
             child.clone(),
             &a1,
             &resp_a1,
@@ -1065,7 +1073,7 @@ async fn main_child_and_nested_child_interleave_independent_continuations() {
         .await;
     let nested_first = harness
         .round_trip(
-            messages_body(false, vec![message("user", &n1)]),
+            messages_body(true, vec![message("user", &n1)]),
             nested.clone(),
             &n1,
             &resp_n1,
@@ -1083,7 +1091,7 @@ async fn main_child_and_nested_child_interleave_independent_continuations() {
     let main_second = harness
         .round_trip(
             messages_body(
-                false,
+                true,
                 vec![
                     message("user", &m1),
                     message("assistant", &rm1),
@@ -1099,7 +1107,7 @@ async fn main_child_and_nested_child_interleave_independent_continuations() {
     let nested_second = harness
         .round_trip(
             messages_body(
-                false,
+                true,
                 vec![
                     message("user", &n1),
                     message("assistant", &rn1),
@@ -1115,7 +1123,7 @@ async fn main_child_and_nested_child_interleave_independent_continuations() {
     let child_second = harness
         .round_trip(
             messages_body(
-                false,
+                true,
                 vec![
                     message("user", &a1),
                     message("assistant", &ra1),
@@ -1154,7 +1162,7 @@ async fn compatible_prefix_sibling_cannot_steal_owner_continuation() {
 
     let first = harness
         .round_trip(
-            messages_body(false, vec![message("user", &a1)]),
+            messages_body(true, vec![message("user", &a1)]),
             a_headers.clone(),
             &a1,
             &resp_a1,
@@ -1164,7 +1172,7 @@ async fn compatible_prefix_sibling_cannot_steal_owner_continuation() {
     let sibling_attack = harness
         .round_trip(
             messages_body(
-                false,
+                true,
                 vec![
                     message("user", &a1),
                     message("assistant", &a_reply),
@@ -1180,7 +1188,7 @@ async fn compatible_prefix_sibling_cannot_steal_owner_continuation() {
     let second = harness
         .round_trip(
             messages_body(
-                false,
+                true,
                 vec![
                     message("user", &a1),
                     message("assistant", &a_reply),
@@ -1227,7 +1235,7 @@ async fn divergent_siblings_retain_their_own_response_and_socket() {
 
     let a_first = harness
         .round_trip(
-            messages_body(false, vec![message("user", &a1)]),
+            messages_body(true, vec![message("user", &a1)]),
             a_headers.clone(),
             &a1,
             &a_resp,
@@ -1236,7 +1244,7 @@ async fn divergent_siblings_retain_their_own_response_and_socket() {
         .await;
     let b_first = harness
         .round_trip(
-            messages_body(false, vec![message("user", &b1)]),
+            messages_body(true, vec![message("user", &b1)]),
             b_headers.clone(),
             &b1,
             &b_resp,
@@ -1246,7 +1254,7 @@ async fn divergent_siblings_retain_their_own_response_and_socket() {
     let a_second = harness
         .round_trip(
             messages_body(
-                false,
+                true,
                 vec![
                     message("user", &a1),
                     message("assistant", &ar1),
@@ -1262,7 +1270,7 @@ async fn divergent_siblings_retain_their_own_response_and_socket() {
     let b_second = harness
         .round_trip(
             messages_body(
-                false,
+                true,
                 vec![
                     message("user", &b1),
                     message("assistant", &br1),
@@ -1309,7 +1317,7 @@ async fn same_agent_id_in_different_sessions_is_independent() {
 
     let one_first = harness
         .round_trip(
-            messages_body(false, vec![message("user", &one1)]),
+            messages_body(true, vec![message("user", &one1)]),
             one_headers.clone(),
             &one1,
             &one_response,
@@ -1318,7 +1326,7 @@ async fn same_agent_id_in_different_sessions_is_independent() {
         .await;
     let two_first = harness
         .round_trip(
-            messages_body(false, vec![message("user", &two1)]),
+            messages_body(true, vec![message("user", &two1)]),
             two_headers.clone(),
             &two1,
             &two_response,
@@ -1331,7 +1339,7 @@ async fn same_agent_id_in_different_sessions_is_independent() {
     let one_second = harness
         .round_trip(
             messages_body(
-                false,
+                true,
                 vec![
                     message("user", &one1),
                     message("assistant", &one_reply),
@@ -1347,7 +1355,7 @@ async fn same_agent_id_in_different_sessions_is_independent() {
     let two_second = harness
         .round_trip(
             messages_body(
-                false,
+                true,
                 vec![
                     message("user", &two1),
                     message("assistant", &two_reply),
@@ -1398,7 +1406,7 @@ async fn malformed_identity_sandwich_is_stateless_and_preserves_main() {
 
     let main_first = harness
         .round_trip(
-            messages_body(false, vec![message("user", &main1)]),
+            messages_body(true, vec![message("user", &main1)]),
             main_headers.clone(),
             &main1,
             &main_response,
@@ -1407,7 +1415,7 @@ async fn malformed_identity_sandwich_is_stateless_and_preserves_main() {
         .await;
     let malformed_first = harness
         .round_trip(
-            messages_body(false, vec![message("user", &malformed1)]),
+            messages_body(true, vec![message("user", &malformed1)]),
             malformed_headers.clone(),
             &malformed1,
             &tagged(&case, "resp-malformed-1"),
@@ -1417,7 +1425,7 @@ async fn malformed_identity_sandwich_is_stateless_and_preserves_main() {
     let malformed_second = harness
         .round_trip(
             messages_body(
-                false,
+                true,
                 vec![
                     message("user", &malformed1),
                     message("assistant", &malformed_reply),
@@ -1432,7 +1440,7 @@ async fn malformed_identity_sandwich_is_stateless_and_preserves_main() {
         .await;
     let control_request = harness
         .round_trip(
-            messages_body(false, vec![message("user", &control)]),
+            messages_body(true, vec![message("user", &control)]),
             no_identity,
             &control,
             &tagged(&case, "resp-control"),
@@ -1442,7 +1450,7 @@ async fn malformed_identity_sandwich_is_stateless_and_preserves_main() {
     let main_second = harness
         .round_trip(
             messages_body(
-                false,
+                true,
                 vec![
                     message("user", &main1),
                     message("assistant", &main_reply),
@@ -1502,7 +1510,7 @@ async fn auto_review_with_agent_headers_is_stateless() {
 
     let first = harness
         .round_trip(
-            messages_body(false, vec![message("user", &a1)]),
+            messages_body(true, vec![message("user", &a1)]),
             headers.clone(),
             &a1,
             &a_response,
@@ -1531,7 +1539,7 @@ async fn auto_review_with_agent_headers_is_stateless() {
     let second = harness
         .round_trip(
             messages_body(
-                false,
+                true,
                 vec![
                     message("user", &a1),
                     message("assistant", &a_reply),
@@ -1567,14 +1575,10 @@ async fn missing_and_dead_origin_retry_full_context_once_and_republish_for_both_
     let mut harness = TestHarness::start().await;
     let case = unique("origin-recovery");
 
-    for (index, (origin, delivery, stream)) in [
-        ("missing", "buffered", false),
-        ("missing", "streaming", true),
-        ("dead", "buffered", false),
-        ("dead", "streaming", true),
-    ]
-    .into_iter()
-    .enumerate()
+    for (index, (origin, delivery, stream)) in
+        [("missing", "streaming", true), ("dead", "streaming", true)]
+            .into_iter()
+            .enumerate()
     {
         let label = format!("{origin}-{delivery}");
         let session = tagged(&case, &format!("{label}-session"));
@@ -1821,7 +1825,7 @@ async fn same_owner_stale_completion_cannot_overwrite_newer_turn() {
 
     let baseline = harness
         .round_trip(
-            messages_body(false, vec![message("user", &base)]),
+            messages_body(true, vec![message("user", &base)]),
             headers.clone(),
             &base,
             &base_response,
@@ -1833,7 +1837,7 @@ async fn same_owner_stale_completion_cannot_overwrite_newer_turn() {
 
     let old_request = harness.start_request(
         messages_body(
-            false,
+            true,
             vec![
                 message("user", &base),
                 message("assistant", &base_reply),
@@ -1852,7 +1856,7 @@ async fn same_owner_stale_completion_cannot_overwrite_newer_turn() {
 
     let newer_request = harness.start_request(
         messages_body(
-            false,
+            true,
             vec![
                 message("user", &base),
                 message("assistant", &base_reply),
@@ -1893,7 +1897,7 @@ async fn same_owner_stale_completion_cannot_overwrite_newer_turn() {
     let following = harness
         .round_trip(
             messages_body(
-                false,
+                true,
                 vec![
                     message("user", &base),
                     message("assistant", &base_reply),
@@ -1936,11 +1940,11 @@ async fn cross_owner_completion_order_is_independent() {
     let b1_response = tagged(&case, "resp-b-1");
 
     let a1_request = harness.start_request(
-        messages_body(false, vec![message("user", &a1)]),
+        messages_body(true, vec![message("user", &a1)]),
         a_headers.clone(),
     );
     let b1_request = harness.start_request(
-        messages_body(false, vec![message("user", &b1)]),
+        messages_body(true, vec![message("user", &b1)]),
         b_headers.clone(),
     );
     let pending_one = harness.upstream.next_any_request(Some(&session)).await;
@@ -1967,7 +1971,7 @@ async fn cross_owner_completion_order_is_independent() {
     let b2_response = tagged(&case, "resp-b-2");
     let a2_request = harness.start_request(
         messages_body(
-            false,
+            true,
             vec![
                 message("user", &a1),
                 message("assistant", &a1_reply),
@@ -1978,7 +1982,7 @@ async fn cross_owner_completion_order_is_independent() {
     );
     let b2_request = harness.start_request(
         messages_body(
-            false,
+            true,
             vec![
                 message("user", &b1),
                 message("assistant", &b1_reply),
@@ -2010,7 +2014,7 @@ async fn cross_owner_completion_order_is_independent() {
     let b3 = tagged(&case, "b-3");
     let a3_request = harness.start_request(
         messages_body(
-            false,
+            true,
             vec![
                 message("user", &a1),
                 message("assistant", &a1_reply),
@@ -2023,7 +2027,7 @@ async fn cross_owner_completion_order_is_independent() {
     );
     let b3_request = harness.start_request(
         messages_body(
-            false,
+            true,
             vec![
                 message("user", &b1),
                 message("assistant", &b1_reply),
@@ -2087,7 +2091,7 @@ async fn tool_turn_with_noncanonical_arguments_continues_with_delta() {
     let arguments = r#"{"file_path":"/tmp/x","old_string":"a","new_string":"b"}"#;
 
     let tool_request = harness.start_request(
-        messages_body(false, vec![message("user", &first_prompt)]),
+        messages_body(true, vec![message("user", &first_prompt)]),
         headers.clone(),
     );
     let tool_pending = harness.pending(&first_prompt, &headers).await;
@@ -2115,7 +2119,7 @@ async fn tool_turn_with_noncanonical_arguments_continues_with_delta() {
     let second_capture = harness
         .round_trip_any(
             messages_body(
-                false,
+                true,
                 vec![
                     message("user", &first_prompt),
                     json!({
@@ -2162,6 +2166,189 @@ async fn tool_turn_with_noncanonical_arguments_continues_with_delta() {
     assert_eq!(delta[0]["type"], "function_call_output");
     assert_eq!(delta[0]["call_id"], call_id.as_str());
     assert_eq!(harness.upstream.snapshot().len(), 2);
+    harness.shutdown().await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn missing_stored_output_sends_full_context() {
+    let _environment_lock = env_lock();
+    let mut harness = TestHarness::start().await;
+    for stream in [false, true] {
+        let headers = IdentityHeaders::main(&unique("missing-output"));
+        let request = harness.start_request(
+            messages_body(stream, vec![message("user", "one")]),
+            headers.clone(),
+        );
+        let first = harness.pending("one", &headers).await.respond_with_events(vec![
+            json!({"type":"response.created","response":{"id":"response-one"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"message-one"}}),
+            json!({"type":"response.output_text.delta","output_index":0,"delta":"reply"}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}),
+            json!({"type":"response.completed","response":{"id":"response-one","status":"completed"}}),
+        ]).await;
+        drained(request).await.assert_success("reply");
+        let second = harness
+            .round_trip(
+                messages_body(
+                    stream,
+                    vec![
+                        message("user", "one"),
+                        message("assistant", "reply"),
+                        message("user", "two"),
+                    ],
+                ),
+                headers,
+                "two",
+                "response-two",
+                "done",
+            )
+            .await;
+        assert!(first.previous_response_id().is_none());
+        assert!(second.previous_response_id().is_none());
+        assert!(
+            second.body["input"]
+                == json!([
+                    upstream_item("user", "one"),
+                    upstream_item("assistant", "reply"),
+                    upstream_item("user", "two")
+                ])
+        );
+    }
+    harness.shutdown().await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn matching_streamed_output_continues_with_new_items() {
+    let _environment_lock = env_lock();
+    let mut harness = TestHarness::start().await;
+    let headers = IdentityHeaders::main(&unique("matching-output"));
+    let request = harness.start_request(
+        messages_body(true, vec![message("user", "one")]),
+        headers.clone(),
+    );
+    harness.pending("one", &headers).await.respond_with_events(vec![
+        json!({"type":"response.created","response":{"id":"response-one"}}),
+        json!({"type":"response.output_text.delta","output_index":0,"delta":"reply"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}),
+        json!({"type":"response.completed","response":{"id":"response-one","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"reply"}]}]}}),
+    ]).await;
+    drained(request).await.assert_success("reply");
+    let second = harness
+        .round_trip(
+            messages_body(
+                true,
+                vec![
+                    message("user", "one"),
+                    message("assistant", "reply"),
+                    message("user", "two"),
+                ],
+            ),
+            headers,
+            "two",
+            "response-two",
+            "done",
+        )
+        .await;
+    assert!(second.previous_response_id() == Some("response-one"));
+    assert!(second.body["input"] == json!([upstream_item("user", "two")]));
+    harness.shutdown().await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stored_web_search_sends_full_context() {
+    let _environment_lock = env_lock();
+    let mut harness = TestHarness::start().await;
+    let headers = IdentityHeaders::main(&unique("stored-search"));
+    let request = harness.start_request(
+        messages_body(true, vec![message("user", "one")]),
+        headers.clone(),
+    );
+    harness.pending("one", &headers).await.respond_with_events(vec![
+        json!({"type":"response.created","response":{"id":"response-one"}}),
+        json!({"type":"response.output_text.delta","output_index":0,"delta":"reply"}),
+        json!({"type":"response.completed","response":{"id":"response-one","status":"completed","output":[
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"reply"}]},
+            {"type":"web_search_call","id":"search-one"}
+        ]}}),
+    ]).await;
+    drained(request).await.assert_success("reply");
+    let second = harness
+        .round_trip(
+            messages_body(
+                true,
+                vec![
+                    message("user", "one"),
+                    message("assistant", "reply"),
+                    message("user", "two"),
+                ],
+            ),
+            headers,
+            "two",
+            "response-two",
+            "done",
+        )
+        .await;
+    assert!(second.previous_response_id().is_none());
+    assert!(
+        second.body["input"]
+            == json!([
+                upstream_item("user", "one"),
+                upstream_item("assistant", "reply"),
+                upstream_item("user", "two")
+            ])
+    );
+    harness.shutdown().await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rewritten_read_sends_full_context() {
+    let _environment_lock = env_lock();
+    let mut harness = TestHarness::start().await;
+    let headers = IdentityHeaders::main(&unique("rewritten-read"));
+    let request = harness.start_request(
+        messages_body(true, vec![message("user", "one")]),
+        headers.clone(),
+    );
+    harness
+        .pending("one", &headers)
+        .await
+        .respond_with_function_call(
+            "response-one",
+            FunctionCallReply {
+                call_id: "call-one".into(),
+                name: "Read".into(),
+                arguments: r#"{"file_path":"/tmp/x","offset":1000000}"#.into(),
+            },
+        )
+        .await;
+    drained(request).await.assert_success("call-one");
+    let second = harness.round_trip_any(messages_body(true, vec![message("user", "one"),
+        json!({"role":"assistant","content":[{"type":"tool_use","id":"call-one","name":"Read","input":{"file_path":"/tmp/x"}}]}),
+        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"call-one","content":"done"}]})]),
+        headers, "response-two", "done").await;
+    assert!(second.previous_response_id().is_none());
+    assert!(
+        second.body["input"]
+            .as_array()
+            .is_some_and(|input| input.len() == 3)
+    );
+    assert!(second.body["input"][0] == upstream_item("user", "one"));
+    assert!(second.body["input"][1]["type"] == "function_call");
+    assert!(second.body["input"][1]["call_id"] == "call-one");
+    assert!(second.body["input"][1]["name"] == "Read");
+    let arguments = second.body["input"][1]["arguments"].as_str().unwrap();
+    assert!(serde_json::from_str::<Value>(arguments).unwrap() == json!({"file_path":"/tmp/x"}));
+    assert!(second.body["input"][2]["type"] == "function_call_output");
+    assert!(second.body["input"][2]["call_id"] == "call-one");
+    assert!(
+        second.body["input"][2]["output"]
+            .as_str()
+            .is_some_and(|output| output.starts_with("done\n\nProxy Read offset note:"))
+    );
     harness.shutdown().await;
 }
 
@@ -2283,4 +2470,89 @@ async fn codex_login_change_misses_pool_and_continuation_and_withholds_old_reaso
         "{rebuilt_body}"
     );
     harness.shutdown().await;
+}
+
+async fn full_context_after_setting(
+    first_stream: bool,
+    setting: Option<(&'static str, &'static str)>,
+    compact: bool,
+) {
+    let mut harness = TestHarness::start().await;
+    let _effort = EnvGuard::set("DUOLANE_COMPACT_EFFORT", "off");
+    let headers = IdentityHeaders::main(&unique("full-context"));
+    let first = harness
+        .round_trip(
+            messages_body(first_stream, vec![message("user", "one")]),
+            headers.clone(),
+            "one",
+            "response-one",
+            "reply",
+        )
+        .await;
+    assert!(first.previous_response_id().is_none());
+    let _setting = setting.map(|(key, value)| EnvGuard::set(key, value));
+    let last = if compact {
+        "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Your task is to create a detailed summary of the conversation so far"
+    } else {
+        "two"
+    };
+    let second = harness
+        .round_trip(
+            messages_body(
+                true,
+                vec![
+                    message("user", "one"),
+                    message("assistant", "reply"),
+                    message("user", last),
+                ],
+            ),
+            headers,
+            last,
+            "response-two",
+            "done",
+        )
+        .await;
+    assert!(second.previous_response_id().is_none());
+    assert!(
+        second.body["input"]
+            == json!([
+                upstream_item("user", "one"),
+                upstream_item("assistant", "reply"),
+                upstream_item("user", last)
+            ])
+    );
+    harness.shutdown().await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn buffered_response_followed_by_full_context() {
+    let _lock = env_lock();
+    full_context_after_setting(false, None, false).await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compaction_request_sends_full_context() {
+    let _lock = env_lock();
+    full_context_after_setting(true, None, true).await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_compaction_sends_full_context() {
+    let _lock = env_lock();
+    full_context_after_setting(true, Some(("DUOLANE_CODEX_SERVER_COMPACTION", "on")), false).await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn previous_response_id_off_sends_full_context() {
+    let _lock = env_lock();
+    full_context_after_setting(
+        true,
+        Some(("DUOLANE_CODEX_PREVIOUS_RESPONSE_ID", "off")),
+        false,
+    )
+    .await;
 }

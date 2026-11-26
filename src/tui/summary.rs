@@ -189,15 +189,13 @@ pub(super) fn layout(
     body: Rect,
     state: &MonitorSnapshot,
     detail_height: u16,
+    chosen_active_height: u16,
 ) -> std::rc::Rc<[Rect]> {
     let detail_open = detail_height > 0;
     let detail_min = detail_height.min(body.height.saturating_sub(14).max(body.height.min(10)));
     let requested_summary = summary::height(body.width);
     let reserve = if detail_open {
-        detail_min
-            + u16::from(!state.active.is_empty()) * 4
-            + u16::from(!state.recent.is_empty()) * 4
-            + 1
+        detail_min.saturating_add(3 + 4 + 1)
     } else {
         0
     };
@@ -223,8 +221,9 @@ pub(super) fn layout(
     }
     .min(remaining.saturating_sub(sessions_height));
     let available = remaining.saturating_sub(sessions_height + events_height);
-    let active_height =
-        (state.active.len().saturating_add(3).min(u16::MAX as usize) as u16).min(available / 2);
+    let active_height = chosen_active_height
+        .min(available.saturating_sub(3))
+        .max(3.min(available));
     Layout::vertical([
         Constraint::Length(summary_height),
         Constraint::Length(sessions_height),

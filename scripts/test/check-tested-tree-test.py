@@ -15,7 +15,7 @@ REPO = "owner/repo"
 SHA = "a" * 40
 MASTER = "b" * 40
 RUN = {"id": 10, "run_attempt": 2, "status": "completed", "conclusion": "success", "head_sha": SHA, "event": "push", "repository": {"full_name": REPO}}
-JOB = {"name": "rust", "status": "completed", "conclusion": "success", "run_id": 10, "run_attempt": 2}
+JOB = {"name": "ci", "status": "completed", "conclusion": "success", "run_id": 10, "run_attempt": 2}
 REF = {"ref": "refs/heads/master", "object": {"type": "commit", "sha": MASTER}}
 COMPARE = {"status": "ahead", "behind_by": 0, "merge_base_commit": {"sha": SHA}}
 
@@ -33,18 +33,23 @@ class ProofTests(unittest.TestCase):
         for compare in ({"status": "behind"}, {"status": "diverged"}, dict(COMPARE, behind_by=1), dict(COMPARE, merge_base_commit={"sha": MASTER}), {}, None):
             self.assertFalse(m.release_proof(REPO, SHA, RUN, {"jobs": [JOB]}, REF, compare))
 
+    def test_rejects_rerun_after_jobs_lookup(self):
+        changed = dict(RUN, run_attempt=3, status="in_progress", conclusion=None)
+        self.assertFalse(m.wait_for_release(REPO, SHA, lambda: {"workflow_runs": [RUN]},
+                                           lambda run: {"jobs": [JOB]}, lambda run: changed))
+
     def test_poll(self):
         pending = dict(RUN, status="in_progress", conclusion=None)
         clock = [0]
         def sleep(seconds):
             clock[0] += seconds
         responses = iter([{"workflow_runs": [pending]}, {"workflow_runs": [RUN]}])
-        self.assertTrue(m.wait_for_release(REPO, SHA, lambda: next(responses), lambda run: {"jobs": [JOB]}, lambda: clock[0], sleep))
+        self.assertTrue(m.wait_for_release(REPO, SHA, lambda: next(responses), lambda run: {"jobs": [JOB]}, lambda run: run, lambda: clock[0], sleep))
         self.assertEqual(clock[0], 15)
         clock[0] = 0
-        self.assertFalse(m.wait_for_release(REPO, SHA, lambda: {"workflow_runs": [pending]}, lambda run: {}, lambda: clock[0], sleep))
+        self.assertFalse(m.wait_for_release(REPO, SHA, lambda: {"workflow_runs": [pending]}, lambda run: {}, lambda run: run, lambda: clock[0], sleep))
         self.assertEqual(clock[0], 300)
-        self.assertFalse(m.wait_for_release(REPO, SHA, lambda: {"workflow_runs": [None]}, lambda run: {}))
+        self.assertFalse(m.wait_for_release(REPO, SHA, lambda: {"workflow_runs": [None]}, lambda run: {}, lambda run: run))
 
     def test_lookup_order_and_failures(self):
         calls = []
@@ -54,22 +59,25 @@ class ProofTests(unittest.TestCase):
         def fetch_jobs(run):
             calls.append("jobs")
             return {"jobs": [JOB]}
+        def fetch_run(run):
+            calls.append("run")
+            return run
         def fetch_ref():
             calls.append("ref")
             return REF
         def fetch_compare(sha):
             calls.append(("compare", sha))
             return COMPARE
-        self.assertTrue(m.check_release(REPO, SHA, fetch_runs, fetch_jobs, fetch_ref, fetch_compare))
-        self.assertEqual(calls, ["runs", "jobs", "ref", ("compare", MASTER)])
+        self.assertTrue(m.check_release(REPO, SHA, fetch_runs, fetch_jobs, fetch_run, fetch_ref, fetch_compare))
+        self.assertEqual(calls, ["runs", "jobs", "run", "ref", ("compare", MASTER)])
         for broken in (lambda: None, lambda: {}, lambda: {"workflow_runs": [None]}):
-            self.assertFalse(m.check_release(REPO, SHA, broken, fetch_jobs, fetch_ref, fetch_compare))
-        self.assertFalse(m.check_release(REPO, SHA, fetch_runs, lambda run: None, fetch_ref, fetch_compare))
+            self.assertFalse(m.check_release(REPO, SHA, broken, fetch_jobs, fetch_run, fetch_ref, fetch_compare))
+        self.assertFalse(m.check_release(REPO, SHA, fetch_runs, lambda run: None, fetch_run, fetch_ref, fetch_compare))
         def failing_jobs(run):
             raise OSError("jobs unavailable")
-        self.assertFalse(m.check_release(REPO, SHA, fetch_runs, failing_jobs, fetch_ref, fetch_compare))
-        self.assertFalse(m.check_release(REPO, SHA, fetch_runs, fetch_jobs, lambda: None, fetch_compare))
-        self.assertFalse(m.check_release(REPO, SHA, fetch_runs, fetch_jobs, fetch_ref, lambda sha: None))
+        self.assertFalse(m.check_release(REPO, SHA, fetch_runs, failing_jobs, fetch_run, fetch_ref, fetch_compare))
+        self.assertFalse(m.check_release(REPO, SHA, fetch_runs, fetch_jobs, fetch_run, lambda: None, fetch_compare))
+        self.assertFalse(m.check_release(REPO, SHA, fetch_runs, fetch_jobs, fetch_run, fetch_ref, lambda sha: None))
 
     def test_deadline_between_calls(self):
         clock = [0]
@@ -77,7 +85,7 @@ class ProofTests(unittest.TestCase):
             clock[0] = 11
             return {"workflow_runs": [RUN]}
         with patch.object(m.time, "monotonic", lambda: clock[0]):
-            self.assertFalse(m.check_release(REPO, SHA, runs, lambda run: {"jobs": [JOB]}, lambda: REF, lambda sha: COMPARE, deadline=10))
+            self.assertFalse(m.check_release(REPO, SHA, runs, lambda run: {"jobs": [JOB]}, lambda run: run, lambda: REF, lambda sha: COMPARE, deadline=10))
 
     def test_pages(self):
         with patch.object(m, "command", return_value='{"total_count":0,"jobs":[]}'):

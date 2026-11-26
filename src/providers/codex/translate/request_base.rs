@@ -1,8 +1,12 @@
 use super::request::{
-    ResponsesContentPart, ResponsesInputItem, ResponsesRequest, ResponsesToolChoice,
+    ResponsesContentPart, ResponsesInputItem, ResponsesRequest, ResponsesTool, ResponsesToolChoice,
     ResponsesToolChoiceMode, is_compact_messages_request,
 };
 use crate::anthropic::schema::MessagesRequest;
+
+#[cfg(test)]
+#[path = "request_base_tests.rs"]
+mod tests;
 
 pub(super) fn insert_base(
     req: &MessagesRequest,
@@ -13,8 +17,7 @@ pub(super) fn insert_base(
     let Some(base) = base.filter(|base| !base.is_empty()) else {
         return;
     };
-    if !lite
-        || is_compact_messages_request(req)
+    if is_compact_messages_request(req)
         || matches!(
             out.tool_choice,
             Some(ResponsesToolChoice::Mode(ResponsesToolChoiceMode::None))
@@ -27,6 +30,36 @@ pub(super) fn insert_base(
         Some(ResponsesToolChoice::Function { name, .. }) => Some(name.as_str()),
         _ => None,
     };
+    if !lite {
+        let Some(tools) = &out.tools else {
+            return;
+        };
+        if matches!(&out.tool_choice, Some(ResponsesToolChoice::WebSearch { .. }))
+            || matches!(&out.tool_choice, Some(ResponsesToolChoice::AllowedTools { tools, .. }) if !tools.is_empty() && tools.iter().all(|tool| tool.get("type").and_then(serde_json::Value::as_str) == Some("web_search")))
+            || !tools.iter().any(|tool| matches!(tool, ResponsesTool::Function(tool) if !tool.name.is_empty() && forced.is_none_or(|forced| forced == tool.name)))
+        {
+            return;
+        }
+        if let Some(system) = out.instructions.take().filter(|system| !system.is_empty()) {
+            out.input.insert(
+                0,
+                ResponsesInputItem::Message {
+                    role: "developer".into(),
+                    content: vec![ResponsesContentPart::InputText { text: system }],
+                },
+            );
+        }
+        out.input.insert(
+            0,
+            ResponsesInputItem::Message {
+                role: "developer".into(),
+                content: vec![ResponsesContentPart::InputText {
+                    text: base.to_owned(),
+                }],
+            },
+        );
+        return;
+    }
     if !out.input.iter().any(|item| matches!(item, ResponsesInputItem::AdditionalTools { tools, .. } if tools.iter().any(|tool| tool.get("name").and_then(serde_json::Value::as_str).is_some_and(|name| !name.is_empty() && forced.is_none_or(|forced| forced == name))))) {
         return;
     }

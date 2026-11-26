@@ -36,8 +36,11 @@ impl CodexProvider {
                 ),
             );
         }
-        let use_responses_lite =
-            apply_model_lane_for_request(&mut resolved, &body, config::codex_full_lane());
+        let use_responses_lite = apply_model_lane_for_request(
+            &mut resolved,
+            &body,
+            config::codex_full_lane().unwrap_or(true),
+        );
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &resolved.model);
         }

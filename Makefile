@@ -1,4 +1,4 @@
-.PHONY: help check fmt lint test deny lengths comments pins docs crate-age tools-outdated hooks-install
+.PHONY: help check fmt lint test script-tests deny lengths comments pins docs crate-age tools-outdated hooks-install
 
 SHELL := bash
 .SHELLFLAGS := -Eeuo pipefail -c
@@ -12,7 +12,11 @@ BIN := node_modules/.bin
 help: ## Show the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | sed -E 's/^([a-z-]+):.*## /\1\t/'
 
-check: lengths comments pins docs fmt lint test ## Run every check that works offline
+check: lengths comments pins docs fmt lint test script-tests ## Run every check that works offline
+
+script-tests:
+	python3 -I scripts/test/check-tested-tree-test.py
+	python3 -I scripts/test/check-ci-skip-test.py
 
 fmt: ## Check Rust formatting; fix with cargo fmt --all
 	cargo fmt --all -- --check

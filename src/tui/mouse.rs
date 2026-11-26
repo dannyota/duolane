@@ -24,9 +24,26 @@ pub(super) enum MouseTarget {
     Request(usize),
 }
 
+pub(super) struct ActiveResize {
+    pub(super) height: u16,
+    dragging: bool,
+    position: Option<(u16, u16)>,
+}
+
+impl Default for ActiveResize {
+    fn default() -> Self {
+        Self {
+            height: 10,
+            dragging: false,
+            position: None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct MouseTargets {
     pub(super) size: (u16, u16),
+    pub(super) active: Option<(Rect, u16)>,
     pub(super) sessions: VisibleRows,
     pub(super) recent: VisibleRows,
     pub(super) events: VisibleRows,
@@ -34,6 +51,15 @@ pub(super) struct MouseTargets {
 }
 
 impl MouseTargets {
+    fn active_border(&self, column: u16, row: u16) -> bool {
+        self.active.is_some_and(|(active, _)| {
+            active.height >= 2
+                && row == active.y + active.height - 1
+                && column >= active.x
+                && column < active.right()
+        })
+    }
+
     pub(super) fn key(&self, column: u16, row: u16) -> Option<crossterm::event::KeyCode> {
         self.keys
             .iter()
@@ -85,6 +111,26 @@ pub(super) fn render_clickable_table(
 }
 
 impl super::MonitorApp {
+    pub(super) fn refresh_pointer(
+        &self,
+        pointer: &mut super::pointer::Pointer,
+        writer: &mut impl std::io::Write,
+        targets: &MouseTargets,
+    ) {
+        let available = !self.show_help
+            && !self.show_setup
+            && !self.accounts.confirming()
+            && self.phase == MonitorPhase::Running
+            && !self.usage_open;
+        let resize = available
+            && (self.active_resize.dragging
+                || self
+                    .active_resize
+                    .position
+                    .is_some_and(|(column, row)| targets.active_border(column, row)));
+        let _ = pointer.update(writer, resize);
+    }
+
     pub(super) fn handle_mouse_query(
         &mut self,
         mouse: MouseEvent,
@@ -92,7 +138,19 @@ impl super::MonitorApp {
         targets: &MouseTargets,
         size: impl FnOnce() -> std::io::Result<(u16, u16)>,
     ) -> Option<MonitorExit> {
-        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+        self.active_resize.position = Some((mouse.column, mouse.row));
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Up(MouseButton::Left)
+                | MouseEventKind::Moved
+                | MouseEventKind::Down(MouseButton::Left)
+        ) {
+            self.active_resize.dragging = false;
+        }
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left)
+            && !(self.active_resize.dragging
+                && mouse.kind == MouseEventKind::Drag(MouseButton::Left))
+        {
             return None;
         }
         size()
@@ -119,12 +177,44 @@ impl super::MonitorApp {
         state: &MonitorSnapshot,
         targets: &MouseTargets,
     ) -> Option<MonitorExit> {
-        if mouse.kind != MouseEventKind::Down(MouseButton::Left)
-            || self.show_help
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Up(MouseButton::Left)
+                | MouseEventKind::Moved
+                | MouseEventKind::Down(MouseButton::Left)
+        ) {
+            self.active_resize.dragging = false;
+        }
+        if self.show_help
             || self.accounts.confirming()
             || self.show_setup
             || self.phase != MonitorPhase::Running
+            || self.usage_open && self.active_resize.dragging
         {
+            self.active_resize.dragging = false;
+            return None;
+        }
+        if self.active_resize.dragging {
+            if mouse.kind == MouseEventKind::Drag(MouseButton::Left)
+                && let Some((active, recent_height)) = targets.active
+            {
+                let available = active.height.saturating_add(recent_height);
+                if available > 6 {
+                    self.active_resize.height = mouse
+                        .row
+                        .saturating_sub(active.y)
+                        .saturating_add(1)
+                        .min(available.saturating_sub(3))
+                        .max(3);
+                }
+            }
+            return None;
+        }
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return None;
+        }
+        if !self.usage_open && targets.active_border(mouse.column, mouse.row) {
+            self.active_resize.dragging = true;
             return None;
         }
         if let Some(code) = targets.key(mouse.column, mouse.row) {

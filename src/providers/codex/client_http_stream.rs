@@ -1,3 +1,5 @@
+#[path = "client_http_stream_tracked.rs"]
+mod tracked;
 use super::client::*;
 use super::client_body::CodexHttpBodyCache;
 use super::client_http_tools::{HttpToolState, STALLED_READ_FINISH_FIELD};
@@ -127,17 +129,6 @@ impl CodexHttpClient {
             quota,
         ))
     }
-    pub(super) async fn stream_codex_http_events_for_owner_tracked(
-        self: &Arc<Self>,
-        body: &ResponsesRequest,
-        ctx: &RequestContext,
-        http_body: &CodexHttpBodyCache,
-    ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
-        let receiver = self
-            .stream_codex_http_events_inner(body, ctx, http_body, ctx.recovery_budget.is_tracked())
-            .await?;
-        Ok(super::websocket::CodexWebSocketEventStream::http(receiver))
-    }
     pub(super) async fn stream_codex_auto_events_for_owner(
         self: &Arc<Self>,
         body: &ResponsesRequest,
@@ -157,6 +148,7 @@ impl CodexHttpClient {
                     .auto_large_full_context(body, ctx, continuation, http_body)
                     .await?)
         {
+            super::client_live::invalidate_live_continuation_pool(continuation);
             http_body
                 .size_http_selected
                 .store(true, std::sync::atomic::Ordering::Release);
@@ -178,10 +170,15 @@ impl CodexHttpClient {
         {
             let auth = if ctx.recovery_budget.is_tracked() {
                 self.auth_for_buffered_http(&body.reasoning_account, &ctx.recovery_budget)
-                    .await?
+                    .await
             } else {
-                self.auth_for(&body.reasoning_account).await?
-            };
+                self.auth_for(&body.reasoning_account).await
+            }
+            .inspect_err(|error| {
+                if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
+                    super::client_live::invalidate_live_continuation_pool(continuation);
+                }
+            })?;
             let quota = super::client_live::quota_for_auth(ctx, &auth);
             if super::client_live::should_reset_websocket_pool(continuation)
                 && let Some(owner) = super::client_live::websocket_pool_owner(continuation)
@@ -220,6 +217,7 @@ impl CodexHttpClient {
                         if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
                             return Err(CodexError::recovery_exhausted());
                         }
+                        super::client_live::invalidate_live_continuation_pool(continuation);
                         super::websocket_pool::HTTP_FALLBACK_COUNT
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         http_body
@@ -254,6 +252,7 @@ impl CodexHttpClient {
                 if !ctx.recovery_budget.try_retry(Duration::ZERO, false) {
                     return Err(CodexError::recovery_exhausted());
                 }
+                super::client_live::invalidate_live_continuation_pool(continuation);
                 super::websocket_pool::HTTP_FALLBACK_COUNT
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.stream_codex_http_events_for_owner_tracked(body, ctx, http_body)

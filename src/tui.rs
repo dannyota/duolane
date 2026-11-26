@@ -14,6 +14,9 @@ mod overlay;
 mod overview_tests;
 #[cfg(test)]
 mod phase_tests;
+mod pointer;
+#[cfg(test)]
+mod pointer_tests;
 mod profile_table;
 mod request_phases;
 mod requests;
@@ -41,7 +44,7 @@ use std::{
 };
 
 #[cfg(test)]
-use crossterm::event::MouseEvent;
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -166,7 +169,8 @@ fn run_monitor_loop(
     mut snapshot: impl FnMut() -> SnapshotUpdate,
     config: UiSession,
 ) -> Result<MonitorExit, anyhow::Error> {
-    let (_guard, mut terminal) = setup_terminal()?;
+    let pointer_supported = pointer::supported(&paths::environment_snapshot());
+    let (mut guard, mut terminal) = setup_terminal(pointer_supported)?;
     let mut app = MonitorApp {
         accounts: accounts::Accounts::new(config.local_accounts),
         usage_open: false,
@@ -178,6 +182,7 @@ fn run_monitor_loop(
         focus: FocusPane::Sessions,
         selected: 0,
         recent_selected: 0,
+        active_resize: Default::default(),
         tick: 0,
         phase: MonitorPhase::Running,
         shutdown: config.shutdown,
@@ -186,15 +191,17 @@ fn run_monitor_loop(
 
     app.accounts.enter();
     app.accounts.refresh_limits();
-    let run_result = run_monitor_events(&mut terminal, &mut snapshot, &mut app);
+    let run_result = run_monitor_events(&mut terminal, &mut snapshot, &mut app, &mut guard.pointer);
     if run_result.is_err() {
         app.begin_shutdown();
         let state = snapshot();
         let _ = terminal.draw(|frame| {
             render(frame, &mut app, state.snapshot());
         });
+        let _ = guard.pointer.reset(terminal.backend_mut());
         app.wait_for_shutdown_completion();
     }
+    let _ = guard.pointer.reset(terminal.backend_mut());
     let cursor_result = terminal.show_cursor();
     let exit = run_result?;
     cursor_result?;
@@ -205,6 +212,7 @@ fn run_monitor_events(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     mut snapshot: impl FnMut() -> SnapshotUpdate,
     app: &mut MonitorApp,
+    pointer: &mut pointer::Pointer,
 ) -> Result<MonitorExit, anyhow::Error> {
     loop {
         app.accounts.refresh_if_due();
@@ -222,6 +230,7 @@ fn run_monitor_events(
                 update.connection_error().map(|e| e.to_string()).as_deref(),
             );
         })?;
+        app.refresh_pointer(pointer, terminal.backend_mut(), &targets);
         if app.shutdown_is_complete() {
             return Ok(MonitorExit::ShutdownComplete);
         }
@@ -235,9 +244,10 @@ fn run_monitor_events(
                     }
                 }
                 Event::Mouse(mouse) => {
-                    if let Some(exit) =
-                        app.handle_mouse_query(mouse, state, &targets, crossterm::terminal::size)
-                    {
+                    let exit =
+                        app.handle_mouse_query(mouse, state, &targets, crossterm::terminal::size);
+                    app.refresh_pointer(pointer, terminal.backend_mut(), &targets);
+                    if let Some(exit) = exit {
                         return Ok(exit);
                     }
                 }
@@ -308,6 +318,7 @@ struct MonitorApp {
     focus: FocusPane,
     selected: usize,
     recent_selected: usize,
+    active_resize: mouse::ActiveResize,
     tick: usize,
     phase: MonitorPhase,
     shutdown: Option<oneshot::Sender<()>>,
@@ -420,22 +431,28 @@ impl Drop for MonitorApp {
 
 struct TerminalGuard {
     mouse_capture_attempted: bool,
+    pointer: pointer::Pointer,
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        if self.mouse_capture_attempted {
-            let _ = execute!(io::stdout(), DisableMouseCapture);
-        }
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        let _ = disable_raw_mode();
+        pointer::restore(&mut self.pointer, &mut io::stdout(), |writer| {
+            if self.mouse_capture_attempted {
+                let _ = execute!(writer, DisableMouseCapture);
+            }
+            let _ = execute!(writer, LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+        });
     }
 }
 
-fn setup_terminal() -> Result<(TerminalGuard, Terminal<CrosstermBackend<Stdout>>), anyhow::Error> {
+fn setup_terminal(
+    pointer_supported: bool,
+) -> Result<(TerminalGuard, Terminal<CrosstermBackend<Stdout>>), anyhow::Error> {
     enable_raw_mode()?;
     let mut guard = TerminalGuard {
         mouse_capture_attempted: false,
+        pointer: pointer::Pointer::new(pointer_supported),
     };
     execute!(io::stdout(), EnterAlternateScreen)?;
     guard.mouse_capture_attempted = true;
@@ -545,7 +562,12 @@ fn render_at(
         area.width,
         root[5].y.saturating_sub(root[1].y),
     );
-    let parts = summary::layout(body, state, detail::height(app, state));
+    let parts = summary::layout(
+        body,
+        state,
+        detail::height(app, state),
+        app.active_resize.height,
+    );
     summary::render(frame, parts[0], terminal_state, &app.accounts, now, zone);
     let root = [root[0], parts[1], parts[2], parts[3], parts[4], root[5]];
     let sessions = match &app.detail {
@@ -575,6 +597,7 @@ fn render_at(
             terminal_state.snapshot_at,
         ),
     };
+    targets.active = Some((root[2], root[3].height));
     render_active_at(frame, root[2], &terminal_state.active, app.tick, now);
     let recent = render_recent(
         frame,
@@ -630,778 +653,4 @@ pub fn setup_text(port: u16, registry: &Registry) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn accounts_read_only_modes_never_expose_local_names() {
-        let mut accounts = accounts::Accounts::new(false);
-        accounts.enter();
-        assert!(accounts.names().is_empty());
-        accounts.confirm();
-        assert!(!accounts.confirming());
-    }
-    use crate::monitor::snapshot::MonitorSnapshot;
-    use crate::monitor::{EndpointKind, MonitorHandle, mock_state};
-    use crate::tui::layout::{ColumnSpec, LayoutTier, MODEL_WIDE_WIDTH, PROVIDER_WIDTH};
-    use crate::tui::requests::{
-        ActiveColumn, EventColumn, RecentColumn, active_columns, event_columns, recent_columns,
-        render_active, render_events, render_recent,
-    };
-    use crate::tui::sessions::{SessionColumn, render_sessions, session_columns};
-    use ratatui::Terminal;
-    use ratatui::layout::Alignment;
-    use ratatui::{backend::TestBackend, buffer::Buffer};
-    use std::time::SystemTime;
-
-    pub(super) fn draw<R>(
-        width: u16,
-        height: u16,
-        render: impl FnOnce(&mut ratatui::Frame<'_>) -> R,
-    ) -> Buffer {
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render(frame);
-            })
-            .unwrap();
-        terminal.backend().buffer().clone()
-    }
-
-    pub(super) fn buffer_text(buffer: &Buffer) -> String {
-        (0..buffer.area.height)
-            .map(|y| {
-                (0..buffer.area.width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    pub(super) fn placeholder_position(buffer: &Buffer, placeholder: &str) -> Option<(u16, u16)> {
-        let symbols = placeholder
-            .chars()
-            .map(|character| character.to_string())
-            .collect::<Vec<_>>();
-        (0..buffer.area.height).find_map(|y| {
-            (0..buffer.area.width).find_map(|x| {
-                symbols
-                    .iter()
-                    .enumerate()
-                    .all(|(offset, symbol)| {
-                        x + (offset as u16) < buffer.area.width
-                            && buffer[(x + offset as u16, y)].symbol() == symbol
-                    })
-                    .then_some((x, y))
-            })
-        })
-    }
-
-    pub(super) fn assert_centered(buffer: &Buffer, placeholder: &str, expected_y: u16) {
-        let (x, y) = placeholder_position(buffer, placeholder).unwrap();
-        let left_space = x.saturating_sub(1);
-        let right_space = buffer
-            .area
-            .width
-            .saturating_sub(x + placeholder.chars().count() as u16 + 1);
-        assert_eq!(y, expected_y);
-        assert!(left_space.abs_diff(right_space) <= 1);
-    }
-
-    pub(super) fn headers<K>(columns: &[ColumnSpec<K>]) -> Vec<&'static str> {
-        columns.iter().map(|column| column.header).collect()
-    }
-
-    pub(super) fn fixed_budget<K>(columns: &[ColumnSpec<K>]) -> u16 {
-        let widths = columns
-            .iter()
-            .map(|column| match column.width {
-                layout::ColumnWidth::Fixed(width) => width,
-                layout::ColumnWidth::Flex(_) => 0,
-            })
-            .sum::<u16>();
-        widths.saturating_add(columns.len().saturating_sub(1) as u16)
-    }
-
-    pub(super) fn fixed_width<K: Copy + PartialEq>(
-        columns: &[ColumnSpec<K>],
-        key: K,
-    ) -> Option<u16> {
-        columns
-            .iter()
-            .find(|column| column.key == key)
-            .and_then(|column| match column.width {
-                layout::ColumnWidth::Fixed(width) => Some(width),
-                layout::ColumnWidth::Flex(_) => None,
-            })
-    }
-
-    pub(super) fn flex_count<K>(columns: &[ColumnSpec<K>]) -> usize {
-        columns
-            .iter()
-            .filter(|column| matches!(column.width, layout::ColumnWidth::Flex(_)))
-            .count()
-    }
-
-    pub(super) fn alignment<K: Copy + PartialEq>(
-        columns: &[ColumnSpec<K>],
-        key: K,
-    ) -> Option<Alignment> {
-        columns
-            .iter()
-            .find(|column| column.key == key)
-            .map(|column| column.alignment)
-    }
-
-    #[test]
-    fn request_tables_share_time_status_provider_model_rhythm() {
-        assert_eq!(
-            headers(&active_columns(LayoutTier::Medium))[..4],
-            ["Started", "Phase", "Provider", "Model"]
-        );
-        assert_eq!(
-            headers(&recent_columns(LayoutTier::Medium))[..4],
-            ["Finished", "Code", "Provider", "Model"]
-        );
-        assert_eq!(
-            headers(&event_columns(LayoutTier::Medium))[..4],
-            ["Time", "Code", "Provider", "Model"]
-        );
-    }
-
-    #[test]
-    fn wide_tables_use_model_caps_and_shared_provider_widths() {
-        let sessions = session_columns(LayoutTier::Wide, true);
-        let active = active_columns(LayoutTier::Wide);
-        let recent = recent_columns(LayoutTier::Wide);
-        let events = event_columns(LayoutTier::Wide);
-
-        assert_eq!(
-            fixed_width(&sessions, SessionColumn::Model),
-            Some(MODEL_WIDE_WIDTH)
-        );
-        assert_eq!(fixed_width(&active, ActiveColumn::Model), Some(5));
-        assert_eq!(fixed_width(&recent, RecentColumn::Model), Some(5));
-        assert_eq!(
-            fixed_width(&events, EventColumn::Model),
-            Some(MODEL_WIDE_WIDTH)
-        );
-        assert_eq!(
-            fixed_width(&active, ActiveColumn::Provider),
-            Some(PROVIDER_WIDTH)
-        );
-        assert_eq!(
-            fixed_width(&recent, RecentColumn::Provider),
-            Some(PROVIDER_WIDTH)
-        );
-    }
-
-    #[test]
-    fn responsive_schemas_fit_their_minimum_terminal_widths() {
-        assert!(fixed_budget(&session_columns(LayoutTier::Emergency, false)) <= 75);
-        assert!(fixed_budget(&session_columns(LayoutTier::Narrow, false)) <= 76);
-        assert!(fixed_budget(&session_columns(LayoutTier::Medium, false)) <= 88);
-        assert!(fixed_budget(&session_columns(LayoutTier::Expanded, false)) <= 118);
-        assert!(fixed_budget(&session_columns(LayoutTier::Wide, true)) <= 168);
-
-        assert!(fixed_budget(&active_columns(LayoutTier::Emergency)) <= 75);
-        assert!(fixed_budget(&active_columns(LayoutTier::Narrow)) <= 76);
-        assert!(fixed_budget(&active_columns(LayoutTier::Medium)) <= 88);
-        assert!(fixed_budget(&active_columns(LayoutTier::Expanded)) <= 118);
-        assert!(fixed_budget(&active_columns(LayoutTier::Wide)) <= 152);
-
-        assert!(fixed_budget(&recent_columns(LayoutTier::Emergency)) <= 75);
-        assert!(fixed_budget(&recent_columns(LayoutTier::Narrow)) <= 76);
-        assert!(fixed_budget(&recent_columns(LayoutTier::Medium)) <= 88);
-        assert!(fixed_budget(&recent_columns(LayoutTier::Expanded)) <= 118);
-        assert!(fixed_budget(&recent_columns(LayoutTier::Wide)) <= 152);
-
-        assert!(fixed_budget(&event_columns(LayoutTier::Emergency)) <= 75);
-        assert!(fixed_budget(&event_columns(LayoutTier::Narrow)) <= 76);
-        assert!(fixed_budget(&event_columns(LayoutTier::Medium)) <= 88);
-        assert!(fixed_budget(&event_columns(LayoutTier::Expanded)) <= 118);
-        assert!(fixed_budget(&event_columns(LayoutTier::Wide)) <= 152);
-    }
-
-    #[test]
-    fn each_schema_has_one_meaningful_flexible_column() {
-        for tier in [
-            LayoutTier::Emergency,
-            LayoutTier::Narrow,
-            LayoutTier::Medium,
-            LayoutTier::Expanded,
-            LayoutTier::Wide,
-        ] {
-            let sessions = session_columns(tier, tier == LayoutTier::Wide);
-            let active = active_columns(tier);
-            let recent = recent_columns(tier);
-            let events = event_columns(tier);
-
-            assert_eq!(flex_count(&sessions), 1);
-            assert_eq!(flex_count(&active), 1);
-            assert_eq!(flex_count(&recent), 1);
-            assert_eq!(flex_count(&events), 1);
-            assert_eq!(
-                sessions
-                    .iter()
-                    .filter(|column| column.header.is_empty())
-                    .count(),
-                1
-            );
-            assert_eq!(
-                active
-                    .iter()
-                    .filter(|column| column.header.is_empty())
-                    .count(),
-                0
-            );
-            assert_eq!(
-                recent
-                    .iter()
-                    .filter(|column| column.header.is_empty())
-                    .count(),
-                usize::from(tier == LayoutTier::Expanded)
-            );
-            assert!(events.iter().all(|column| !column.header.is_empty()));
-        }
-    }
-
-    #[test]
-    fn metric_columns_are_right_aligned() {
-        let sessions = session_columns(LayoutTier::Wide, true);
-        for key in [
-            SessionColumn::Active,
-            SessionColumn::Requests,
-            SessionColumn::Failures,
-            SessionColumn::Input,
-            SessionColumn::Output,
-            SessionColumn::Rate,
-        ] {
-            assert_eq!(alignment(&sessions, key), Some(Alignment::Right));
-        }
-
-        let active = active_columns(LayoutTier::Wide);
-        for key in [
-            ActiveColumn::Input,
-            ActiveColumn::Output,
-            ActiveColumn::Rate,
-            ActiveColumn::Elapsed,
-        ] {
-            assert_eq!(alignment(&active, key), Some(Alignment::Right));
-        }
-
-        let recent = recent_columns(LayoutTier::Wide);
-        for key in [
-            RecentColumn::Code,
-            RecentColumn::Latency,
-            RecentColumn::Rate,
-            RecentColumn::Input,
-            RecentColumn::Output,
-        ] {
-            assert_eq!(alignment(&recent, key), Some(Alignment::Right));
-        }
-    }
-
-    #[test]
-    fn narrow_schemas_use_available_space_for_context() {
-        let sessions = session_columns(LayoutTier::Narrow, false);
-        assert!(
-            sessions
-                .iter()
-                .any(|column| column.key == SessionColumn::Project)
-        );
-        assert!(
-            sessions
-                .iter()
-                .any(|column| column.key == SessionColumn::Target)
-        );
-
-        let active = active_columns(LayoutTier::Narrow);
-        assert!(
-            active
-                .iter()
-                .any(|column| column.key == ActiveColumn::Provider)
-        );
-        assert!(
-            active
-                .iter()
-                .any(|column| column.key == ActiveColumn::Model)
-        );
-        assert!(
-            active
-                .iter()
-                .any(|column| column.key == ActiveColumn::Effort)
-        );
-
-        let recent = recent_columns(LayoutTier::Narrow);
-        assert!(
-            recent
-                .iter()
-                .any(|column| column.key == RecentColumn::Provider)
-        );
-        assert!(
-            recent
-                .iter()
-                .any(|column| column.key == RecentColumn::Input)
-        );
-        assert!(
-            recent
-                .iter()
-                .any(|column| column.key == RecentColumn::Output)
-        );
-
-        let events = event_columns(LayoutTier::Emergency);
-        assert_eq!(headers(&events), ["Time", "Code", "Message"]);
-    }
-
-    #[test]
-    fn empty_tables_hide_columns_and_center_placeholders() {
-        let sessions = draw(40, 9, |frame| {
-            render_sessions(frame, frame.area(), &[], 0, true, SystemTime::now())
-        });
-        let sessions_text = buffer_text(&sessions);
-        assert_centered(&sessions, "No sessions", 4);
-        assert!(!sessions_text.contains("provider"));
-        assert!(sessions_text.contains("No sessions"));
-
-        let active = draw(27, 6, |frame| render_active(frame, frame.area(), &[], 0));
-        let active_text = buffer_text(&active);
-        assert_centered(&active, "No active requests", 2);
-        assert!(!active_text.contains("started"));
-        assert!(active_text.contains("No active requests"));
-
-        let recent = draw(40, 9, |frame| {
-            render_recent(frame, frame.area(), &[], 0, false)
-        });
-        let recent_text = buffer_text(&recent);
-        assert_centered(&recent, "No recent requests", 4);
-        assert!(!recent_text.contains("finished"));
-        assert!(recent_text.contains("No recent requests"));
-
-        let events = draw(40, 9, |frame| render_events(frame, frame.area(), &[]));
-        let events_text = buffer_text(&events);
-        assert_centered(&events, "No events", 4);
-        assert!(!events_text.contains("time"));
-        assert!(events_text.contains("No events"));
-    }
-
-    #[test]
-    fn populated_tables_render_rows_without_placeholders() {
-        let monitor = MonitorHandle::new(10);
-        monitor.request_started(
-            "request-1",
-            Some("sess-1".to_string()),
-            Some(1),
-            EndpointKind::Messages,
-        );
-        monitor.project_resolved("request-1", "example-project");
-        monitor.provider_selected(
-            "request-1",
-            "codex",
-            "gpt-5.6-sol",
-            Some("high".to_string()),
-        );
-        let active_state: MonitorSnapshot = monitor.snapshot().into();
-
-        let sessions = draw(170, 8, |frame| {
-            render_sessions(
-                frame,
-                frame.area(),
-                &active_state.sessions,
-                0,
-                true,
-                active_state.snapshot_at,
-            )
-        });
-        let sessions_text = buffer_text(&sessions);
-        assert!(sessions_text.contains("Provider"));
-        assert!(sessions_text.contains("Project"));
-        assert!(sessions_text.contains("example-project"));
-        assert!(sessions_text.contains("sess-1"));
-        assert!(!sessions_text.contains("No sessions"));
-
-        let active = draw(120, 8, |frame| {
-            render_active(frame, frame.area(), &active_state.active, 0)
-        });
-        let active_text = buffer_text(&active);
-        assert!(active_text.contains("Started"));
-        assert!(active_text.contains("gpt-5.6-sol"));
-        assert!(!active_text.contains("No active requests"));
-
-        monitor.request_completed("request-1", 200, Some(100), Some(25));
-        let completed_state: MonitorSnapshot = monitor.snapshot().into();
-        let recent = draw(140, 8, |frame| {
-            render_recent(frame, frame.area(), &completed_state.recent, 0, false)
-        });
-        let recent_text = buffer_text(&recent);
-        assert!(recent_text.contains("Finished"));
-        assert!(recent_text.contains("200"));
-        assert!(!recent_text.contains("No recent requests"));
-
-        let events = draw(100, 8, |frame| {
-            render_events(frame, frame.area(), &completed_state.recent)
-        });
-        assert!(buffer_text(&events).contains("No events"));
-    }
-
-    #[test]
-    fn selected_rows_scroll_into_table_viewports() {
-        let state: MonitorSnapshot = mock_state().into();
-        let sessions = (0..12)
-            .map(|index| {
-                let mut session = state.sessions[0].clone();
-                session.session_id = Some(format!("row-{index:04}"));
-                session
-            })
-            .collect::<Vec<_>>();
-        let session_buffer = draw(120, 6, |frame| {
-            render_sessions(frame, frame.area(), &sessions, 11, true, state.snapshot_at)
-        });
-        let session_text = buffer_text(&session_buffer);
-        assert!(session_text.contains("row-0011"), "{session_text}");
-        assert!(!session_text.contains("row-0000"), "{session_text}");
-
-        let recent = (0..12)
-            .map(|index| {
-                let mut request = state.recent[0].clone();
-                request.project = Some(format!("row-{index:04}"));
-                request
-            })
-            .collect::<Vec<_>>();
-        let recent_buffer = draw(120, 6, |frame| {
-            render_recent(frame, frame.area(), &recent, 11, true)
-        });
-        let recent_text = buffer_text(&recent_buffer);
-        assert!(recent_text.contains("row-0011"), "{recent_text}");
-        assert!(!recent_text.contains("row-0000"), "{recent_text}");
-    }
-
-    #[test]
-    fn dashboard_shows_codex_sources_at_24_rows() {
-        let monitor = MonitorHandle::new(10);
-        monitor.request_started("done", None, None, EndpointKind::Messages);
-        monitor.provider_selected("done", "codex", "model", None);
-        monitor.codex_source("done", "api key (from chatgpt: usage limit)");
-        monitor.request_completed("done", 200, None, None);
-        monitor.request_started("active", None, None, EndpointKind::Messages);
-        monitor.provider_selected("active", "codex", "model", None);
-        monitor.codex_source("active", "chatgpt");
-        let state: MonitorSnapshot = monitor.snapshot().into();
-        let mut app = MonitorApp {
-            accounts: accounts::Accounts::new(false),
-            usage_open: false,
-            listen_url: "test".into(),
-            setup_text: String::new(),
-            show_setup: false,
-            show_help: false,
-            detail: Some(DetailView::Request(DetailSelection::Keyboard)),
-            focus: FocusPane::Recent,
-            selected: 0,
-            recent_selected: 0,
-            tick: 0,
-            phase: MonitorPhase::Running,
-            shutdown: None,
-            shutdown_complete: None,
-        };
-        let buffer = draw(140, 24, |frame| render(frame, &mut app, &state));
-        let text = buffer_text(&buffer);
-        assert!(text.contains("from chatgpt: usage limit"));
-        assert!(text.matches("chatgpt").count() >= 2);
-        assert!(text.matches("api key").count() >= 2);
-    }
-
-    #[test]
-    fn mock_state_renders_representative_panes_at_wide_width() {
-        let state: MonitorSnapshot = mock_state().into();
-        let mut app = MonitorApp {
-            accounts: accounts::Accounts::new(false),
-            usage_open: false,
-            listen_url: "mock://tui-demo".to_string(),
-            setup_text: String::new(),
-            show_setup: false,
-            show_help: false,
-            detail: None,
-            focus: FocusPane::Sessions,
-            selected: 0,
-            recent_selected: 0,
-            tick: 0,
-            phase: MonitorPhase::Running,
-            shutdown: None,
-            shutdown_complete: None,
-        };
-
-        let buffer = draw(180, 48, |frame| render(frame, &mut app, &state));
-        let text = buffer_text(&buffer);
-
-        assert!(text.contains("mock://tui-demo"), "{text}");
-        assert!(text.contains("duolane"), "{text}");
-        assert!(text.contains("streaming"), "{text}");
-        assert!(text.contains("gpt-5.6-terra"), "{text}");
-        assert!(text.contains("upstream connection closed"), "{text}");
-    }
-
-    #[test]
-    fn render_removes_control_characters_before_layout() {
-        let monitor = MonitorHandle::default();
-        let model = format!("gpt-{}5.6-terra", "\u{1b}".repeat(30));
-        monitor.request_started("req", Some("s\u{7}1".into()), None, EndpointKind::Messages);
-        monitor.provider_selected("req", "codex", model, None);
-        monitor.request_failed("req", Some(502), "upstream\u{1b}[2J\u{9b}31m closed");
-        let state: MonitorSnapshot = monitor.snapshot().into();
-        let mut app = MonitorApp {
-            accounts: accounts::Accounts::new(false),
-            usage_open: false,
-            listen_url: "http://127.0.0.1:3000".to_string(),
-            setup_text: String::new(),
-            show_setup: false,
-            show_help: false,
-            detail: None,
-            focus: FocusPane::Recent,
-            selected: 0,
-            recent_selected: 0,
-            tick: 0,
-            phase: MonitorPhase::Running,
-            shutdown: None,
-            shutdown_complete: None,
-        };
-
-        let buffer = draw(180, 48, |frame| render(frame, &mut app, &state));
-        let text = buffer_text(&buffer);
-
-        assert!(
-            buffer
-                .content()
-                .iter()
-                .all(|cell| !cell.symbol().contains(char::is_control)),
-            "{text:?}"
-        );
-        assert!(text.contains("gpt-5.6-terra"), "{text}");
-        assert!(text.contains("upstream[2J31m closed"), "{text}");
-    }
-
-    #[test]
-    fn shutdown_confirmation_can_be_cancelled_before_signalling_server() {
-        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-        let mut app = MonitorApp {
-            accounts: accounts::Accounts::new(false),
-            usage_open: false,
-            listen_url: "http://127.0.0.1:3000".to_string(),
-            setup_text: String::new(),
-            show_setup: false,
-            show_help: false,
-            detail: None,
-            focus: FocusPane::Sessions,
-            selected: 0,
-            recent_selected: 0,
-            tick: 0,
-            phase: MonitorPhase::Running,
-            shutdown: Some(shutdown_tx),
-            shutdown_complete: Some(mpsc::channel().1),
-        };
-
-        app.request_shutdown_confirmation();
-        assert_eq!(app.phase, MonitorPhase::ConfirmingShutdown);
-        assert!(matches!(
-            shutdown_rx.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-
-        let state: MonitorSnapshot = MonitorHandle::default().snapshot().into();
-        let screen = draw(80, 24, |frame| render(frame, &mut app, &state));
-        let text = buffer_text(&screen);
-        assert!(text.contains("Shut down proxy?"), "{text}");
-        assert!(text.contains("y confirm"), "{text}");
-        assert!(text.contains("n/Esc/q cancel"), "{text}");
-
-        app.cancel_shutdown_confirmation();
-        assert_eq!(app.phase, MonitorPhase::Running);
-        assert!(matches!(
-            shutdown_rx.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-
-        app.request_shutdown_confirmation();
-        app.begin_shutdown();
-        assert_eq!(app.phase, MonitorPhase::ShuttingDown);
-        assert_eq!(shutdown_rx.try_recv(), Ok(()));
-    }
-
-    #[test]
-    fn ctrl_c_starts_shutdown_then_requests_force_quit() {
-        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-        let (_shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel();
-        let mut app = MonitorApp {
-            accounts: accounts::Accounts::new(false),
-            usage_open: false,
-            listen_url: "http://127.0.0.1:3000".to_string(),
-            setup_text: String::new(),
-            show_setup: false,
-            show_help: false,
-            detail: None,
-            focus: FocusPane::Sessions,
-            selected: 0,
-            recent_selected: 0,
-            tick: 0,
-            phase: MonitorPhase::Running,
-            shutdown: Some(shutdown_tx),
-            shutdown_complete: Some(shutdown_complete_rx),
-        };
-
-        assert!(!app.handle_ctrl_c());
-        assert!(app.handle_ctrl_c());
-
-        assert_eq!(app.phase, MonitorPhase::ShuttingDown);
-        assert_eq!(shutdown_rx.try_recv(), Ok(()));
-        let state: MonitorSnapshot = MonitorHandle::default().snapshot().into();
-        let screen = draw(80, 24, |frame| render(frame, &mut app, &state));
-        let text = buffer_text(&screen);
-        assert!(text.contains("Shutting down..."));
-        assert!(text.contains("Press Ctrl-C to force quit"));
-    }
-
-    #[test]
-    fn shutdown_completion_accepts_notification_and_sender_drop() {
-        let (complete_tx, complete_rx) = mpsc::channel();
-        let app = MonitorApp {
-            accounts: accounts::Accounts::new(false),
-            usage_open: false,
-            listen_url: String::new(),
-            setup_text: String::new(),
-            show_setup: false,
-            show_help: false,
-            detail: None,
-            focus: FocusPane::Sessions,
-            selected: 0,
-            recent_selected: 0,
-            tick: 0,
-            phase: MonitorPhase::Running,
-            shutdown: None,
-            shutdown_complete: Some(complete_rx),
-        };
-
-        assert!(!app.shutdown_is_complete());
-        complete_tx.send(()).unwrap();
-        assert!(app.shutdown_is_complete());
-
-        let (complete_tx, complete_rx) = mpsc::channel();
-        let mut app = app;
-        app.shutdown_complete = Some(complete_rx);
-        drop(complete_tx);
-        assert!(app.shutdown_is_complete());
-    }
-
-    #[test]
-    fn header_renders_configured_listen_url() {
-        let app = MonitorApp {
-            accounts: accounts::Accounts::new(false),
-            usage_open: false,
-            listen_url: "http://[::]:18765".to_string(),
-            setup_text: String::new(),
-            show_setup: false,
-            show_help: false,
-            detail: None,
-            focus: FocusPane::Sessions,
-            selected: 0,
-            recent_selected: 0,
-            tick: 0,
-            phase: MonitorPhase::Running,
-            shutdown: None,
-            shutdown_complete: Some(mpsc::channel().1),
-        };
-        let state: MonitorSnapshot = MonitorHandle::default().snapshot().into();
-
-        let header = draw(120, 1, |frame| {
-            render_header(frame, frame.area(), &app, &state)
-        });
-
-        assert!(buffer_text(&header).contains("http://[::]:18765"));
-        assert!(buffer_text(&header).contains("active"));
-    }
-
-    #[test]
-    fn clamp_selection_caps_to_available_sessions() {
-        let mut app = MonitorApp {
-            accounts: accounts::Accounts::new(false),
-            usage_open: false,
-            listen_url: "http://127.0.0.1:3000".to_string(),
-            setup_text: String::new(),
-            show_setup: false,
-            show_help: false,
-            detail: None,
-            focus: FocusPane::Sessions,
-            selected: 10,
-            recent_selected: 10,
-            tick: 0,
-            phase: MonitorPhase::Running,
-            shutdown: None,
-            shutdown_complete: Some(mpsc::channel().1),
-        };
-
-        app.clamp_selection(3, 4);
-        assert_eq!(app.selected, 2);
-        assert_eq!(app.recent_selected, 3);
-
-        app.clamp_selection(0, 0);
-        assert_eq!(app.selected, 0);
-        assert_eq!(app.recent_selected, 0);
-    }
-
-    #[test]
-    fn arrow_navigation_moves_between_focus_panes_at_edges() {
-        let mut app = MonitorApp {
-            accounts: accounts::Accounts::new(false),
-            usage_open: false,
-            listen_url: "http://127.0.0.1:3000".to_string(),
-            setup_text: String::new(),
-            show_setup: false,
-            show_help: false,
-            detail: None,
-            focus: FocusPane::Sessions,
-            selected: 1,
-            recent_selected: 0,
-            tick: 0,
-            phase: MonitorPhase::Running,
-            shutdown: None,
-            shutdown_complete: Some(mpsc::channel().1),
-        };
-
-        app.move_down(2, 3, true);
-        assert_eq!(app.focus, FocusPane::Recent);
-        assert_eq!(app.recent_selected, 0);
-
-        app.move_up(2, 3, true);
-        assert_eq!(app.focus, FocusPane::Sessions);
-        assert_eq!(app.selected, 1);
-    }
-
-    #[test]
-    fn vim_navigation_stays_within_focused_pane() {
-        let mut app = MonitorApp {
-            accounts: accounts::Accounts::new(false),
-            usage_open: false,
-            listen_url: "http://127.0.0.1:3000".to_string(),
-            setup_text: String::new(),
-            show_setup: false,
-            show_help: false,
-            detail: None,
-            focus: FocusPane::Sessions,
-            selected: 1,
-            recent_selected: 0,
-            tick: 0,
-            phase: MonitorPhase::Running,
-            shutdown: None,
-            shutdown_complete: Some(mpsc::channel().1),
-        };
-
-        app.move_down(2, 3, false);
-        assert_eq!(app.focus, FocusPane::Sessions);
-        assert_eq!(app.selected, 1);
-
-        app.focus = FocusPane::Recent;
-        app.move_up(2, 3, false);
-        assert_eq!(app.focus, FocusPane::Recent);
-        assert_eq!(app.recent_selected, 0);
-    }
-}
+mod tests;

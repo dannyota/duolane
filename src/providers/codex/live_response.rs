@@ -1,3 +1,5 @@
+#[path = "live_response_errors.rs"]
+mod errors;
 use super::client::CodexHttpClient;
 use super::client_sse::{
     append_live_metadata_payload, event_stream_response, record_live_stream_downstream_capture,
@@ -12,7 +14,6 @@ use super::continuation::ContinuationReservation;
 use super::continuation::continuation_candidate_for_owner;
 use super::error_response::*;
 use super::live_completion::*;
-use super::recovery::live_retry_exhausted;
 use super::request_state::*;
 use super::translate::live_stream::LiveStreamTranslator;
 #[cfg(test)]
@@ -28,11 +29,9 @@ use crate::request_identity::ConversationIdentity;
 use crate::retry::{compute_backoff_delay, sleep};
 use axum::response::Response;
 use bytes::Bytes;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-const MAX_RETRYABLE_LIVE_STREAM_RETRIES: u32 = 3;
-pub(super) const MAX_EMPTY_COMPLETION_RETRIES: u32 = 2;
-pub(super) const EMPTY_CODEX_COMPLETION_DETAIL: &str = "empty_codex_completion";
+use errors::exhausted_response;
+pub(super) use errors::tracked_error_response;
+use std::{sync::Arc, time::Duration, time::Instant};
 const LIVE_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 enum LiveStreamStart {
     Response(Response),
@@ -77,6 +76,7 @@ pub(super) async fn live_stream_response(
     loop {
         let upstream_events = match transport {
             config::CodexTransport::Http => {
+                super::client_live::invalidate_live_continuation_pool(continuation.as_ref());
                 client
                     .stream_codex_http_events_for_owner_tracked(&request_body, &ctx, &http_body)
                     .await
@@ -259,29 +259,6 @@ pub(super) async fn live_stream_response(
         }
     }
 }
-fn exhausted_response(
-    ctx: &RequestContext,
-    transport: config::CodexTransport,
-    cause: &client::CodexError,
-) -> Response {
-    let exhausted = live_retry_exhausted(ctx, transport, cause);
-    let mut response = map_codex_error_to_response(&exhausted);
-    if ctx.recovery_budget.is_tracked() {
-        response
-            .extensions_mut()
-            .insert(Arc::new(ctx.recovery_budget.failure(cause.clone())));
-    }
-    response
-}
-pub(super) fn tracked_error_response(ctx: &RequestContext, error: &client::CodexError) -> Response {
-    let mut response = map_codex_error_to_response(error);
-    if ctx.recovery_budget.is_tracked() {
-        response.extensions_mut().insert(Arc::new(
-            ctx.recovery_budget.failure_with_cause(error.clone()),
-        ));
-    }
-    response
-}
 fn provider_retry(
     upstream_events: &websocket::CodexWebSocketEventStream,
     error: client::CodexError,
@@ -312,6 +289,7 @@ async fn live_stream_response_once(
         .with_http_tool_commits(is_http);
     let mut upstream_sse_body = Vec::new();
     let mut pending_chunk = Vec::new();
+    let mut echoed = super::live_echo::LiveEcho::default();
     let mut generation_started = false;
     let mut hosted_tool_executed = false;
     while let Some(item) = upstream_events.recv().await {
@@ -475,8 +453,9 @@ async fn live_stream_response_once(
             }
             record_live_stream_downstream_capture(&ctx, &pending_chunk);
             record_live_stream_progress(&ctx, &pending_chunk);
+            echoed.push(&pending_chunk);
             if terminal {
-                update_continuation_from_upstream(
+                update_live_continuation(
                     ctx.session_id.as_deref(),
                     &request_continuation,
                     compaction.attempt,
@@ -484,6 +463,7 @@ async fn live_stream_response_once(
                     &upstream_sse_body,
                     upstream_events.socket_id(),
                     compaction.compact_boundary,
+                    echoed,
                 );
                 return LiveStreamStart::Response(single_live_stream_response(pending_chunk, ctx));
             }
@@ -495,14 +475,16 @@ async fn live_stream_response_once(
                 request_continuation,
                 request_body,
                 upstream_sse_body,
+                echoed,
                 compaction,
             ));
         }
         if terminal {
+            echoed.push(&pending_chunk);
             if tracked_http && is_codex_success_terminal_event(&payload) {
                 ctx.recovery_budget.mark_committed();
             }
-            update_continuation_from_upstream(
+            update_live_continuation(
                 ctx.session_id.as_deref(),
                 &request_continuation,
                 compaction.attempt,
@@ -510,6 +492,7 @@ async fn live_stream_response_once(
                 &upstream_sse_body,
                 upstream_events.socket_id(),
                 compaction.compact_boundary,
+                echoed,
             );
             if pending_chunk.is_empty() {
                 return LiveStreamStart::Response(event_stream_response(
@@ -545,6 +528,7 @@ fn remaining_live_stream_response(
     request_continuation: ContinuationReservation,
     request_body: translate::request::ResponsesRequest,
     mut upstream_sse_body: Vec<u8>,
+    mut echoed: super::live_echo::LiveEcho,
     compaction: LiveStreamCompaction,
 ) -> Response {
     let is_http = upstream_events.is_http();
@@ -629,6 +613,7 @@ fn remaining_live_stream_response(
                         }
                     };
                     if !chunk.is_empty() {
+                        echoed.push(&chunk);
                         record_live_stream_progress(&ctx, &chunk);
                         if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
                             abort_request_state(
@@ -640,7 +625,7 @@ fn remaining_live_stream_response(
                         }
                     }
                     if terminal {
-                        update_continuation_from_upstream(
+                        update_live_continuation(
                             ctx.session_id.as_deref(),
                             &request_continuation,
                             compaction.attempt,
@@ -648,6 +633,7 @@ fn remaining_live_stream_response(
                             &upstream_sse_body,
                             upstream_events.socket_id(),
                             compaction.compact_boundary,
+                            echoed,
                         );
                         return;
                     }
@@ -697,7 +683,6 @@ fn remaining_live_stream_response(
     });
     event_stream_response(stream)
 }
-
 #[cfg(test)]
 mod tests {
     use futures_util::StreamExt;
@@ -705,6 +690,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::super::provider_test_support::*;
+    use super::super::recovery::live_retry_exhausted;
     use super::*;
 
     #[tokio::test]

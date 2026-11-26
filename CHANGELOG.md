@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.12.0
+
+### Changed
+
+- Active requests on the monitor Overview keeps a fixed height, 10 lines at
+  start, instead of resizing as requests come and go. Drag its bottom border
+  with the left mouse button to change it for the rest of the monitor's run.
+
+## 0.11.0
+
+### Changed
+
+- `/v1/messages` uses the full Responses lane by default for the built-in models
+  known to exist there, so they can call several tools at once. `gpt-6.2-sol`
+  and `gpt-6.2-astra` join that list, and the `sol`, `astra`, and `terra`
+  aliases follow it. `codex.fullLane: false` or `DUOLANE_CODEX_FULL_LANE=off`
+  turns it off. Chat Completions and native Responses keep Lite unless the full
+  lane is set.
+- The Codex base instructions are also sent on the full lane, before Claude
+  Code's system prompt, as the Codex client sends them.
+- A pooled WebSocket that returned less than 10 seconds ago is reused without a
+  ping round trip; a socket the server already closed is still caught before the
+  send.
+
+### Fixed
+
+- Chat Completions sends Lite-only fields only on Lite, and a Luna hosted search
+  moves to a known full-lane model.
+
+## 0.10.0
+
+### Changed
+
+- Continuation is on by default. When a Codex WebSocket request extends a
+  recorded response, duolane sends `previous_response_id` with only the new
+  items. A response is recorded only when the output the backend stored matches
+  what the client received, so every doubt sends the full context.
+  `DUOLANE_CODEX_PREVIOUS_RESPONSE_ID=off` or `codex.previousResponseId: false`
+  turns it off.
+- A conversation's WebSocket is kept for its next request even when that request
+  cannot continue, and is dropped on a retry after a failure, on a move to HTTP,
+  and on an account change.
+- The Release workflow reuses the tests CI already passed on the tagged commit
+  and always runs the dependency policy.
+
+### Added
+
+- The monitor Overview has a summary of the Claude and Codex lanes and of the
+  Codex connections: queued requests, handshakes, socket reuse, HTTP fallbacks,
+  and origin 403s. Active requests show their phase (`queued #n`, `connecting`,
+  `thinking`, `streaming`) and a timeline; Recent requests show Wait, First, and
+  Total.
+
 ## 0.9.0
 
 ### Added

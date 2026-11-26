@@ -32,10 +32,22 @@ Codex serves two lanes: the full Responses API and Responses Lite.
 
 - A built-in list says which built-in models use Lite. For any other id, the
   catalog entry's Lite field decides, and it defaults to false.
-- `DUOLANE_CODEX_FULL_LANE` moves the built-in Lite models that are known to
-  exist on the full lane off Lite. It never overrides the catalog for other ids,
-  because their full-lane availability is unknown. On Chat Completions, only the
-  Codex family aliases honor this setting.
+- The full lane setting moves the built-in Lite models known to exist on the
+  full lane off Lite, because only the full lane accepts parallel tool calls:
+  GPT-6 Sol, Terra, and Astra up to 6.2. On 2026-11-26 a request asking for two
+  tool calls got both on the full lane from `gpt-6.2-sol`, `gpt-6.2-astra`, and
+  `gpt-6.1-terra`, and one on Lite. The setting never overrides the catalog for
+  other ids. A family alias moves when the model it selects is listed; `haiku`
+  stays on Lite through Luna.
+- `codex.fullLane` is a JSON boolean; `DUOLANE_CODEX_FULL_LANE` overrides it
+  with `1`, `true`, `yes`, or `on`, and `0`, `false`, `no`, or `off`, and any
+  other value falls through. When neither sets it, `/v1/messages` and its token
+  counting use the full lane, while Chat Completions and native Responses keep
+  Lite, because their clients may send Lite-only fields such as `all_turns`
+  context or an `additional_tools` item. On Chat Completions, only the Codex
+  family aliases honor the setting.
+- On the full lane a deferred tool that a `tool_reference` loads changes the
+  `tools` field, so that request sends full context instead of continuing.
 - Requests with hosted `web_search` use the full lane, because Lite accepts only
   function and custom tools.
 - The Luna family exists only on Lite. A hosted search request for a Luna model
@@ -92,23 +104,30 @@ The official Codex client adds its model's base instructions, when they are not
 empty, to the start of a request's input as a developer message, and sends no
 `instructions` field, as
 [`build_responses_request`](https://github.com/openai/codex/blob/main/codex-rs/core/src/client.rs)
-shows. On the Lite lane a tools item comes first. The text is the
+shows, on both lanes. On the Lite lane a tools item comes first; on the full
+lane the tools stay in the `tools` field. The text is the
 `model_messages.instructions_template` of the model's [catalog](#model-catalog)
 entry, unchanged. duolane sends the same text in the same place, before Claude
 Code's system prompt.
 
 - The template goes only into a `/v1/messages` request that the ChatGPT source
-  sends on the Lite lane, that is not a
-  [compaction request](#compaction-requests), and that gives the model a tool it
-  may call: a tool in the tools item or loaded later in the history, with a
-  `tool_choice` other than `none`. A deferred placeholder is not a tool.
+  sends, that is not a [compaction request](#compaction-requests), and that
+  gives the model a function or custom tool it may call, with a `tool_choice`
+  other than `none` that does not force hosted search. A hosted search tool next
+  to such a tool does not change this, as it does not for the official client.
+  On the Lite lane the tool is in the tools item or loaded later in the history;
+  on the full lane it is in the `tools` field. A deferred placeholder is not a
+  tool.
 - The input then reads: the tools item when there is one, the template, the
   client's system prompt when there is one, and the history unchanged. Each of
-  the two texts is its own developer message.
+  the two texts is its own developer message. On the full lane the system prompt
+  then leaves the `instructions` field, so the request has none, as the official
+  client's has none.
 - Every other request is unchanged: one without a callable tool, such as a title
-  or a classifier, a compaction request and native server compaction, the full
-  lane, hosted search, native Responses, Chat Completions, and any attempt with
-  an OpenAI API key.
+  or a classifier, a compaction request and native server compaction, standalone
+  search, native Responses, Chat Completions, and any attempt with an OpenAI API
+  key. A `/v1/messages` request on the full lane that does not get the template
+  keeps its system prompt in `instructions`.
 - The template is sent as the catalog gives it. duolane does not edit it and
   does not log it directly. It is part of the request, so an opt-in traffic
   capture records it, continuation keeps it in memory with the rest of the
@@ -141,15 +160,9 @@ the effect.
 
 ## Continuation
 
-When `DUOLANE_CODEX_PREVIOUS_RESPONSE_ID` is on and a WebSocket request extends
-the transcript of a stored response, duolane sends `previous_response_id` with
-only the new items.
-
-- `function_call.arguments` are compared as JSON values. The stored transcript
-  keeps the text the model streamed, while the next request re-serializes the
-  client's parsed input.
-- Stale continuation state is dropped before a retry picks another transport or
-  connection.
+By default a WebSocket request that extends a recorded response sends
+`previous_response_id` with only its new items. The rules that decide when this
+is safe are in [continuation](continuation.md).
 
 ## Compaction requests
 
@@ -184,6 +197,13 @@ native server compaction retain their configured transport.
   minutes ago or does not answer a ping. The request then counts as a WebSocket
   attempt that failed before it was sent, and the rules below choose a new
   socket, HTTP, or an error.
+- When the socket returned to the pool less than 10 seconds ago, a check that
+  does not wait replaces the ping: frames that already arrived are read, a ping
+  is answered, and a close, an end of stream, an error, or any other frame
+  closes the socket as a failed ping does. The ping would cost one round trip on
+  most agent steps, and a socket the server closed after its last response is
+  still caught before the send. A socket that fails after this check follows the
+  rules below for a transport failure, as on a new socket.
 - Reuse never changes how a request ends: errors, limits, and incomplete
   responses keep the results the rules below give them. It only decides what
   happens to the socket. A socket returns to the pool when its stream showed a
@@ -357,6 +377,9 @@ first-party source confirms them, so recheck them during live verification.
   response headers after first output, `usage_limit_reached` and its headers,
   and `codex.rate_limits` with remaining credits.
 - Whether the live Codex endpoints accept gzip request bodies.
+- Whether the response the ChatGPT backend keeps for a `previous_response_id`
+  always equals the output its final event lists, and how often a Claude Code
+  request extends the recorded transcript item for item.
 - Whether the [base instructions](#base-instructions) make a model finish a
   delegated task that it otherwise ends early, and whether they change how it
   uses Claude Code's tools.

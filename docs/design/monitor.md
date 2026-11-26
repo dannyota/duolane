@@ -16,7 +16,8 @@ Use the existing detail panes and add mouse input to the dashboard. Keeping
 clicks separate from keyboard navigation would duplicate selection logic. Single
 click opens detail; `Esc` closes it. Existing keyboard shortcuts keep working.
 Ignore clicks on table headers, empty space, and while help, setup, or shutdown
-overlays are visible. No pointer support for Active requests.
+overlays are visible. Clicking an Active requests row does nothing; only its
+bottom border responds, to resize it.
 
 Read hit targets from the visible table rows of the last rendered frame,
 including the scroll offset and the Events filter. Enable mouse capture only
@@ -79,8 +80,27 @@ Events.
   it. The attached and demo monitors show no Claude bars.
 - Sessions is as tall as its rows, up to 30% of the height. Events is one line
   while it has no rows, and up to 25% of the height otherwise. Active requests
-  takes the rows it needs, up to half of what is left, and Recent requests takes
-  the rest.
+  has a fixed height, 10 lines with borders at start, so it does not move as
+  requests come and go. Recent requests takes the rest.
+- Dragging the bottom border of Active requests with the left mouse button sets
+  its height for the rest of the monitor's run. Active requests keeps at least 3
+  lines and leaves Recent requests at least 3; a smaller terminal shrinks it to
+  fit without forgetting the chosen height. Any other click on that border does
+  nothing.
+- In Ghostty, Kitty, and foot the pointer shows `ns-resize` while it is over
+  that border or dragging it, through
+  [OSC 22](https://ghostty.org/docs/vt/osc/22), and `default` otherwise. The
+  monitor tracks the last mouse position and recomputes the shape after each
+  frame, so an overlay, another view, or a moved border also restores it. It
+  resets the shape when it stops drawing, on every exit path including a panic,
+  before the terminal is restored. Writing the sequence is best effort: a failed
+  write neither stops the monitor nor changes how it exits.
+- The terminal is recognized from `TERM_PROGRAM` `ghostty` or `TERM`
+  `xterm-ghostty`, `xterm-kitty`, `foot`, or `foot-extra`. Inside tmux or
+  screen, seen from `TMUX`, `STY`, `TERM_PROGRAM` `tmux`, or a `TERM` starting
+  with `tmux` or `screen`, and in any other terminal, no sequence is sent,
+  because terminals disagree on shape names and some print what they do not
+  parse. WezTerm does not handle OSC 22.
 - Sessions shows a Queue count after the active count. The row for requests
   without a session counts them too.
 - Below the expanded width the summary cells stack, each one full-width line
@@ -158,9 +178,10 @@ header, account, or conversation value.
 
 `1` opens Overview and `2` opens Usage. The view shows the Claude profiles and
 the ChatGPT subscription with their limits, then Speed by model and Tokens by
-session. The in-process monitor adds the [profile state](#profile-state), the
-[account details](#account-details), and the
-[account actions](#account-actions).
+session. The in-process monitor adds the
+[profile state](monitor-accounts.md#profile-state), the
+[account details](monitor-accounts.md#account-details), and the
+[account actions](monitor-accounts.md#account-actions).
 
 - A limit window is a bar with its percent used and reset time. The bar is
   yellow from 50% and red from 80%.
@@ -184,7 +205,7 @@ session. The in-process monitor adds the [profile state](#profile-state), the
   height below the limits by their row counts, and a table that does not fit
   shows the rows that fit and the number left out.
 - The in-process monitor shows the Claude profiles as the
-  [profile table](#profile-table), one line per profile.
+  [profile table](monitor-accounts.md#profile-table), one line per profile.
 - The ChatGPT pane shows one line per window when it has room. Otherwise it uses
   compact lines. A compact line gives for each window a short label, the
   percent, and the time left until the reset, such as `5h 42% 1h54m`; then a
@@ -218,147 +239,9 @@ or selection state over HTTP.
 
 `r` reloads the local names and saved choice. Entering Usage also reads the
 local roster. These reads make no provider request. A registered profile is not
-evidence that its login is still valid; [account details](#account-details)
-report the login separately.
-
-### Profile table
-
-The in-process monitor lists the Claude profiles in a table with a header, so
-every value has a labeled column and nothing needs a key to appear.
-
-- The columns are the saved and suggested marks, `PROFILE`, `ACCOUNT`, `PLAN`,
-  `5H`, `WEEK`, `LOGIN`, `STATUS`, `SEEN`, and a note for a shared account. A
-  window is a bar of 6 cells, the percent used, and the time until its reset.
-- `●` marks the profile saved for the next launch and `★` the suggested one. The
-  top border names both marks and the saved profile.
-- When the pane is too narrow, columns give way in this order: the note, the
-  account beyond 16 cells, `SEEN`, `LOGIN`, the bars, `PLAN`, `ACCOUNT`, and the
-  profile name beyond 8 cells. The name, both windows, and the status always
-  show.
-- Below the rows, a button line shows every action for the focused profile:
-  `[Enter Use]`, `[L Sign in]`, `[D Remove]`, `[S Switch]`, `[A Add]`, and
-  `[R Refresh]`. A button that does not apply to the focused profile is dim. A
-  left click on a button acts as its key, and the keys work in either case.
-- The last line is the message line. It shows, first of those that apply: the
-  running action, the result of the last action in green or red, the result of a
-  selection, the `CLAUDE_CONFIG_DIR` override, and otherwise the focused profile
-  in full with its account, login time, and the age of the details.
-- When the pane is too short, the header goes first, then the message line. The
-  rows scroll to keep the focused profile in view above the buttons.
-
-### Quick switch
-
-`n` picks another Claude profile for the next launch from either view. It is a
-shortcut for focusing a row and pressing `Enter`, so it saves a selection and
-never starts a launch or changes a running session.
-
-- `n` opens Usage and the profile confirmation for a target. The first press
-  takes the suggested profile, or without one the profile after the saved one in
-  table order. Each further press moves to the next target and wraps around.
-- A target is never the saved profile, a profile that holds the same account as
-  the saved one, or a profile whose login is known to be signed out or expired.
-  With no target the message line says so and nothing opens.
-- The confirmation names the profile, its account, and the percent used of both
-  windows when they are known. `Enter` and `Esc` keep the rules of the profile
-  confirmation.
-- The key does nothing in the attached and demo monitors, when
-  `CLAUDE_CONFIG_DIR` overrides the selection, while a name is typed, and while
-  an account action waits for confirmation.
-
-### Profile state
-
-The table shows the state of each Claude profile from the plan usage the monitor
-already loads.
-
-- The status follows the `STATUS` rules of
-  [plan usage](claude-accounts.md#plan-usage): `available` in green, `limited`
-  in red with the time until the reset, and `unknown` in dim text.
-- `SEEN` gives the age of the values. After 15 minutes it reads `stale` with the
-  age, in yellow, as the ChatGPT report is marked. A stale value is still shown,
-  because an idle account sends nothing new.
-- The bottom border of the pane gives the total over all accounts, with the text
-  and the rules of the `accounts list` total.
-- One profile is marked `★` as suggested: the available profile whose fuller
-  window has the lowest percent used. An earlier row wins a tie. A profile is
-  skipped when its status is not `available`, when it holds the same account as
-  an earlier row, or when its login is known to be signed out or expired. A
-  roster of one profile has no mark. The mark is advice only. It never changes
-  the selection and never starts a launch.
-
-### Account details
-
-The in-process monitor on Unix shows what `accounts list` shows for each
-profile: the account email, the plan, the time left on the stored login, and a
-note when a profile holds the same account as an earlier row. Profiles that hold
-the same account share the newest plan usage, as in `accounts list`.
-
-- The details come from the
-  [account details](claude-accounts.md#account-details) reader, with its limits
-  on time, output, and displayed text. Each check runs `claude auth status` once
-  per profile, so it runs on a background thread and never blocks drawing.
-- A check starts when Usage opens and the last result is older than 5 minutes,
-  and on `r`. Only one check runs at a time. An `r` or a finished action during
-  a check starts one more check when it ends. The last result stays on screen
-  while a check runs.
-- The message line states the age of the details, such as
-  `Accounts checked 2m05s ago`, or `Accounts checking`, apart from the plan
-  usage, which reloads every 30 seconds. A profile with no details shows `-`.
-- The login time is yellow under 3 days and red when the login expired. A
-  signed-out profile shows `not signed in` as its account.
-- The check installs no signal handler. Leaving the monitor cancels it, stops
-  its status process groups, and waits for the thread.
-- The details stay in the memory of the monitor that read them. They are never
-  written to a file, the log, or the monitor snapshot. The attached and demo
-  monitors never run the check and never show an account email.
-
-### Account actions
-
-The in-process monitor on Unix can run the account commands for the focused
-profile. Each action runs the `duolane` program itself as a child process with
-fixed arguments, so it keeps the checks, locks, and prompts of the
-[command](claude-accounts.md#commands). The monitor builds no shell command. The
-only text taken from the keyboard is a new profile name, accepted only when it
-passes the profile name rule.
-
-| Key | Action            | Command                        | Mode     |
-| --- | ----------------- | ------------------------------ | -------- |
-| `a` | Add a profile     | `accounts login <name>`        | handoff  |
-| `l` | Sign in again     | `accounts login <name>`        | handoff  |
-| `d` | Remove a profile  | `accounts remove <name> --yes` | captured |
-| `s` | Switch and resume | `accounts switch <name>`       | handoff  |
-
-- Every action asks for confirmation in an overlay that names the action, the
-  profile, and the account last seen for it. `Enter` confirms under the size
-  rule of the profile confirmation and `Esc` cancels. `a` first asks for the new
-  name and refuses a name that is already registered.
-- On confirmation the monitor reads the roster again. It runs the action only
-  when the profile is still registered, or still absent for `a`. The command
-  itself checks the name again under its locks.
-- `l` and `d` are refused for `default`, which Claude Code manages. `s` is
-  refused for the saved profile and when `CLAUDE_CONFIG_DIR` overrides the
-  selection. `s` resumes in the directory where `duolane serve` started, and the
-  confirmation names that directory.
-- Only one action runs at a time. Another action key during a run reports that
-  the monitor is busy.
-- A captured action runs on a background thread with standard input closed, in
-  its own process group. Its output is kept up to 64 KiB with control characters
-  and escape sequences removed. After 60 seconds the monitor stops the process
-  group and reports a timeout. The message line shows the action while it runs,
-  then the result with the last line of output.
-- A handoff action needs the terminal for a browser sign-in or for Claude Code.
-  The monitor leaves the alternate screen, turns off raw mode and mouse capture,
-  and runs the child in its own process group as the foreground group of the
-  terminal. `Ctrl-C` therefore reaches only the child, never the proxy. A child
-  stopped with `Ctrl-Z` is continued at once. When the child exits, the monitor
-  takes the terminal back, waits for `Enter`, and redraws. The proxy serves
-  throughout.
-- After an action ends, however it ends, the monitor reloads the roster and the
-  plan usage and starts an account details check. A failed action changes no
-  monitor state besides the message line.
-- A click on a button only opens the confirmation or the name entry, as its key
-  does. While the new name is typed, every key goes to the name, so `q`, `1`,
-  and `r` do not act on the monitor, and clicks are ignored.
-- The attached and demo monitors show no table, no buttons, and run nothing.
+evidence that its login is still valid;
+[account details](monitor-accounts.md#account-details) report the login
+separately.
 
 ### Reported limits
 

@@ -32,14 +32,16 @@ pub type CodexHttpEventReceiver =
 pub(crate) const MAX_UPSTREAM_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) struct OwnerAwareCodexResponse {
     response: CodexResponse,
+    #[cfg(test)]
     pub(crate) socket_id: Option<u64>,
     pub(super) hosted_tool_executed: bool,
 }
 impl OwnerAwareCodexResponse {
-    pub(crate) fn new(response: CodexResponse, socket_id: Option<u64>) -> Self {
+    pub(crate) fn new(response: CodexResponse, _socket_id: Option<u64>) -> Self {
         Self {
             response,
-            socket_id,
+            #[cfg(test)]
+            socket_id: _socket_id,
             hosted_tool_executed: false,
         }
     }

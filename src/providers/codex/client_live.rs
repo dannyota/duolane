@@ -74,10 +74,15 @@ impl CodexHttpClient {
             None => {
                 let auth = if ctx.recovery_budget.is_tracked() {
                     self.auth_for_buffered_http(&body.reasoning_account, &ctx.recovery_budget)
-                        .await?
+                        .await
                 } else {
-                    self.auth_for(&body.reasoning_account).await?
-                };
+                    self.auth_for(&body.reasoning_account).await
+                }
+                .inspect_err(|error| {
+                    if error.detail.as_deref() == Some(CODEX_ACCOUNT_CHANGED_DETAIL) {
+                        invalidate_live_continuation_pool(continuation);
+                    }
+                })?;
                 let quota = quota_for_auth(ctx, &auth);
                 (auth, None, quota)
             }
@@ -87,11 +92,8 @@ impl CodexHttpClient {
             ctx.recovery_budget
                 .set_credential(super::sources::CredentialId::for_chatgpt_auth(&auth));
         }
-        let turn_id = continuation.and_then(super::continuation::ContinuationReservation::turn_id);
-        if should_reset_websocket_pool(continuation)
-            && let Some(owner) = websocket_pool_owner(continuation)
-        {
-            super::websocket::invalidate_codex_websocket_pool_turn_for_owner(owner, turn_id);
+        if should_reset_websocket_pool(continuation) {
+            invalidate_live_continuation_pool(continuation);
         }
 
         let client = self.clone();
@@ -551,10 +553,7 @@ pub(super) fn invalidate_live_continuation_pool(
     let Some(continuation) = continuation else {
         return;
     };
-    let Some(owner) = websocket_pool_owner(Some(continuation)) else {
-        return;
-    };
-    super::websocket::invalidate_codex_websocket_pool_turn_for_owner(owner, continuation.turn_id());
+    super::websocket::invalidate_codex_websocket_pool_reservation(continuation);
 }
 
 #[cfg(test)]
@@ -577,7 +576,7 @@ pub(super) fn should_reset_websocket_pool(
     else {
         return false;
     };
-    reason != "disabled"
+    reason == "full_context_retry"
 }
 
 fn unauthorized_event_policy(payload: &serde_json::Value) -> (bool, bool) {
@@ -1635,16 +1634,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn websocket_pool_reset_clears_initial_stale_state() {
+    fn websocket_pool_reset_only_for_full_context_retry() {
         let owner = Some(ConversationIdentity::Main("session".into()));
         let missing_state =
             test_continuation(owner.clone(), None, None, None, Some("missing_state"));
         let disabled = test_continuation(owner.clone(), None, None, None, Some("disabled"));
-        let prompt_changed = test_continuation(owner, None, None, None, Some("prompt_changed"));
+        let prompt_changed =
+            test_continuation(owner.clone(), None, None, None, Some("prompt_changed"));
+        let retry = test_continuation(owner, None, None, None, Some("full_context_retry"));
 
-        assert!(should_reset_websocket_pool(Some(&missing_state)));
+        assert!(!should_reset_websocket_pool(Some(&missing_state)));
         assert!(!should_reset_websocket_pool(Some(&disabled)));
-        assert!(should_reset_websocket_pool(Some(&prompt_changed)));
+        assert!(!should_reset_websocket_pool(Some(&prompt_changed)));
+        assert!(should_reset_websocket_pool(Some(&retry)));
     }
 
     #[test]
