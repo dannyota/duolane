@@ -62,7 +62,7 @@ def release_proof(repo, sha, run, jobs, ref, compare):
             and master_sha(ref) is not None and valid_compare(sha, compare))
 
 
-def wait_for_release(repo, sha, fetch_runs, fetch_jobs, clock=time.monotonic, sleep=time.sleep, deadline=None):
+def wait_for_release(repo, sha, fetch_runs, fetch_jobs, fetch_run, clock=time.monotonic, sleep=time.sleep, deadline=None):
     deadline = min(clock() + 300, deadline if deadline is not None else float("inf"))
     while True:
         if clock() >= deadline:
@@ -78,7 +78,11 @@ def wait_for_release(repo, sha, fetch_runs, fetch_jobs, clock=time.monotonic, sl
                 return False
             if (matching_run(repo, sha, run) and run.get("status") == "completed"
                     and run.get("conclusion") == "success" and successful_ci(run, fetch_jobs(run))):
-                return clock() < deadline
+                latest = fetch_run(run)
+                if (matching_run(repo, sha, latest) and latest["id"] == run["id"]
+                        and latest["run_attempt"] == run["run_attempt"]
+                        and latest.get("status") == "completed" and latest.get("conclusion") == "success"):
+                    return clock() < deadline
         pending = any(matching_run(repo, sha, run) and run.get("status") in ("queued", "in_progress") for run in runs)
         remaining = deadline - clock()
         if not pending or remaining <= 0:
@@ -86,7 +90,7 @@ def wait_for_release(repo, sha, fetch_runs, fetch_jobs, clock=time.monotonic, sl
         sleep(min(15, remaining))
 
 
-def check_release(repo, sha, fetch_runs, fetch_jobs, fetch_ref, fetch_compare, deadline=None):
+def check_release(repo, sha, fetch_runs, fetch_jobs, fetch_run, fetch_ref, fetch_compare, deadline=None):
     clock = time.monotonic
     if deadline is None:
         deadline = clock() + 300
@@ -98,7 +102,7 @@ def check_release(repo, sha, fetch_runs, fetch_jobs, fetch_ref, fetch_compare, d
             raise TimeoutError("proof deadline reached")
         return result
     try:
-        if not wait_for_release(repo, sha, lambda: call(fetch_runs), lambda run: call(fetch_jobs, run), clock=clock, deadline=deadline):
+        if not wait_for_release(repo, sha, lambda: call(fetch_runs), lambda run: call(fetch_jobs, run), lambda run: call(fetch_run, run), clock=clock, deadline=deadline):
             return False
         master = master_sha(call(fetch_ref))
         if not master:
@@ -159,6 +163,7 @@ def main():
             repo, sha,
             lambda: {"workflow_runs": pages(runs_path, "workflow_runs", deadline)},
             lambda run: {"jobs": pages(f"{root}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100", "jobs", deadline)},
+            lambda run: api(f"{root}/actions/runs/{run['id']}", deadline),
             lambda: api(f"{root}/git/ref/heads/master", deadline),
             lambda master: api(f"{root}/compare/{sha}...{master}", deadline),
             deadline=deadline,

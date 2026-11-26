@@ -23,7 +23,6 @@ jobs:
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 7
-    continue-on-error: true
     permissions:
       contents: read
       actions: read
@@ -31,6 +30,8 @@ jobs:
       skip: ${{ steps.classify.outputs.skip }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        continue-on-error: true
         with:
           fetch-depth: 2
           persist-credentials: false
@@ -39,10 +40,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_SHA: ${{ github.sha }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
         run: |
-          if git show HEAD^1:scripts/check-ci-skip.py > "$RUNNER_TEMP/check-ci-skip.py" &&
-             git show HEAD^1:scripts/check-tested-tree.py > "$RUNNER_TEMP/check-tested-tree.py"; then
-            python3 -I "$RUNNER_TEMP/check-ci-skip.py"
+          if [ "$CHECKOUT_OUTCOME" = success ] &&
+             git show HEAD^1:scripts/check-ci-skip.py > "$RUNNER_TEMP/check-ci-skip.py" &&
+             git show HEAD^1:scripts/check-tested-tree.py > "$RUNNER_TEMP/check-tested-tree.py" &&
+             GITHUB_OUTPUT=/dev/null python3 -I "$RUNNER_TEMP/check-ci-skip.py" > "$RUNNER_TEMP/skip-decision" &&
+             { cmp -s "$RUNNER_TEMP/skip-decision" <(printf 'skip=true\n') || cmp -s "$RUNNER_TEMP/skip-decision" <(printf 'skip=false\n'); }; then
+            cat "$RUNNER_TEMP/skip-decision" >> "$GITHUB_OUTPUT"
           else
             echo 'skip=false' >> "$GITHUB_OUTPUT"
           fi

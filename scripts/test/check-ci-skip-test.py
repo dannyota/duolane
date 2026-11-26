@@ -1,3 +1,9 @@
+import os
+import subprocess
+import tempfile
+from unittest.mock import patch
+import io
+import contextlib
 import importlib.util
 from pathlib import Path
 import sys
@@ -38,6 +44,30 @@ class ClassifierTests(unittest.TestCase):
         for new in (dict(old, **{"Cargo.toml": trees("1.2.4")["Cargo.toml"]}), dict(trees("1.2.4"), **{"Cargo.lock": trees("1.2.5")["Cargo.lock"]}), trees("1.2.4", extra='edition="2021"'), trees("1.2.4", entries='source="registry+x"'), trees("1.2.4", entries='\n[[package]]\nname="duolane"\nversion="1.2.4"'), trees("bad"), trees("1.2.4-01")):
             self.assertFalse(self.check(diff, old, new))
 
+    def test_toml_types_and_u64_versions(self):
+        diff = change("Cargo.toml") + change("Cargo.lock")
+        self.assertFalse(self.check(diff, trees(extra="debug=1"), trees("1.2.4", extra="debug=true")))
+        self.assertFalse(self.check(diff, trees(), trees("18446744073709551616.2.4")))
+        self.assertTrue(self.check(diff, trees(), trees("18446744073709551615.2.4")))
+
+    def test_stdout_contract(self):
+        with patch.dict(os.environ, {}, clear=True), contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(m.main(), 0)
+        self.assertEqual(output.getvalue(), "skip=false\n")
+
+    def test_workflow_output_contract(self):
+        text = (Path(__file__).parents[2] / ".github/workflows/ci.yml").read_text()
+        block = text.split("  changes:\n", 1)[1].split("\n  gates:", 1)[0]
+        self.assertNotRegex(block, r"(?m)^    continue-on-error: true$")
+        script = block.split("        run: |\n", 1)[1]
+        script = "\n".join(line[10:] for line in script.splitlines())
+        for output, status, checkout, expected in (("skip=true\n", 0, "success", "skip=true\n"), ("skip=false\n", 0, "success", "skip=false\n"), ("skip=true\n", 1, "success", "skip=false\n"), ("skip=true\nextra\n", 0, "success", "skip=false\n"), ("skip=true\n\n", 0, "success", "skip=false\n"), ("skip=true\n", 0, "failure", "skip=false\n")):
+            with self.subTest(output=output, status=status, checkout=checkout), tempfile.TemporaryDirectory() as directory:
+                env = {"PATH": os.defpath, "CHECKOUT_OUTCOME": checkout, "RUNNER_TEMP": directory, "GITHUB_OUTPUT": directory + "/output", "TEST_OUTPUT": output, "TEST_STATUS": str(status)}
+                prefix = 'git() { return 0; }; python3() { printf "skip=true\\n" >> "$GITHUB_OUTPUT"; printf "%s" "$TEST_OUTPUT"; return "$TEST_STATUS"; };\n'
+                subprocess.run(["bash", "-e", "-c", prefix + script], env=env, check=True, capture_output=True)
+                self.assertEqual(Path(env["GITHUB_OUTPUT"]).read_text(), expected)
+
     def test_parent_proof(self):
         repo, sha = "owner/repo", "a" * 40
         run = {"id": 1, "run_attempt": 2, "status": "completed", "conclusion": "success", "head_sha": sha, "event": "push", "repository": {"full_name": repo}}
@@ -46,7 +76,7 @@ class ClassifierTests(unittest.TestCase):
         def sleep(n):
             clock[0] += n
         def proof(runs, jobs):
-            return m.wait_for_parent(repo, sha, runs, jobs, lambda: clock[0], sleep)
+            return m.wait_for_parent(repo, sha, runs, jobs, lambda run: run, lambda: clock[0], sleep)
         self.assertTrue(proof(lambda: {"workflow_runs": [run]}, lambda _: {"jobs": [job]}))
         self.assertFalse(proof(lambda: {"workflow_runs": [run]}, lambda _: {"jobs": [dict(job, conclusion="failure")]}))
         pending = dict(run, status="in_progress", conclusion=None)

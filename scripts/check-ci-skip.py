@@ -21,9 +21,20 @@ def version_pair(read):
         raise ValueError("invalid package")
     version = package["version"]
     pattern = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
-    if not isinstance(version, str) or not re.fullmatch(pattern, version) or matches[0].get("version") != version:
+    match = re.fullmatch(pattern, version) if isinstance(version, str) else None
+    if not match or any(int(part) > 2**64 - 1 for part in match.group(1, 2, 3)) or matches[0].get("version") != version:
         raise ValueError("invalid version")
     return manifest, lock, matches[0], version
+
+
+def same_toml(left, right):
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(same_toml(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(same_toml(a, b) for a, b in zip(left, right))
+    return left == right
 
 
 def classify(changes, read_old, read_new):
@@ -56,16 +67,16 @@ def classify(changes, read_old, read_new):
             new_manifest, new_lock, new_package, _ = version_pair(read_new)
             new_manifest["package"]["version"] = old_version
             new_package["version"] = old_version
-            if old_manifest != new_manifest or old_lock != new_lock:
+            if not same_toml(old_manifest, new_manifest) or not same_toml(old_lock, new_lock):
                 return False
         return True
     except Exception:
         return False
 
 
-def wait_for_parent(repo, sha, fetch_runs, fetch_jobs, clock=time.monotonic, sleep=time.sleep, deadline=None):
+def wait_for_parent(repo, sha, fetch_runs, fetch_jobs, fetch_run, clock=time.monotonic, sleep=time.sleep, deadline=None):
     try:
-        return tested.wait_for_release(repo, sha, fetch_runs, fetch_jobs, clock, sleep, deadline)
+        return tested.wait_for_release(repo, sha, fetch_runs, fetch_jobs, fetch_run, clock, sleep, deadline)
     except Exception:
         return False
 
@@ -93,14 +104,11 @@ def main():
             runs_path = f"{root}/actions/workflows/ci.yml/runs?head_sha={parent}&event=push&per_page=100"
             answer = wait_for_parent(repo, parent,
                 lambda: {"workflow_runs": tested.pages(runs_path, "workflow_runs", deadline)},
-                lambda run: {"jobs": tested.pages(f"{root}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100", "jobs", deadline)}, deadline=deadline)
+                lambda run: {"jobs": tested.pages(f"{root}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100", "jobs", deadline)},
+                lambda run: tested.api(f"{root}/actions/runs/{run['id']}", deadline), deadline=deadline)
     except Exception:
         pass
-    try:
-        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-            output.write(f"skip={str(answer).lower()}\n")
-    except (KeyError, OSError):
-        pass
+    print(f"skip={str(answer).lower()}")
     return 0
 
 
