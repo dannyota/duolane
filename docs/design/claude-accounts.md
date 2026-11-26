@@ -75,6 +75,16 @@ skips adding the Codex lineup. The
 describe separation by configuration directory, including macOS Keychain
 entries.
 
+## Profile identity
+
+A profile's identity is the device, inode, and birth time of its directory, so a
+profile removed and created again under the same name gets a new one. Reading it
+needs no credential. `accounts login`, `remove`, and `switch` take a hidden
+`--expect <identity>`, and `login` takes `--expect-absent`; each checks it under
+the profile's lock before changing anything and refuses on a mismatch or when
+the file system reports no birth time. Without these options the commands behave
+as before. The [monitor](monitor-accounts.md#account-actions) passes them.
+
 ## Account details
 
 `list`, the `use` menu, and the login report learn which account a profile holds

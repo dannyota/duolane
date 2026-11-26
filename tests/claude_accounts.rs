@@ -99,6 +99,60 @@ impl Sandbox {
     }
 }
 
+#[test]
+fn guarded_profile_commands_reject_recreated_and_existing_profiles() {
+    use std::os::unix::fs::MetadataExt;
+    let sandbox = Sandbox::new();
+    sandbox.login("backup");
+    let old = std::fs::metadata(sandbox.profile("backup")).unwrap();
+    let birth = old
+        .created()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let identity = format!(
+        "{}:{}:{}:{}",
+        old.dev(),
+        old.ino(),
+        birth.as_secs(),
+        birth.subsec_nanos()
+    );
+    std::fs::rename(sandbox.profile("backup"), sandbox.profile("old")).unwrap();
+    sandbox.login("backup");
+    let stale = sandbox.run(
+        &[
+            "accounts", "remove", "backup", "--yes", "--expect", &identity,
+        ],
+        &[],
+    );
+    assert!(!stale.status.success());
+    assert!(sandbox.profile("backup").exists());
+    assert!(!sandbox.logout_file().exists());
+    let absent = sandbox.run(&["accounts", "login", "backup", "--expect-absent"], &[]);
+    assert!(!absent.status.success());
+    let current = std::fs::metadata(sandbox.profile("backup")).unwrap();
+    let birth = current
+        .created()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let identity = format!(
+        "{}:{}:{}:{}",
+        current.dev(),
+        current.ino(),
+        birth.as_secs(),
+        birth.subsec_nanos()
+    );
+    let matching = sandbox.run(
+        &[
+            "accounts", "remove", "backup", "--yes", "--expect", &identity,
+        ],
+        &[],
+    );
+    assert!(matching.status.success());
+    assert!(!sandbox.profile("backup").exists());
+}
+
 fn text(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }

@@ -114,8 +114,12 @@ passes the profile name rule.
   rule of the profile confirmation and `Esc` cancels. `a` first asks for the new
   name and refuses a name that is already registered.
 - On confirmation the monitor reads the roster again. It runs the action only
-  when the profile is still registered, or still absent for `a`. The command
-  itself checks the name again under its locks.
+  when the profile is still registered, or still absent for `a`. The overlay
+  records the profile's [identity](claude-accounts.md#profile-identity) when it
+  opens and passes it to the command, which refuses under its profile lock if a
+  profile of that name was removed and created again meanwhile. Account details
+  are cached by name and identity, so a recreated profile never shows the old
+  account.
 - `l` and `d` are refused for `default`, which Claude Code manages. `s` is
   refused for the saved profile and when `CLAUDE_CONFIG_DIR` overrides the
   selection. `s` resumes in the directory where `duolane serve` started, and the

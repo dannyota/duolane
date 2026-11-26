@@ -132,7 +132,7 @@ fn claude_accounts_login_probe() {
             std::env::var_os("TEST_CONFIG").unwrap(),
         );
     }
-    assert_eq!(login(None).is_ok(), std::env::var("SUCCESS").unwrap() == "1");
+    assert_eq!(login(None, None, false).is_ok(), std::env::var("SUCCESS").unwrap() == "1");
 }
 #[test]
 fn claude_accounts_login_unlocks_after_descendant_survives() {

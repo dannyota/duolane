@@ -1,6 +1,7 @@
 use super::roster::{self, Entry};
 use super::unix::{
-    checked_target, current_selection, profile_names, prompt_name, registered, save_selection,
+    checked_target, current_selection, profile_names, prompt_name, registered,
+    save_selection_identity,
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::ffi::OsString;
@@ -104,7 +105,12 @@ fn retry_hint(target: &str, continued: bool, selection: Result<String>) -> Strin
     }
 }
 
-pub fn switch(name: Option<String>, next: bool, args: Vec<OsString>) -> Result<()> {
+pub fn switch(
+    name: Option<String>,
+    next: bool,
+    args: Vec<OsString>,
+    expected: Option<String>,
+) -> Result<()> {
     ensure!(
         !(name.is_some() && next),
         "give a profile name or --next, not both"
@@ -149,7 +155,7 @@ pub fn switch(name: Option<String>, next: bool, args: Vec<OsString>) -> Result<(
         None => roster::entries(&profiles)?,
     };
     let summary = roster::describe(&entries, &target).0;
-    save_selection(&target, Some(&current))?;
+    save_selection_identity(&target, Some(&current), expected.as_deref())?;
     match summary {
         Some(summary) => println!("Switched to {target} ({summary})."),
         None => println!("Switched to {target}."),

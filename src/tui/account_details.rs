@@ -83,9 +83,13 @@ impl Details {
         self.job.is_some()
     }
 
-    pub(super) fn roster(&self, names: &[String]) -> Roster {
+    pub(super) fn roster(
+        &self,
+        names: &[String],
+        identities: &std::collections::BTreeMap<String, String>,
+    ) -> Roster {
         match &self.checked {
-            Some((roster, _)) => roster.aligned(names),
+            Some((roster, _)) => roster.aligned_identities(names, identities),
             None => Roster::unknown(names),
         }
     }

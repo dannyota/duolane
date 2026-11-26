@@ -40,6 +40,8 @@ pub(crate) struct ProfileState {
 pub(crate) struct Roster {
     #[cfg(unix)]
     entries: Vec<super::roster::Entry>,
+    #[cfg(unix)]
+    identities: BTreeMap<String, String>,
 }
 
 #[cfg(not(unix))]
@@ -49,6 +51,10 @@ impl Roster {
     }
 
     pub(crate) fn aligned(&self, _: &[String]) -> Self {
+        Self {}
+    }
+
+    pub(crate) fn aligned_identities(&self, _: &[String], _: &BTreeMap<String, String>) -> Self {
         Self {}
     }
 
@@ -108,6 +114,25 @@ mod unix {
         .max()
     }
 
+    #[cfg(test)]
+    #[test]
+    fn recreated_profile_does_not_reuse_cached_account() {
+        let mut roster =
+            Roster::from_status(&[("backup", r#"{"loggedIn":true,"email":"old@example.com"}"#)]);
+        roster.identities.insert("backup".into(), "old".into());
+        let names = vec!["backup".into()];
+        let current = BTreeMap::from([("backup".into(), "new".into())]);
+        let state = roster
+            .aligned_identities(&names, &current)
+            .states(&BTreeMap::new(), 0);
+        assert!(state[0].account.is_none());
+        let current = BTreeMap::from([("backup".into(), "old".into())]);
+        let state = roster
+            .aligned_identities(&names, &current)
+            .states(&BTreeMap::new(), 0);
+        assert!(state[0].account.is_some());
+    }
+
     impl Roster {
         pub(crate) fn unknown(names: &[String]) -> Self {
             Self {
@@ -119,6 +144,7 @@ mod unix {
                         same_as: None,
                     })
                     .collect(),
+                identities: BTreeMap::new(),
             }
         }
 
@@ -126,8 +152,25 @@ mod unix {
             profiles: &[(String, std::path::PathBuf)],
             cancelled: &std::sync::atomic::AtomicBool,
         ) -> Option<Self> {
+            let read_ids = || {
+                let mut ids = BTreeMap::from([("default".to_owned(), "default".to_owned())]);
+                for (name, path) in profiles {
+                    if let Ok(Some(dir)) = super::super::store::checked_dir(path, false)
+                        && let Ok(Some(id)) = super::super::identity::identity(&dir)
+                    {
+                        ids.insert(name.clone(), id);
+                    }
+                }
+                ids
+            };
+            let mut identities = read_ids();
             let entries = roster::collect(profiles, cancelled);
-            (!cancelled.load(std::sync::atomic::Ordering::Relaxed)).then_some(Self { entries })
+            let after = read_ids();
+            identities.retain(|name, id| after.get(name) == Some(id));
+            (!cancelled.load(std::sync::atomic::Ordering::Relaxed)).then_some(Self {
+                entries,
+                identities,
+            })
         }
 
         pub(crate) fn aligned(&self, names: &[String]) -> Self {
@@ -144,7 +187,29 @@ mod unix {
                 })
                 .collect();
             roster::mark_duplicates(&mut entries);
-            Self { entries }
+            Self {
+                entries,
+                identities: self.identities.clone(),
+            }
+        }
+
+        pub(crate) fn aligned_identities(
+            &self,
+            names: &[String],
+            identities: &BTreeMap<String, String>,
+        ) -> Self {
+            let mut result = self.aligned(names);
+            for entry in &mut result.entries {
+                if self
+                    .identities
+                    .get(&entry.name)
+                    .is_none_or(|id| identities.get(&entry.name) != Some(id))
+                {
+                    entry.account = None;
+                }
+            }
+            roster::mark_duplicates(&mut result.entries);
+            result
         }
 
         #[cfg(test)]
@@ -158,7 +223,23 @@ mod unix {
                 })
                 .collect();
             roster::mark_duplicates(&mut entries);
-            Self { entries }
+            let identities = profiles
+                .iter()
+                .map(|(name, _)| {
+                    (
+                        (*name).to_owned(),
+                        if *name == "default" {
+                            "default".to_owned()
+                        } else {
+                            "test".to_owned()
+                        },
+                    )
+                })
+                .collect();
+            Self {
+                entries,
+                identities,
+            }
         }
 
         fn suggested(&self, limits: &BTreeMap<String, Limits>, now: u64) -> Option<usize> {

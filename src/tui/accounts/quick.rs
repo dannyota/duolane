@@ -76,7 +76,10 @@ impl Accounts {
         }
         let after = self.pending.take().map(|(name, _)| name);
         self.confirmation_visible = false;
-        let states = self.details.roster(&self.names).states(&self.limits, now());
+        let states = self
+            .details
+            .roster(&self.names, &self.identities)
+            .states(&self.limits, now());
         let index = target(&self.names, &states, &self.selected, after.as_deref()).or_else(|| {
             let after = after.as_deref()?;
             self.names.iter().position(|name| name == after)
@@ -94,7 +97,10 @@ impl Accounts {
     pub(super) fn pending_detail(&self) -> Option<String> {
         let (name, _) = self.pending.as_ref()?;
         let index = self.names.iter().position(|candidate| candidate == name)?;
-        let states = self.details.roster(&self.names).states(&self.limits, now());
+        let states = self
+            .details
+            .roster(&self.names, &self.identities)
+            .states(&self.limits, now());
         detail(states.get(index))
     }
 }

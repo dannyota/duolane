@@ -8,6 +8,7 @@ pub(super) struct Accounts {
     details: super::account_details::Details,
     refreshed: Option<std::time::Instant>,
     names: Vec<String>,
+    identities: std::collections::BTreeMap<String, String>,
     selected: String,
     focus: usize,
     overridden: bool,
@@ -29,6 +30,7 @@ impl Accounts {
             details: Default::default(),
             refreshed: None,
             names: Vec::new(),
+            identities: Default::default(),
             selected: String::new(),
             focus: 0,
             overridden: false,
@@ -103,6 +105,7 @@ impl Accounts {
         match crate::claude_accounts::monitor_roster() {
             Ok(roster) => {
                 self.names = roster.names;
+                self.identities = roster.identities;
                 self.selected = roster.selected;
                 self.overridden = roster.overridden;
                 self.focus = self.focus.min(self.names.len().saturating_sub(1));
@@ -110,6 +113,7 @@ impl Accounts {
             }
             Err(_) => {
                 self.names.clear();
+                self.identities.clear();
                 self.selected.clear();
                 self.focus = 0;
                 self.status = "Unable to load local profiles".into();
@@ -329,7 +333,7 @@ impl Accounts {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let roster = self.details.roster(&self.names);
+        let roster = self.details.roster(&self.names, &self.identities);
         let states = roster.states(&self.limits, seconds);
         let mut block = Block::default()
             .title(" Claude profiles ")

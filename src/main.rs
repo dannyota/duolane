@@ -99,6 +99,10 @@ enum AccountsCommand {
     Login {
         #[arg(value_name = "NAME")]
         name: Option<String>,
+        #[arg(long, hide = true, conflicts_with = "expect_absent")]
+        expect: Option<String>,
+        #[arg(long, hide = true)]
+        expect_absent: bool,
     },
     #[command(about = "Choose the profile for the next duolane claude launch")]
     Use {
@@ -111,6 +115,8 @@ enum AccountsCommand {
         name: Option<String>,
         #[arg(long, help = "Pick the next profile with a different account")]
         next: bool,
+        #[arg(long, hide = true)]
+        expect: Option<String>,
         #[arg(last = true, value_name = "CLAUDE_ARGS")]
         args: Vec<std::ffi::OsString>,
     },
@@ -122,6 +128,8 @@ enum AccountsCommand {
         name: String,
         #[arg(long, help = "Skip the confirmation prompt")]
         yes: bool,
+        #[arg(long, hide = true)]
+        expect: Option<String>,
     },
 }
 
@@ -388,16 +396,25 @@ fn main() -> Result<()> {
         }
         Commands::Codex { command } => run_provider_cli("codex", command),
         Commands::Accounts { command } => match command {
-            AccountsCommand::Login { name } => {
-                let name = duolane::claude_accounts::login(name)?;
+            AccountsCommand::Login {
+                name,
+                expect,
+                expect_absent,
+            } => {
+                let name = duolane::claude_accounts::login(name, expect, expect_absent)?;
                 duolane::claude_accounts::announce(&name)
             }
             AccountsCommand::Use { name } => duolane::claude_accounts::select(name),
-            AccountsCommand::Switch { name, next, args } => {
-                duolane::claude_accounts::switch(name, next, args)
-            }
+            AccountsCommand::Switch {
+                name,
+                next,
+                args,
+                expect,
+            } => duolane::claude_accounts::switch(name, next, args, expect),
             AccountsCommand::List => duolane::claude_accounts::list(),
-            AccountsCommand::Remove { name, yes } => duolane::claude_accounts::remove(name, yes),
+            AccountsCommand::Remove { name, yes, expect } => {
+                duolane::claude_accounts::remove(name, yes, expect)
+            }
         },
         Commands::Claude { args } => duolane::intercept::run_claude(args, None),
         Commands::Agents { command } => match command {
@@ -646,58 +663,5 @@ fn alias_names() -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_serve_selects_monitor_on_tty() {
-        assert_eq!(select_serve_mode(true, false), ServeMode::Monitor);
-    }
-
-    #[test]
-    fn no_monitor_selects_plain_mode() {
-        assert_eq!(select_serve_mode(true, true), ServeMode::Plain);
-    }
-
-    #[test]
-    fn non_tty_stdout_selects_plain_mode() {
-        assert_eq!(select_serve_mode(false, false), ServeMode::Plain);
-    }
-
-    #[test]
-    fn demo_command_parses_without_server_options() {
-        let cli = Cli::try_parse_from(["duolane", "demo"]).unwrap();
-
-        assert!(matches!(cli.command, Some(Commands::Demo)));
-    }
-
-    #[tokio::test]
-    async fn shutdown_signal_setup_and_receive_preserve_io_results() {
-        fn assert_constructor(_: fn() -> std::io::Result<ServiceShutdownSignals>) {}
-        fn assert_io_future<F: std::future::Future<Output = std::io::Result<()>>>(_: &F) {}
-
-        assert_constructor(ServiceShutdownSignals::new);
-        let mut signals = ServiceShutdownSignals::new().unwrap();
-        let receive = signals.recv();
-        assert_io_future(&receive);
-    }
-
-    #[test]
-    fn monitor_token_travels_only_to_loopback_or_https() {
-        for (url, expected) in [
-            ("http://127.0.0.1:18765/", true),
-            ("http://LOCALHOST:18765/", true),
-            ("http://[::1]:18765/", true),
-            ("https://proxy.example/", true),
-            ("http://proxy.example:18765/", false),
-            ("http://192.0.2.1:18765/", false),
-        ] {
-            assert_eq!(token_may_travel(&url.parse().unwrap()), expected, "{url}");
-        }
-    }
-
-    #[test]
-    fn listen_url_brackets_ipv6_addresses() {
-        assert_eq!(listen_url("::1", 18765), "http://[::1]:18765");
-    }
-}
+#[path = "main_tests.rs"]
+mod tests;

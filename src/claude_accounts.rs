@@ -1,3 +1,7 @@
+#[cfg(unix)]
+mod auth_overrides;
+#[cfg(unix)]
+mod identity;
 pub(crate) mod limits;
 #[cfg(unix)]
 mod picker;
@@ -30,7 +34,11 @@ pub(crate) fn valid_profile_tag(name: &str) -> bool {
 
 #[cfg(unix)]
 mod unix {
-    use super::{limits, picker, roster, store, transcripts, valid_name};
+    use super::{
+        auth_overrides::{AUTH_OVERRIDE_PAIR, AUTH_OVERRIDES, reject_auth_overrides},
+        identity::identity,
+        limits, picker, roster, store, transcripts, valid_name,
+    };
     use crate::paths;
     use anyhow::{Context, Result, bail, ensure};
     use std::ffi::OsString;
@@ -124,12 +132,42 @@ mod unix {
         Ok(Some((path, dir)))
     }
     fn profile(name: &str, create: bool) -> Result<Option<Profile>> {
+        profile_expected(name, create, None, false)
+    }
+
+    fn profile_expected(
+        name: &str,
+        create: bool,
+        expected: Option<&str>,
+        absent: bool,
+    ) -> Result<Option<Profile>> {
         ensure!(valid_name(name), "invalid profile name");
         let Some(parent) = selector_dir(create)? else {
             return Ok(None);
         };
         let lock = store::lock(&parent, &format!(".profile-{name}.lock"), false)?;
-        let Some((path, dir)) = profile_dir(name, create)? else {
+        let existing = profile_dir(name, false)?;
+        if absent {
+            ensure!(
+                existing.is_none(),
+                "profile already exists; reload and retry"
+            );
+        }
+        if let Some(expected) = expected {
+            ensure!(
+                existing
+                    .as_ref()
+                    .and_then(|(_, dir)| identity(dir).ok().flatten())
+                    .as_deref()
+                    == Some(expected),
+                "profile changed or identity unknown; reload and retry"
+            );
+        }
+        let Some((path, dir)) = (if existing.is_some() {
+            existing
+        } else {
+            profile_dir(name, create)?
+        }) else {
             return Ok(None);
         };
         if !create && store::private_read(&dir, ".duolane-ready", 64)?.is_none() {
@@ -148,30 +186,6 @@ mod unix {
             return Ok(None);
         };
         store::checked_dir(&root.join("claude-accounts"), create)
-    }
-
-    const AUTH_OVERRIDES: [&str; 7] = [
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-        "CLAUDE_CODE_USE_FOUNDRY",
-        "ANTHROPIC_PROFILE",
-    ];
-    const AUTH_OVERRIDE_PAIR: [&str; 2] =
-        ["ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID"];
-
-    fn reject_auth_overrides() -> Result<()> {
-        let nonempty = |name| std::env::var_os(name).is_some_and(|v| !v.is_empty());
-        for name in AUTH_OVERRIDES {
-            ensure!(!nonempty(name), "authentication override set: {name}");
-        }
-        ensure!(
-            !AUTH_OVERRIDE_PAIR.into_iter().all(nonempty),
-            "authentication overrides set: ANTHROPIC_FEDERATION_RULE_ID and ANTHROPIC_ORGANIZATION_ID"
-        );
-        Ok(())
     }
 
     pub(super) fn claude_command(config: Option<&Path>) -> Command {
@@ -197,13 +211,14 @@ mod unix {
         Ok(())
     }
 
-    pub fn login(name: Option<String>) -> Result<String> {
+    pub fn login(name: Option<String>, expected: Option<String>, absent: bool) -> Result<String> {
         reject_auth_overrides()?;
         let name = match name {
             Some(name) => name,
             None => input("Profile name (lowercase letters, digits, - or _): ")?,
         };
-        let profile = profile(&name, true)?.context("profile unavailable")?;
+        let profile = profile_expected(&name, true, expected.as_deref(), absent)?
+            .context("profile unavailable")?;
         let mut command = Command::new("claude");
         command
             .args(["auth", "login", "--claudeai"])
@@ -273,6 +288,7 @@ mod unix {
 
     pub(crate) struct MonitorRoster {
         pub names: Vec<String>,
+        pub identities: std::collections::BTreeMap<String, String>,
         pub selected: String,
         pub overridden: bool,
     }
@@ -284,8 +300,22 @@ mod unix {
                 .into_iter()
                 .map(|(name, _)| name),
         );
+        let identities = names
+            .iter()
+            .filter_map(|name| {
+                if name == "default" {
+                    return Some((name.clone(), "default".into()));
+                }
+                profile_dir(name, false)
+                    .ok()
+                    .flatten()
+                    .and_then(|(_, dir)| identity(&dir).ok().flatten())
+                    .map(|id| (name.clone(), id))
+            })
+            .collect();
         Ok(MonitorRoster {
             names,
+            identities,
             selected: current_selection()?,
             overridden: std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|v| !v.is_empty()),
         })
@@ -341,13 +371,19 @@ mod unix {
         Ok(())
     }
 
-    pub fn remove(name: String, yes: bool) -> Result<()> {
+    pub fn remove(name: String, yes: bool, expected: Option<String>) -> Result<()> {
         ensure!(valid_name(&name), "invalid profile name");
         let selector = selector_dir(false)?.context("unknown profile")?;
         let lock = store::lock(&selector, &format!(".profile-{name}.lock"), false)?;
         let Some((path, dir)) = profile_dir(&name, false)? else {
             bail!("unknown profile");
         };
+        if let Some(expected) = expected {
+            ensure!(
+                identity(&dir)?.as_deref() == Some(expected.as_str()),
+                "profile changed or identity unknown; reload and retry"
+            );
+        }
         read_selection()?;
         if !yes {
             ensure!(
@@ -482,11 +518,28 @@ mod unix {
     }
 
     pub(crate) fn save_selection(name: &str, expected: Option<&str>) -> Result<()> {
+        save_selection_identity(name, expected, None)
+    }
+
+    pub(super) fn save_selection_identity(
+        name: &str,
+        expected: Option<&str>,
+        identity_expected: Option<&str>,
+    ) -> Result<()> {
         let _profile = if name == "default" {
             None
         } else {
-            Some(profile(name, false)?.context("unknown profile")?)
+            Some(
+                profile_expected(name, false, identity_expected, false)?
+                    .context("unknown profile")?,
+            )
         };
+        if name == "default" {
+            ensure!(
+                identity_expected.is_none_or(|value| value == "default"),
+                "profile changed or identity unknown; reload and retry"
+            );
+        }
         let dir = selector_dir(true)?.context("selector unavailable")?;
         let _selector_lock = store::lock(&dir, ".selector.lock", expected.is_none())?;
         let current = current_selection()?;
@@ -637,52 +690,6 @@ pub(crate) use unix::{Profile, monitor_details, monitor_roster, prepare_launch, 
 pub use unix::{announce, list, login, remove, select};
 
 #[cfg(not(unix))]
-pub fn switch(_: Option<String>, _: bool, _: Vec<std::ffi::OsString>) -> anyhow::Result<()> {
-    anyhow::bail!("Claude accounts are unavailable on this platform")
-}
-
+mod unsupported;
 #[cfg(not(unix))]
-pub(crate) struct Profile;
-#[cfg(not(unix))]
-impl Profile {
-    pub(crate) fn path(&self) -> &std::path::Path {
-        unreachable!()
-    }
-    pub(crate) fn name(&self) -> Option<&str> {
-        unreachable!()
-    }
-    pub(crate) fn settings(&self) -> anyhow::Result<Option<Vec<u8>>> {
-        unreachable!()
-    }
-    pub(crate) fn recheck(&self) -> anyhow::Result<()> {
-        unreachable!()
-    }
-}
-#[cfg(not(unix))]
-pub(crate) fn prepare_launch(
-    _: &[std::ffi::OsString],
-    _: Option<&str>,
-) -> anyhow::Result<Option<Profile>> {
-    Ok(None)
-}
-
-#[cfg(not(unix))]
-pub fn login(_: Option<String>) -> anyhow::Result<String> {
-    anyhow::bail!("Claude accounts are unavailable on this platform")
-}
-#[cfg(not(unix))]
-pub fn announce(_: &str) -> anyhow::Result<()> {
-    anyhow::bail!("Claude accounts are unavailable on this platform")
-}
-#[cfg(not(unix))]
-pub fn list() -> anyhow::Result<()> {
-    anyhow::bail!("Claude accounts are unavailable on this platform")
-}
-#[cfg(not(unix))]
-pub fn remove(_: String, _: bool) -> anyhow::Result<()> {
-    anyhow::bail!("Claude accounts are unavailable on this platform")
-}
-#[cfg(not(unix))]
-pub fn select(_: Option<String>) -> anyhow::Result<()> {
-    anyhow::bail!("Claude accounts are unavailable on this platform")
-}
+pub use unsupported::*;

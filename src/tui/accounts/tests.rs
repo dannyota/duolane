@@ -181,6 +181,11 @@ fn full_rows_show_status_age_staleness_account_details_and_total() {
     };
     let mut accounts = Accounts::new(true);
     accounts.names = vec!["default".into(), "backup".into()];
+    accounts.identities = [
+        ("default".into(), "default".into()),
+        ("backup".into(), "test".into()),
+    ]
+    .into();
     accounts.selected = "default".into();
     accounts.limits.insert("default".into(), limits(1.0, now));
     accounts
