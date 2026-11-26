@@ -85,6 +85,20 @@ Events.
   lines and leaves Recent requests at least 3; a smaller terminal shrinks it to
   fit without forgetting the chosen height. Any other click on that border does
   nothing.
+- In Ghostty, Kitty, and foot the pointer shows `ns-resize` while it is over
+  that border or dragging it, through
+  [OSC 22](https://ghostty.org/docs/vt/osc/22), and `default` otherwise. The
+  monitor tracks the last mouse position and recomputes the shape after each
+  frame, so an overlay, another view, or a moved border also restores it. It
+  resets the shape when it stops drawing, on every exit path including a panic,
+  before the terminal is restored. Writing the sequence is best effort: a failed
+  write neither stops the monitor nor changes how it exits.
+- The terminal is recognized from `TERM_PROGRAM` `ghostty` or `TERM`
+  `xterm-ghostty`, `xterm-kitty`, `foot`, or `foot-extra`. Inside tmux or
+  screen, seen from `TMUX`, `STY`, `TERM_PROGRAM` `tmux`, or a `TERM` starting
+  with `tmux` or `screen`, and in any other terminal, no sequence is sent,
+  because terminals disagree on shape names and some print what they do not
+  parse. WezTerm does not handle OSC 22.
 - Sessions shows a Queue count after the active count. The row for requests
   without a session counts them too.
 - Below the expanded width the summary cells stack, each one full-width line

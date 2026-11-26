@@ -12,6 +12,9 @@ mod overlay;
 mod overview_tests;
 #[cfg(test)]
 mod phase_tests;
+mod pointer;
+#[cfg(test)]
+mod pointer_tests;
 mod request_phases;
 mod requests;
 mod sessions;
@@ -161,7 +164,8 @@ fn run_monitor_loop(
     mut snapshot: impl FnMut() -> SnapshotUpdate,
     config: UiSession,
 ) -> Result<MonitorExit, anyhow::Error> {
-    let (_guard, mut terminal) = setup_terminal()?;
+    let pointer_supported = pointer::supported(&paths::environment_snapshot());
+    let (mut guard, mut terminal) = setup_terminal(pointer_supported)?;
     let mut app = MonitorApp {
         accounts: accounts::Accounts::new(config.local_accounts),
         usage_open: false,
@@ -182,15 +186,17 @@ fn run_monitor_loop(
 
     app.accounts.enter();
     app.accounts.refresh_limits();
-    let run_result = run_monitor_events(&mut terminal, &mut snapshot, &mut app);
+    let run_result = run_monitor_events(&mut terminal, &mut snapshot, &mut app, &mut guard.pointer);
     if run_result.is_err() {
         app.begin_shutdown();
         let state = snapshot();
         let _ = terminal.draw(|frame| {
             render(frame, &mut app, state.snapshot());
         });
+        let _ = guard.pointer.reset(terminal.backend_mut());
         app.wait_for_shutdown_completion();
     }
+    let _ = guard.pointer.reset(terminal.backend_mut());
     let cursor_result = terminal.show_cursor();
     let exit = run_result?;
     cursor_result?;
@@ -201,6 +207,7 @@ fn run_monitor_events(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     mut snapshot: impl FnMut() -> SnapshotUpdate,
     app: &mut MonitorApp,
+    pointer: &mut pointer::Pointer,
 ) -> Result<MonitorExit, anyhow::Error> {
     loop {
         app.accounts.refresh_if_due();
@@ -217,6 +224,7 @@ fn run_monitor_events(
                 update.connection_error().map(|e| e.to_string()).as_deref(),
             );
         })?;
+        app.refresh_pointer(pointer, terminal.backend_mut(), &targets);
         if app.shutdown_is_complete() {
             return Ok(MonitorExit::ShutdownComplete);
         }
@@ -230,9 +238,10 @@ fn run_monitor_events(
                     }
                 }
                 Event::Mouse(mouse) => {
-                    if let Some(exit) =
-                        app.handle_mouse_query(mouse, state, &targets, crossterm::terminal::size)
-                    {
+                    let exit =
+                        app.handle_mouse_query(mouse, state, &targets, crossterm::terminal::size);
+                    app.refresh_pointer(pointer, terminal.backend_mut(), &targets);
+                    if let Some(exit) = exit {
                         return Ok(exit);
                     }
                 }
@@ -416,22 +425,28 @@ impl Drop for MonitorApp {
 
 struct TerminalGuard {
     mouse_capture_attempted: bool,
+    pointer: pointer::Pointer,
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        if self.mouse_capture_attempted {
-            let _ = execute!(io::stdout(), DisableMouseCapture);
-        }
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        let _ = disable_raw_mode();
+        pointer::restore(&mut self.pointer, &mut io::stdout(), |writer| {
+            if self.mouse_capture_attempted {
+                let _ = execute!(writer, DisableMouseCapture);
+            }
+            let _ = execute!(writer, LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+        });
     }
 }
 
-fn setup_terminal() -> Result<(TerminalGuard, Terminal<CrosstermBackend<Stdout>>), anyhow::Error> {
+fn setup_terminal(
+    pointer_supported: bool,
+) -> Result<(TerminalGuard, Terminal<CrosstermBackend<Stdout>>), anyhow::Error> {
     enable_raw_mode()?;
     let mut guard = TerminalGuard {
         mouse_capture_attempted: false,
+        pointer: pointer::Pointer::new(pointer_supported),
     };
     execute!(io::stdout(), EnterAlternateScreen)?;
     guard.mouse_capture_attempted = true;
