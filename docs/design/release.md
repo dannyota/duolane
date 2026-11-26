@@ -11,9 +11,47 @@ cannot be replaced.
 The Release workflow reuses the tests that CI already passed on the tagged
 commit, so a release does not wait for the same tests a third time.
 
-CI still runs every job for a push to `master`. That run blocks nothing, because
-the pull request already merged, and proving that a pull request run tested
-exactly the merged tree needs more history than GitHub records reliably.
+CI runs every job for a push to `master`, except the `rust` job under the rule
+below. That run blocks nothing, because the pull request already merged, and
+proving that a pull request run tested exactly the merged tree needs more
+history than GitHub records reliably.
+
+### Changes that cannot affect the tests
+
+CI skips the `rust` job for a pull request or a push to `master` when the change
+cannot alter what it tests, and the parent already passed it. Every other job
+still runs, including the dependency policy, so a version bump still checks
+`Cargo.lock`. Scheduled and manual runs always test.
+
+- The change is the diff from the first parent to the checked-out commit: for a
+  pull request, the merge commit GitHub builds, whose first parent is the base;
+  for a push, the pushed commit.
+- Every changed path, on both sides of a rename or deletion, is a regular,
+  non-executable file in both trees where it exists, and is either a Markdown
+  document (`docs/**.md`, `instructions/**.md`, or `AGENTS.md`, `CHANGELOG.md`,
+  `CLAUDE.md`, `CONTRIBUTING.md`, `README.md`, `SECURITY.md` at the root), or
+  `Cargo.toml` or `Cargo.lock`. Symlinks, submodules, and any other path make
+  `rust` run. No build script, test, or code reads these documents.
+- A version change is accepted only when, in each tree, the `duolane` version is
+  valid, `Cargo.toml` and the single `duolane` entry of `Cargo.lock` without a
+  `source` agree, and both files parse equal to the parent's once that version
+  is set to the parent's. The version reaches the binary only through
+  `CARGO_PKG_VERSION`, in `--version` and the Codex `User-Agent`, which tests
+  read from the same variable.
+- The first parent has a completed, successful CI run for a `push` event in this
+  repository whose latest attempt passed `ci`, waiting up to five minutes for
+  one in progress. A push of several commits needs that run for the pushed
+  commit's own first parent, not for the previous `master` head. `ci` passes
+  only when `rust` passed or was skipped by this rule, so each skip rests on a
+  tested ancestor.
+- The deciding job runs the classifier as it is in the first parent, not as the
+  change edits it, with read-only `contents` and `actions` permissions. A pull
+  request that edits the workflow itself can still change what runs, as it can
+  today; the owner reviews every pull request before it merges.
+
+`ci` accepts a skipped `rust` only when the job that decided reported the skip;
+in every other case `rust` must succeed. The proof at the tag accepts a push run
+whose `ci` passed, for the same reason.
 
 ### Proof at the tag
 
@@ -21,9 +59,10 @@ The tests of the Release workflow are skipped only when all of these hold:
 
 - A completed, successful CI run for a `push` event exists in this repository at
   the commit the Release workflow checked out. A push run checks out the pushed
-  commit with the workflow file of that commit, so it tested that tree whatever
+  commit with the workflow file of that commit, so it tested that tree, or
+  proved by the rule above that its tests match a tested ancestor's, whatever
   its ref.
-- In the latest attempt of that run, the job `rust` completed with success.
+- In the latest attempt of that run, the job `ci` completed with success.
 - The commit is `master` or an ancestor of it, with `master` resolved from
   `refs/heads/master` just before the proof is accepted.
 
