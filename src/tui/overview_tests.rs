@@ -4,6 +4,149 @@ use super::*;
 use crate::monitor::mock_state;
 
 #[test]
+fn active_height_defaults_to_ten_for_empty_and_busy_lists() {
+    let mut state: MonitorSnapshot = mock_state().into();
+    let row = state.active[0].clone();
+    let mut app = app();
+    for count in [0, 30] {
+        state.active = vec![row.clone(); count];
+        let screen = draw(160, 50, |frame| render(frame, &mut app, &state));
+        let (_, active) = placeholder_position(&screen, "Active requests").unwrap();
+        let (_, recent) = placeholder_position(&screen, "Recent requests").unwrap();
+        assert_eq!(recent - active, 10);
+    }
+}
+
+fn resize_frame(
+    app: &mut MonitorApp,
+    state: &MonitorSnapshot,
+    height: u16,
+) -> (MouseTargets, u16, u16) {
+    let mut hits = MouseTargets::default();
+    let screen = draw(160, height, |frame| hits = render(frame, app, state));
+    let (_, active) = placeholder_position(&screen, "Active requests").unwrap();
+    let (_, recent) = placeholder_position(&screen, "Recent requests").unwrap();
+    (hits, active, recent)
+}
+
+fn mouse_event(kind: MouseEventKind, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column: 10,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+#[test]
+fn active_border_drag_resizes_and_clamps_sections() {
+    let state: MonitorSnapshot = mock_state().into();
+    let mut app = app();
+    let (hits, active, recent) = resize_frame(&mut app, &state, 50);
+    app.handle_mouse_query(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), recent - 1),
+        &state,
+        &hits,
+        || Ok((160, 50)),
+    );
+    app.handle_mouse_query(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), recent + 4),
+        &state,
+        &hits,
+        || Ok((160, 50)),
+    );
+    let (hits, _, recent) = resize_frame(&mut app, &state, 50);
+    assert_eq!(recent - active, 15);
+    app.handle_mouse_query(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), active),
+        &state,
+        &hits,
+        || Ok((160, 50)),
+    );
+    let (hits, _, recent) = resize_frame(&mut app, &state, 50);
+    assert_eq!(recent - active, 3);
+    app.handle_mouse_query(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 49),
+        &state,
+        &hits,
+        || Ok((160, 50)),
+    );
+    let (hits, _, recent) = resize_frame(&mut app, &state, 50);
+    let events = placeholder_position(
+        &draw(160, 50, |frame| render(frame, &mut app, &state)),
+        "Events",
+    )
+    .unwrap()
+    .1;
+    assert_eq!(events - recent, 3);
+    app.handle_mouse_query(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 49),
+        &state,
+        &hits,
+        || Ok((160, 50)),
+    );
+    app.handle_mouse_query(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), active),
+        &state,
+        &hits,
+        || Ok((160, 50)),
+    );
+    assert_eq!(resize_frame(&mut app, &state, 50).2, recent);
+}
+
+#[test]
+fn active_height_recovers_after_terminal_shrinks() {
+    let state: MonitorSnapshot = mock_state().into();
+    let mut app = app();
+    let (hits, active, recent) = resize_frame(&mut app, &state, 50);
+    app.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), recent - 1),
+        &state,
+        &hits,
+    );
+    app.handle_mouse(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), recent + 4),
+        &state,
+        &hits,
+    );
+    app.handle_mouse(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), recent + 4),
+        &state,
+        &hits,
+    );
+    let (_, small_active, small_recent) = resize_frame(&mut app, &state, 24);
+    assert!(small_recent - small_active < 15);
+    let (_, _, restored) = resize_frame(&mut app, &state, 50);
+    assert_eq!(restored - active, 15);
+}
+
+#[test]
+fn active_drag_requires_left_down_on_border_and_uncovered_view() {
+    let state: MonitorSnapshot = mock_state().into();
+    for (kind, offset, overlay) in [
+        (MouseEventKind::Down(MouseButton::Left), -1, false),
+        (MouseEventKind::Down(MouseButton::Right), 0, false),
+        (MouseEventKind::Down(MouseButton::Left), 0, true),
+    ] {
+        let mut app = app();
+        let (hits, active, recent) = resize_frame(&mut app, &state, 50);
+        app.show_help = overlay;
+        app.handle_mouse(
+            mouse_event(kind, (recent as i16 - 1 + offset) as u16),
+            &state,
+            &hits,
+        );
+        app.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), recent + 4),
+            &state,
+            &hits,
+        );
+        app.show_help = false;
+        assert_eq!(resize_frame(&mut app, &state, 50).2 - active, 10);
+    }
+}
+
+#[test]
 fn overview_shows_lane_and_connection_summaries() {
     let state: MonitorSnapshot = mock_state().into();
     let mut app = app();

@@ -16,6 +16,7 @@ pub(super) fn app() -> MonitorApp {
         focus: FocusPane::Sessions,
         selected: 0,
         recent_selected: 0,
+        active_resize: Default::default(),
         tick: 0,
         phase: MonitorPhase::Running,
         shutdown: None,
