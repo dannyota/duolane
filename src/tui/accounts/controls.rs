@@ -242,8 +242,8 @@ impl Accounts {
     }
 
     pub(super) fn confirm_action(&mut self) {
-        self.confirm_action_with(local_roster(), |args| match actions::program() {
-            Ok(program) => actions::capture(&program, &args, actions::CAPTURE_TIMEOUT),
+        self.confirm_action_with(local_roster(), |args, cancel| match actions::program() {
+            Ok(program) => actions::capture(&program, &args, actions::CAPTURE_TIMEOUT, &cancel),
             Err(error) => Finished {
                 ok: false,
                 summary: format!("could not start: {}", error.kind()),
@@ -254,7 +254,9 @@ impl Accounts {
     pub(super) fn confirm_action_with(
         &mut self,
         roster: Option<(Vec<String>, String)>,
-        capture: impl FnOnce(Vec<String>) -> Finished + Send + 'static,
+        capture: impl FnOnce(Vec<String>, std::sync::Arc<std::sync::atomic::AtomicBool>) -> Finished
+        + Send
+        + 'static,
     ) {
         if !self.controls.visible() {
             return;
@@ -292,7 +294,7 @@ impl Accounts {
         if !self
             .controls
             .runner
-            .start(action.label(), move || capture(args))
+            .start(action.label(), move |cancel| capture(args, cancel))
         {
             self.controls
                 .say(Tone::Bad, format!("{}: could not start", action.label()));

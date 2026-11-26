@@ -27,7 +27,7 @@ mod local {
         ))
     }
 
-    fn never(_: Vec<String>) -> Finished {
+    fn never(_: Vec<String>, _: Arc<std::sync::atomic::AtomicBool>) -> Finished {
         panic!("a command ran")
     }
 
@@ -246,7 +246,7 @@ mod local {
         let record = seen.clone();
         accounts.confirm_action_with(
             roster(&["default", "backup", "work"], "work"),
-            move |args| {
+            move |args, _| {
                 *record.lock().unwrap() = args;
                 Finished {
                     ok: false,

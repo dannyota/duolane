@@ -1,5 +1,9 @@
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::time::Duration;
 
 pub(super) const OUTPUT_LIMIT: usize = 64 * 1024;
@@ -100,14 +104,20 @@ fn kill_group(child: &std::process::Child) {
 }
 
 #[cfg(unix)]
-pub(super) fn capture(program: &Path, args: &[String], timeout: Duration) -> Finished {
-    use std::io::Read;
+pub(super) fn capture(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    cancelled: &AtomicBool,
+) -> Finished {
+    use std::io::{ErrorKind, Read};
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use std::time::Instant;
 
     let spawned = (|| {
         let (reader, writer) = std::io::pipe()?;
+        rustix::fs::fcntl_setfl(&reader, rustix::fs::OFlags::NONBLOCK)?;
         let mut command = Command::new(program);
         command
             .args(args)
@@ -118,51 +128,58 @@ pub(super) fn capture(program: &Path, args: &[String], timeout: Duration) -> Fin
         let child = command.spawn()?;
         Ok::<_, std::io::Error>((child, reader))
     })();
-    let (mut child, reader) = match spawned {
+    let (mut child, mut reader) = match spawned {
         Ok(spawned) => spawned,
         Err(error) => return Finished::failed(format!("could not start: {}", error.kind())),
     };
-    let (sender, receiver) = mpsc::channel();
-    let drain = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = reader.take(OUTPUT_LIMIT as u64 + 1).read_to_end(&mut bytes);
-        let _ = sender.send(bytes);
-    });
     let deadline = Instant::now() + timeout;
-    let mut output = None;
-    let status = loop {
-        if output.is_none() {
-            output = receiver.try_recv().ok();
+    let mut output = Vec::new();
+    let mut eof = false;
+    let mut status = None;
+    let result = loop {
+        if cancelled.load(Ordering::Acquire) {
+            break Err("cancelled".to_owned());
         }
-        if output
-            .as_ref()
-            .is_some_and(|bytes| bytes.len() > OUTPUT_LIMIT)
-        {
-            break Err("stopped after 64 KiB of output".to_owned());
+        if Instant::now() >= deadline {
+            break Err(format!("timed out after {}s", timeout.as_secs()));
         }
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if Instant::now() >= deadline => {
-                break Err(format!("timed out after {}s", timeout.as_secs()));
+        let mut buffer = [0u8; 8192];
+        if !eof {
+            match reader.read(&mut buffer) {
+                Ok(0) => eof = true,
+                Ok(n) => {
+                    output.extend_from_slice(&buffer[..n]);
+                    if output.len() > OUTPUT_LIMIT {
+                        break Err("stopped after 64 KiB of output".to_owned());
+                    }
+                }
+                Err(error)
+                    if error.kind() == ErrorKind::WouldBlock
+                        || error.kind() == ErrorKind::Interrupted => {}
+                Err(error) => break Err(format!("could not read: {}", error.kind())),
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(error) => break Err(format!("could not wait: {}", error.kind())),
         }
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(value) => status = value,
+                Err(error) => break Err(format!("could not wait: {}", error.kind())),
+            }
+        }
+        if eof && let Some(status) = status {
+            break Ok(status);
+        }
+        std::thread::sleep(Duration::from_millis(10));
     };
     kill_group(&child);
     let _ = child.wait();
-    let _ = drain.join();
-    let output = output
-        .or_else(|| receiver.try_recv().ok())
-        .unwrap_or_default();
-    match status {
-        Ok(status) => summarize(status.code(), &output[..output.len().min(OUTPUT_LIMIT)]),
+    match result {
+        Ok(status) => summarize(status.code(), &output),
         Err(reason) => Finished::failed(reason),
     }
 }
 
 #[cfg(not(unix))]
-pub(super) fn capture(_: &Path, _: &[String], _: Duration) -> Finished {
+pub(super) fn capture(_: &Path, _: &[String], _: Duration, _: &AtomicBool) -> Finished {
     Finished::failed("unsupported on this platform")
 }
 
@@ -290,45 +307,77 @@ pub(super) fn run_handoff(
     Ok(finished)
 }
 
+struct Job {
+    label: String,
+    receiver: mpsc::Receiver<Finished>,
+    cancel: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
 #[derive(Default)]
 pub(super) struct Runner {
-    job: Option<(String, mpsc::Receiver<Finished>)>,
+    job: Option<Job>,
 }
 
 impl Runner {
     pub(super) fn running(&self) -> Option<&str> {
-        self.job.as_ref().map(|(label, _)| label.as_str())
+        self.job.as_ref().map(|job| job.label.as_str())
     }
 
     pub(super) fn start(
         &mut self,
         label: String,
-        run: impl FnOnce() -> Finished + Send + 'static,
+        run: impl FnOnce(Arc<AtomicBool>) -> Finished + Send + 'static,
     ) -> bool {
         if self.job.is_some() {
             return false;
         }
         let (sender, receiver) = mpsc::channel();
-        let spawned = std::thread::Builder::new()
+        let cancel = Arc::new(AtomicBool::new(false));
+        let signal = cancel.clone();
+        let Ok(thread) = std::thread::Builder::new()
             .name("account-action".into())
             .spawn(move || {
-                let _ = sender.send(run());
-            });
-        if spawned.is_err() {
+                let _ = sender.send(run(signal));
+            })
+        else {
             return false;
-        }
-        self.job = Some((label, receiver));
+        };
+        self.job = Some(Job {
+            label,
+            receiver,
+            cancel,
+            thread,
+        });
         true
     }
 
     pub(super) fn poll(&mut self) -> Option<(String, Finished)> {
-        let (_, receiver) = self.job.as_ref()?;
-        let finished = match receiver.try_recv() {
+        let job = self.job.as_ref()?;
+        let finished = match job.receiver.try_recv() {
             Err(mpsc::TryRecvError::Empty) => return None,
             Ok(finished) => finished,
             Err(mpsc::TryRecvError::Disconnected) => Finished::failed("stopped unexpectedly"),
         };
-        self.job.take().map(|(label, _)| (label, finished))
+        self.job.take().map(|job| {
+            let _ = job.thread.join();
+            (job.label, finished)
+        })
+    }
+}
+
+impl Drop for Runner {
+    fn drop(&mut self) {
+        if let Some(job) = self.job.take() {
+            job.cancel.store(true, Ordering::Release);
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !job.thread.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if job.thread.is_finished() {
+                let _ = job.thread.join();
+            }
+        }
     }
 }
 
@@ -344,7 +393,12 @@ mod tests {
 
     #[cfg(unix)]
     fn shell(script: &str, timeout: Duration) -> Finished {
-        capture(Path::new("/bin/sh"), &["-c".into(), script.into()], timeout)
+        capture(
+            Path::new("/bin/sh"),
+            &["-c".into(), script.into()],
+            timeout,
+            &AtomicBool::new(false),
+        )
     }
 
     #[cfg(unix)]
@@ -364,7 +418,12 @@ mod tests {
         );
         assert!(!failed.ok);
         assert_eq!(failed.summary, "failed with exit status 3: Error: kept");
-        let missing = capture(Path::new("/nonexistent/duolane"), &[], CAPTURE_TIMEOUT);
+        let missing = capture(
+            Path::new("/nonexistent/duolane"),
+            &[],
+            CAPTURE_TIMEOUT,
+            &AtomicBool::new(false),
+        );
         assert!(!missing.ok && missing.summary.starts_with("could not start"));
     }
 
@@ -380,11 +439,58 @@ mod tests {
         assert!(!flood.ok);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn capture_times_out_when_an_escaped_descendant_holds_output() {
+        let started = std::time::Instant::now();
+        let result = shell(
+            "/usr/bin/perl -MPOSIX -e 'pipe(R,W); if (fork) { sysread(R,$x,1); exit } POSIX::setsid(); syswrite(W,chr(120)); sleep 2'",
+            Duration::from_millis(200),
+        );
+        assert!(!result.ok);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_rejects_excess_output_from_exited_child() {
+        let result = shell("head -c 65537 /dev/zero", CAPTURE_TIMEOUT);
+        assert!(!result.ok);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_runner_stops_and_reaps_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pid");
+        let script = format!("printf '%s' $$ > '{}'; exec sleep 30", path.display());
+        let mut runner = Runner::default();
+        assert!(runner.start("sleep".into(), move |cancel| capture(
+            Path::new("/bin/sh"),
+            &["-c".into(), script],
+            CAPTURE_TIMEOUT,
+            &cancel
+        )));
+        let start = std::time::Instant::now();
+        while !path.exists() && start.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid: i32 = std::fs::read_to_string(path).unwrap().parse().unwrap();
+        let started = std::time::Instant::now();
+        drop(runner);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let exists = unsafe { libc::kill(pid, 0) } == 0;
+        if exists {
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+        assert!(!exists);
+    }
+
     #[test]
     fn runner_runs_one_action_at_a_time_and_returns_its_result() {
         let mut runner = Runner::default();
         let (release, gate) = mpsc::channel::<()>();
-        assert!(runner.start("Remove backup".into(), move || {
+        assert!(runner.start("Remove backup".into(), move |_| {
             let _ = gate.recv();
             Finished {
                 ok: true,
@@ -392,7 +498,7 @@ mod tests {
             }
         }));
         assert_eq!(runner.running(), Some("Remove backup"));
-        assert!(!runner.start("Remove other".into(), || panic!("second action started")));
+        assert!(!runner.start("Remove other".into(), |_| panic!("second action started")));
         assert!(runner.poll().is_none());
         release.send(()).unwrap();
         let finished = loop {
