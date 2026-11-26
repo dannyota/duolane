@@ -16,7 +16,8 @@ Use the existing detail panes and add mouse input to the dashboard. Keeping
 clicks separate from keyboard navigation would duplicate selection logic. Single
 click opens detail; `Esc` closes it. Existing keyboard shortcuts keep working.
 Ignore clicks on table headers, empty space, and while help, setup, or shutdown
-overlays are visible. No pointer support for Active requests.
+overlays are visible. Clicking an Active requests row does nothing; only its
+bottom border responds, to resize it.
 
 Read hit targets from the visible table rows of the last rendered frame,
 including the scroll offset and the Events filter. Enable mouse capture only
@@ -77,8 +78,13 @@ Events.
   it. The attached and demo monitors show no Claude bars.
 - Sessions is as tall as its rows, up to 30% of the height. Events is one line
   while it has no rows, and up to 25% of the height otherwise. Active requests
-  takes the rows it needs, up to half of what is left, and Recent requests takes
-  the rest.
+  has a fixed height, 10 lines with borders at start, so it does not move as
+  requests come and go. Recent requests takes the rest.
+- Dragging the bottom border of Active requests with the left mouse button sets
+  its height for the rest of the monitor's run. Active requests keeps at least 3
+  lines and leaves Recent requests at least 3; a smaller terminal shrinks it to
+  fit without forgetting the chosen height. Any other click on that border does
+  nothing.
 - Sessions shows a Queue count after the active count. The row for requests
   without a session counts them too.
 - Below the expanded width the summary cells stack, each one full-width line
