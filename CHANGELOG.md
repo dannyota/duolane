@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.13.0
+
+### Added
+
+- The monitor's Usage view shows each Claude profile in a table with its status
+  (`available`, `limited` with the time to reset, or `unknown`), the age of its
+  values, its account, plan, and login time, and a suggested profile. Buttons
+  and the keys `a`, `l`, `d`, and `s` add a profile, sign in again, remove one,
+  or switch and resume, each after a confirmation. An action runs only on the
+  profile that was confirmed, even if one of the same name was created again
+  meanwhile. Contributed by @nnatuan03.
+- In Ghostty, Kitty, and foot the pointer shows a resize shape over the Active
+  requests border.
+
+### Changed
+
+- CI skips the Rust tests for changes that are only documentation or a version
+  bump, when the parent commit passed them.
+
 ## 0.12.0
 
 ### Changed
