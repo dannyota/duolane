@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.0
+
+### Changed
+
+- Active requests on the monitor Overview keeps a fixed height, 10 lines at
+  start, instead of resizing as requests come and go. Drag its bottom border
+  with the left mouse button to change it for the rest of the monitor's run.
+
 ## 0.11.0
 
 ### Changed
