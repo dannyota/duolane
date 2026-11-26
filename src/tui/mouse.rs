@@ -26,7 +26,7 @@ pub(super) enum MouseTarget {
 pub(super) struct ActiveResize {
     pub(super) height: u16,
     dragging: bool,
-    pub(super) pointer: super::pointer::Pointer,
+    position: Option<(u16, u16)>,
 }
 
 impl Default for ActiveResize {
@@ -34,7 +34,7 @@ impl Default for ActiveResize {
         Self {
             height: 10,
             dragging: false,
-            pointer: Default::default(),
+            position: None,
         }
     }
 }
@@ -110,20 +110,24 @@ pub(super) fn render_clickable_table(
 }
 
 impl super::MonitorApp {
-    pub(super) fn update_pointer(
-        &mut self,
+    pub(super) fn refresh_pointer(
+        &self,
+        pointer: &mut super::pointer::Pointer,
         writer: &mut impl std::io::Write,
-        mouse: MouseEvent,
         targets: &MouseTargets,
-    ) -> std::io::Result<()> {
+    ) {
         let available = !self.show_help
             && !self.show_setup
             && !self.accounts.confirming()
             && self.phase == MonitorPhase::Running
             && !self.usage_open;
-        let resize = self.active_resize.dragging
-            || available && targets.active_border(mouse.column, mouse.row);
-        self.active_resize.pointer.update(writer, resize)
+        let resize = available
+            && (self.active_resize.dragging
+                || self
+                    .active_resize
+                    .position
+                    .is_some_and(|(column, row)| targets.active_border(column, row)));
+        let _ = pointer.update(writer, resize);
     }
 
     pub(super) fn handle_mouse_query(
@@ -133,6 +137,7 @@ impl super::MonitorApp {
         targets: &MouseTargets,
         size: impl FnOnce() -> std::io::Result<(u16, u16)>,
     ) -> Option<MonitorExit> {
+        self.active_resize.position = Some((mouse.column, mouse.row));
         if matches!(
             mouse.kind,
             MouseEventKind::Up(MouseButton::Left)
