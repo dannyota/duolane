@@ -147,6 +147,104 @@ fn active_drag_requires_left_down_on_border_and_uncovered_view() {
 }
 
 #[test]
+fn lost_mouse_up_does_not_swallow_next_click() {
+    let state: MonitorSnapshot = mock_state().into();
+    for moved in [false, true] {
+        let mut app = app();
+        let mut hits = MouseTargets::default();
+        let screen = draw(160, 50, |frame| hits = render(frame, &mut app, &state));
+        let (_, recent) = placeholder_position(&screen, "Recent requests").unwrap();
+        let (column, row) = placeholder_position(&screen, "2 Usage").unwrap();
+        app.handle_mouse_query(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), recent - 1),
+            &state,
+            &hits,
+            || Ok((160, 50)),
+        );
+        if moved {
+            app.handle_mouse_query(
+                mouse_event(MouseEventKind::Moved, row),
+                &state,
+                &hits,
+                || panic!("movement queried size"),
+            );
+            app.handle_mouse_query(
+                mouse_event(MouseEventKind::Drag(MouseButton::Left), recent + 4),
+                &state,
+                &hits,
+                || panic!("inactive drag queried size"),
+            );
+            assert_eq!(resize_frame(&mut app, &state, 50).2, recent);
+        }
+        let click = MouseEvent {
+            column,
+            row,
+            ..mouse_event(MouseEventKind::Down(MouseButton::Left), row)
+        };
+        app.handle_mouse_query(click, &state, &hits, || Ok((160, 50)));
+        assert!(app.usage_open);
+    }
+}
+
+#[test]
+fn active_rows_do_not_change_layout_when_session_detail_is_open() {
+    let mut state: MonitorSnapshot = mock_state().into();
+    state.recent.truncate(1);
+    state.recent[0].status = crate::monitor::RequestStatus::Completed;
+    state.recent[0].http_status = Some(200);
+    state.recent[0].error = None;
+    state.recent[0].retry_requested = false;
+    let active = state.active[0].clone();
+    state.active.clear();
+    let mut app = app();
+    app.detail = Some(DetailView::Session(DetailSelection::Keyboard));
+    for height in [3, 10] {
+        app.active_resize.height = height;
+        let mut before = MouseTargets::default();
+        let screen = draw(160, 25, |frame| before = render(frame, &mut app, &state));
+        let summary = placeholder_position(&screen, "Connections").is_some();
+        assert_eq!(summary, height == 3);
+        state.active.push(active.clone());
+        let mut after = MouseTargets::default();
+        let screen = draw(160, 25, |frame| after = render(frame, &mut app, &state));
+        assert_eq!(before.active, after.active);
+        assert_eq!(
+            summary,
+            placeholder_position(&screen, "Connections").is_some()
+        );
+        state.active.clear();
+    }
+}
+
+#[test]
+fn dragging_after_terminal_shrinks_preserves_chosen_height() {
+    let state: MonitorSnapshot = mock_state().into();
+    let mut app = app();
+    let (hits, active, recent) = resize_frame(&mut app, &state, 50);
+    app.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), recent - 1),
+        &state,
+        &hits,
+    );
+    app.handle_mouse(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), recent + 4),
+        &state,
+        &hits,
+    );
+    let mut small = MouseTargets::default();
+    draw(160, 12, |frame| small = render(frame, &mut app, &state));
+    let (area, recent_height) = small.active.unwrap();
+    assert!(area.height + recent_height <= 6);
+    app.handle_mouse(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), area.y),
+        &state,
+        &small,
+    );
+    let (_, _, restored) = resize_frame(&mut app, &state, 50);
+    assert_eq!(restored - active, 15);
+}
+
+#[test]
 fn overview_shows_lane_and_connection_summaries() {
     let state: MonitorSnapshot = mock_state().into();
     let mut app = app();

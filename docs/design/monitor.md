@@ -16,7 +16,8 @@ Use the existing detail panes and add mouse input to the dashboard. Keeping
 clicks separate from keyboard navigation would duplicate selection logic. Single
 click opens detail; `Esc` closes it. Existing keyboard shortcuts keep working.
 Ignore clicks on table headers, empty space, and while help, setup, or shutdown
-overlays are visible. No pointer support for Active requests.
+overlays are visible. Clicking an Active requests row does nothing; only its
+bottom border responds, to resize it.
 
 Read hit targets from the visible table rows of the last rendered frame,
 including the scroll offset and the Events filter. Enable mouse capture only

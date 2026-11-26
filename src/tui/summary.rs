@@ -191,9 +191,9 @@ pub(super) fn layout(
     let requested_summary = summary::height(body.width);
     let reserve = if detail_open {
         detail_min
-            + u16::from(!state.active.is_empty()) * 4
-            + u16::from(!state.recent.is_empty()) * 4
-            + 1
+            .saturating_add(chosen_active_height)
+            .saturating_add(u16::from(!state.recent.is_empty()) * 4)
+            .saturating_add(1)
     } else {
         0
     };

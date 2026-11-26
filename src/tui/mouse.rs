@@ -106,9 +106,13 @@ impl super::MonitorApp {
         targets: &MouseTargets,
         size: impl FnOnce() -> std::io::Result<(u16, u16)>,
     ) -> Option<MonitorExit> {
-        if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Up(MouseButton::Left)
+                | MouseEventKind::Moved
+                | MouseEventKind::Down(MouseButton::Left)
+        ) {
             self.active_resize.dragging = false;
-            return None;
         }
         if mouse.kind != MouseEventKind::Down(MouseButton::Left)
             && !(self.active_resize.dragging
@@ -140,9 +144,13 @@ impl super::MonitorApp {
         state: &MonitorSnapshot,
         targets: &MouseTargets,
     ) -> Option<MonitorExit> {
-        if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Up(MouseButton::Left)
+                | MouseEventKind::Moved
+                | MouseEventKind::Down(MouseButton::Left)
+        ) {
             self.active_resize.dragging = false;
-            return None;
         }
         if self.show_help
             || self.accounts.confirming()
@@ -158,12 +166,14 @@ impl super::MonitorApp {
                 && let Some((active, recent_height)) = targets.active
             {
                 let available = active.height.saturating_add(recent_height);
-                self.active_resize.height = mouse
-                    .row
-                    .saturating_sub(active.y)
-                    .saturating_add(1)
-                    .min(available.saturating_sub(3))
-                    .max(3.min(available));
+                if available > 6 {
+                    self.active_resize.height = mouse
+                        .row
+                        .saturating_sub(active.y)
+                        .saturating_add(1)
+                        .min(available.saturating_sub(3))
+                        .max(3);
+                }
             }
             return None;
         }
