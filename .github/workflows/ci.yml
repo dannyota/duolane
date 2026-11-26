@@ -19,6 +19,34 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      skip: ${{ steps.classify.outputs.skip }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          if git show HEAD^1:scripts/check-ci-skip.py > "$RUNNER_TEMP/check-ci-skip.py" &&
+             git show HEAD^1:scripts/check-tested-tree.py > "$RUNNER_TEMP/check-tested-tree.py"; then
+            python3 -I "$RUNNER_TEMP/check-ci-skip.py"
+          else
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          fi
+
   gates:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -37,6 +65,7 @@ jobs:
         run: make pins
       - run: python3 -I scripts/test/check-crate-release-test.py
       - run: python3 -I scripts/test/check-tested-tree-test.py
+      - run: python3 -I scripts/test/check-ci-skip-test.py
       - name: Action pins match their tags
         env:
           GH_TOKEN: ${{ github.token }}
@@ -55,6 +84,8 @@ jobs:
         run: make docs
 
   rust:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.skip != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -157,7 +188,7 @@ jobs:
 
   ci:
     if: ${{ always() }}
-    needs: [gates, rust, deny, gitleaks, crate-age]
+    needs: [changes, gates, rust, deny, gitleaks, crate-age]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -172,14 +203,18 @@ jobs:
           import sys
 
           needs = json.loads(os.environ["NEEDS"])
-          expected = {"gates", "rust", "deny", "gitleaks", "crate-age"}
+          expected = {"changes", "gates", "rust", "deny", "gitleaks", "crate-age"}
           if set(needs) != expected:
               sys.exit(f"needed jobs {sorted(needs)} differ from {sorted(expected)}")
           failed = []
           for name, job in sorted(needs.items()):
               result = job["result"]
-              optional = name == "crate-age" and os.environ["EVENT"] != "pull_request"
-              if result != "success" and not (optional and result == "skipped"):
+              event = os.environ["EVENT"]
+              optional = name == "changes" or (name == "crate-age" and event != "pull_request" and result == "skipped")
+              skip_rust = (name == "rust" and event in ("push", "pull_request")
+                           and needs["changes"]["result"] == "success"
+                           and needs["changes"]["outputs"].get("skip") == "true")
+              if result != "success" and not (optional or (skip_rust and result == "skipped")):
                   failed.append(f"{name}: {result}")
           if failed:
               sys.exit("required jobs did not succeed: " + ", ".join(failed))

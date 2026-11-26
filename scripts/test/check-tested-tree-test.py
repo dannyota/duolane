@@ -15,7 +15,7 @@ REPO = "owner/repo"
 SHA = "a" * 40
 MASTER = "b" * 40
 RUN = {"id": 10, "run_attempt": 2, "status": "completed", "conclusion": "success", "head_sha": SHA, "event": "push", "repository": {"full_name": REPO}}
-JOB = {"name": "rust", "status": "completed", "conclusion": "success", "run_id": 10, "run_attempt": 2}
+JOB = {"name": "ci", "status": "completed", "conclusion": "success", "run_id": 10, "run_attempt": 2}
 REF = {"ref": "refs/heads/master", "object": {"type": "commit", "sha": MASTER}}
 COMPARE = {"status": "ahead", "behind_by": 0, "merge_base_commit": {"sha": SHA}}
 

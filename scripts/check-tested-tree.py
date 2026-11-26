@@ -23,7 +23,7 @@ def matching_run(repo, sha, run):
         return False
 
 
-def successful_rust(run, jobs):
+def successful_ci(run, jobs):
     if not isinstance(jobs, dict) or not isinstance(jobs.get("jobs"), list):
         return False
     entries = jobs["jobs"]
@@ -31,11 +31,11 @@ def successful_rust(run, jobs):
         return False
     if any(not isinstance(job, dict) or not isinstance(job.get("name"), str) for job in entries):
         return False
-    rust = [job for job in entries if job.get("name") == "rust"]
-    return (len(rust) == 1 and rust[0].get("status") == "completed"
-            and rust[0].get("conclusion") == "success" and valid_id(rust[0].get("run_id"))
-            and rust[0]["run_id"] == run["id"] and valid_id(rust[0].get("run_attempt"))
-            and rust[0]["run_attempt"] == run["run_attempt"])
+    ci = [job for job in entries if job.get("name") == "ci"]
+    return (len(ci) == 1 and ci[0].get("status") == "completed"
+            and ci[0].get("conclusion") == "success" and valid_id(ci[0].get("run_id"))
+            and ci[0]["run_id"] == run["id"] and valid_id(ci[0].get("run_attempt"))
+            and ci[0]["run_attempt"] == run["run_attempt"])
 
 
 def master_sha(ref):
@@ -58,7 +58,7 @@ def valid_compare(sha, compare):
 
 def release_proof(repo, sha, run, jobs, ref, compare):
     return (matching_run(repo, sha, run) and run.get("status") == "completed"
-            and run.get("conclusion") == "success" and successful_rust(run, jobs)
+            and run.get("conclusion") == "success" and successful_ci(run, jobs)
             and master_sha(ref) is not None and valid_compare(sha, compare))
 
 
@@ -77,7 +77,7 @@ def wait_for_release(repo, sha, fetch_runs, fetch_jobs, clock=time.monotonic, sl
             if clock() >= deadline:
                 return False
             if (matching_run(repo, sha, run) and run.get("status") == "completed"
-                    and run.get("conclusion") == "success" and successful_rust(run, fetch_jobs(run))):
+                    and run.get("conclusion") == "success" and successful_ci(run, fetch_jobs(run))):
                 return clock() < deadline
         pending = any(matching_run(repo, sha, run) and run.get("status") in ("queued", "in_progress") for run in runs)
         remaining = deadline - clock()
