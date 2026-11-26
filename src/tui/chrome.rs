@@ -82,8 +82,9 @@ pub(super) fn render_chrome_footer(
     targets: &mut MouseTargets,
 ) {
     frame.render_widget(Paragraph::new("").style(Style::default().bg(BG)), area);
+    let usage = app.usage_open;
     let hints = [
-        (
+        Some((
             "q",
             if app.is_attached() {
                 " detach  "
@@ -91,20 +92,24 @@ pub(super) fn render_chrome_footer(
                 " quit  "
             },
             KeyCode::Char('q'),
-        ),
-        ("?", " help  ", KeyCode::Char('?')),
-        ("b", " setup  ", KeyCode::Char('b')),
-        ("Tab", " pane  ", KeyCode::Tab),
-        ("Enter", " open  ", KeyCode::Enter),
-        ("1", " view  ", KeyCode::Char('1')),
-        ("2", " view  ", KeyCode::Char('2')),
+        )),
+        Some(("?", " help  ", KeyCode::Char('?'))),
+        Some(("b", " setup  ", KeyCode::Char('b'))),
+        (!usage).then_some(("Tab", " pane  ", KeyCode::Tab)),
+        Some((
+            "Enter",
+            if usage { " use  " } else { " open  " },
+            KeyCode::Enter,
+        )),
+        usage.then_some(("r", " refresh  ", KeyCode::Char('r'))),
+        app.accounts
+            .local
+            .then_some(("n", " next profile  ", KeyCode::Char('n'))),
+        Some(("1", " overview  ", KeyCode::Char('1'))),
+        Some(("2", " usage  ", KeyCode::Char('2'))),
     ];
     let mut x = area.x.saturating_add(1);
-    for (label, description, key) in hints.into_iter().chain(app.usage_open.then_some((
-        "r",
-        " refresh  ",
-        KeyCode::Char('r'),
-    ))) {
+    for (label, description, key) in hints.into_iter().flatten() {
         let width = (label.len() as u16).min(area.right().saturating_sub(x));
         let rect = Rect::new(x, area.y, width, area.height);
         frame.render_widget(
@@ -126,8 +131,12 @@ pub(super) fn render_chrome_footer(
         );
         x = x.saturating_add(width);
         if key == KeyCode::Char('b') {
-            let text = "arrows/j/k navigate  ";
-            let width = (text.len() as u16).min(area.right().saturating_sub(x));
+            let text = if usage {
+                "↑↓ move  "
+            } else {
+                "↑↓/j/k move  "
+            };
+            let width = (text.chars().count() as u16).min(area.right().saturating_sub(x));
             frame.render_widget(
                 Paragraph::new(text).style(Style::default().fg(DIM)),
                 Rect::new(x, area.y, width, area.height),

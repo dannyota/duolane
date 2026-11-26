@@ -1,49 +1,14 @@
-pub(super) fn needed_height(
-    area: ratatui::layout::Rect,
-    snapshot: &crate::monitor::snapshot::MonitorSnapshot,
-    count: usize,
-    now: std::time::SystemTime,
-    zone: jiff::tz::TimeZone,
-) -> u16 {
-    let claude = 4_u16.saturating_add((count.min(u16::MAX as usize / 3) * 3) as u16);
-    let width = if area.width >= 90 {
-        area.width / 2
-    } else {
-        area.width
-    }
-    .saturating_sub(2);
-    let quota = snapshot
-        .codex_quota
-        .as_ref()
-        .filter(|q| now.duration_since(q.observed_at).is_ok());
-    let lines = vec![
-        ratatui::text::Line::from(quota_summary(quota, now)),
-        super::usage_limits::codex_in_zone(
-            "Primary",
-            quota.and_then(|q| q.primary.as_ref()),
-            now,
-            zone.clone(),
-        ),
-        super::usage_limits::codex_in_zone(
-            "Secondary",
-            quota.and_then(|q| q.secondary.as_ref()),
-            now,
-            zone,
-        ),
-    ];
-    let chatgpt = super::usage_limits::wrapped_height(&lines, width).saturating_add(2);
-    if area.width >= 90 {
-        claude.max(chatgpt)
-    } else {
-        claude.saturating_add(chatgpt)
-    }
-}
+mod controls;
+mod quick;
 
 pub(super) struct Accounts {
+    controls: controls::Controls,
     pub(super) local: bool,
     pub(super) limits: std::collections::BTreeMap<String, crate::claude_accounts::limits::Limits>,
+    details: super::account_details::Details,
     refreshed: Option<std::time::Instant>,
     names: Vec<String>,
+    identities: std::collections::BTreeMap<String, String>,
     selected: String,
     focus: usize,
     overridden: bool,
@@ -60,9 +25,12 @@ impl Accounts {
     pub(super) fn new(local: bool) -> Self {
         Self {
             local: local && cfg!(unix),
+            controls: Default::default(),
             limits: Default::default(),
+            details: Default::default(),
             refreshed: None,
             names: Vec::new(),
+            identities: Default::default(),
             selected: String::new(),
             focus: 0,
             overridden: false,
@@ -95,7 +63,25 @@ impl Accounts {
         }
     }
 
+    pub(super) fn open(&mut self) {
+        self.enter();
+        if self.local {
+            self.details.request(false);
+        }
+    }
+
+    pub(super) fn reload(&mut self) {
+        self.controls.clear_message();
+        self.enter();
+        self.refresh_limits();
+        if self.local {
+            self.details.request(true);
+        }
+    }
+
     pub(super) fn refresh_if_due(&mut self) {
+        self.details.poll();
+        self.poll_action();
         if self.local
             && self
                 .refreshed
@@ -119,6 +105,7 @@ impl Accounts {
         match crate::claude_accounts::monitor_roster() {
             Ok(roster) => {
                 self.names = roster.names;
+                self.identities = roster.identities;
                 self.selected = roster.selected;
                 self.overridden = roster.overridden;
                 self.focus = self.focus.min(self.names.len().saturating_sub(1));
@@ -126,6 +113,7 @@ impl Accounts {
             }
             Err(_) => {
                 self.names.clear();
+                self.identities.clear();
                 self.selected.clear();
                 self.focus = 0;
                 self.status = "Unable to load local profiles".into();
@@ -138,12 +126,13 @@ impl Accounts {
         &self.names
     }
     pub(super) fn confirmation_visible(&self) -> bool {
-        self.pending.is_some() && self.confirmation_visible
+        (self.pending.is_some() && self.confirmation_visible) || self.controls.visible()
     }
     pub(super) fn confirming(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.controls.active()
     }
     pub(super) fn cancel(&mut self) {
+        self.controls.cancel();
         self.pending = None;
         self.confirmation_visible = false;
     }
@@ -154,6 +143,9 @@ impl Accounts {
         self.focus = self.focus.saturating_sub(1);
     }
     pub(super) fn confirm(&mut self) {
+        if self.controls.active() {
+            return self.confirm_action();
+        }
         self.confirm_with(|name, expected| {
             #[cfg(unix)]
             {
@@ -192,36 +184,6 @@ impl Accounts {
     }
 }
 
-fn quota_summary(
-    quota: Option<&crate::monitor::CodexQuotaSnapshot>,
-    now: std::time::SystemTime,
-) -> String {
-    use std::time::{Duration, UNIX_EPOCH};
-    let Some(quota) = quota else {
-        return "Last reported: Unknown".into();
-    };
-    let Ok(age) = now.duration_since(quota.observed_at) else {
-        return "Last reported: Unknown".into();
-    };
-    let now_secs = now.duration_since(UNIX_EPOCH).ok().map(|v| v.as_secs());
-    let stale = age >= Duration::from_secs(900)
-        || [quota.primary.as_ref(), quota.secondary.as_ref()]
-            .into_iter()
-            .flatten()
-            .any(|window| {
-                window
-                    .reset_at
-                    .filter(|v| (1..=253_402_300_799).contains(v))
-                    .zip(now_secs)
-                    .is_some_and(|(reset, now)| reset <= now)
-            });
-    format!(
-        "Last reported: {} ago{}",
-        super::cells::format_duration(age),
-        if stale { "  Stale" } else { "" }
-    )
-}
-
 impl Accounts {
     pub(super) fn render_confirmation(
         &mut self,
@@ -230,56 +192,85 @@ impl Accounts {
     ) {
         use ratatui::{
             layout::{Alignment, Rect},
-            widgets::{Block, Borders, Clear, Paragraph},
+            style::{Modifier, Style},
+            text::{Line, Span},
+            widgets::{Block, BorderType, Borders, Clear, Paragraph},
         };
         self.confirmation_visible = false;
         let Some((name, _)) = &self.pending else {
             return;
         };
-        let width = 44.min(area.width);
-        let height = 5.min(area.height);
+        let detail = self.pending_detail().filter(|_| area.height >= 6);
+        let width = 60.min(area.width);
+        let height = (5 + u16::from(detail.is_some())).min(area.height);
         let popup = Rect::new(
             area.x + area.width.saturating_sub(width) / 2,
             area.y + area.height.saturating_sub(height) / 2,
             width,
             height,
         );
-        self.confirmation_visible = name.is_ascii()
-            && usize::from(width.saturating_sub(2)) >= name.len().max(22)
-            && height >= 5;
+        let inner = usize::from(width.saturating_sub(2));
+        self.confirmation_visible = name.is_ascii() && inner >= name.len().max(22) && height >= 5;
+        let dim = Style::default().fg(super::DIM_WHITE);
+        let key = Style::default().fg(super::TEAL);
+        let mut lines = vec![
+            Line::from(Span::styled(
+                "Select profile?",
+                Style::default()
+                    .fg(super::WHITE)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                name.clone(),
+                Style::default()
+                    .fg(super::TEAL)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ];
+        if let Some(detail) = detail {
+            lines.push(Line::from(Span::styled(
+                super::cells::ellipsize(&detail, inner),
+                dim,
+            )));
+        }
+        lines.push(Line::from(vec![
+            Span::styled("Enter", key),
+            Span::styled(" save  ", dim),
+            Span::styled("Esc", key),
+            Span::styled(" cancel  ", dim),
+            Span::styled("n", key),
+            Span::styled(" next", dim),
+        ]));
         frame.render_widget(Clear, popup);
         frame.render_widget(
-            Paragraph::new(format!("Select profile?\n{name}\nEnter save  Esc cancel"))
-                .alignment(Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .style(ratatui::style::Style::default().bg(super::BG)),
-                ),
+            Paragraph::new(lines).alignment(Alignment::Center).block(
+                Block::default()
+                    .title(Span::styled(" Next launch ", key))
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(key)
+                    .style(Style::default().bg(super::BG)),
+            ),
             popup,
         );
     }
-    pub(super) fn click(&mut self, x: u16, y: u16) {
-        if self.pending.is_none()
-            && self
-                .subscription
-                .contains(ratatui::layout::Position::new(x, y))
-        {
+    pub(super) fn click(&mut self, x: u16, y: u16) -> Option<crossterm::event::KeyCode> {
+        let at = ratatui::layout::Position::new(x, y);
+        if self.confirming() {
+            return None;
+        }
+        if let Some(key) = self.controls.button_at(at) {
+            return Some(key);
+        }
+        if self.subscription.contains(at) {
             self.focus = self.names.len();
-            return;
+        } else if self.rows.contains(at) {
+            let index = self.first + usize::from(y - self.rows.y) / self.row_height;
+            if index < self.names.len() {
+                self.focus = index;
+            }
         }
-        if self.pending.is_some()
-            || x < self.rows.x
-            || x >= self.rows.right()
-            || y < self.rows.y
-            || y >= self.rows.bottom()
-        {
-            return;
-        }
-        let index = self.first + usize::from(y - self.rows.y) / self.row_height;
-        if index < self.names.len() {
-            self.focus = index;
-        }
+        None
     }
 
     #[cfg(test)]
@@ -306,259 +297,139 @@ impl Accounts {
         now: std::time::SystemTime,
         zone: jiff::tz::TimeZone,
     ) {
-        use super::usage_limits::{QuotaLayout, quota_layout};
         use ratatui::{
             layout::{Constraint, Direction, Layout},
-            style::{Modifier, Style},
+            style::Style,
             text::Line,
             widgets::{Block, Borders, Paragraph},
         };
-        let direction = if area.width >= 90 {
-            Direction::Horizontal
+        let horizontal = area.width >= if self.local { 180 } else { 90 };
+        let claude_height = if self.local {
+            let wanted = u16::try_from(self.names.len().saturating_add(5)).unwrap_or(u16::MAX);
+            wanted.min(
+                area.height
+                    .saturating_sub(if area.height >= wanted.saturating_add(5) {
+                        5
+                    } else {
+                        3
+                    }),
+            )
         } else {
-            Direction::Vertical
-        };
-        let claude_height = (3_u16
-            .saturating_add((self.names.len().min(u16::MAX as usize / 3) * 3) as u16)
-            .saturating_add(u16::from(self.overridden)))
-        .min(area.height.saturating_sub(5));
-        let constraints = if direction == Direction::Vertical {
-            [Constraint::Length(claude_height), Constraint::Min(0)]
-        } else {
-            [Constraint::Percentage(50), Constraint::Percentage(50)]
+            3.min(area.height.saturating_sub(5))
         };
         let panes = Layout::default()
-            .direction(direction)
-            .constraints(constraints)
-            .split(area);
-        let block = Block::default()
-            .title(" Claude profiles ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(super::SEPARATOR));
-        self.rows = block.inner(panes[0]);
-        frame.render_widget(block, panes[0]);
-        if self.local {
-            let info = ratatui::layout::Rect::new(
-                self.rows.x,
-                self.rows.y,
-                self.rows.width,
-                self.rows.height.min(1 + u16::from(self.overridden)),
-            );
-            let saved = if self.selected.is_empty() {
-                "Unknown"
+            .direction(if horizontal {
+                Direction::Horizontal
             } else {
-                &self.selected
-            };
-            let mut info_lines = vec![Line::from(format!("Saved: {saved}"))];
-            if self.overridden {
-                info_lines.push(Line::from("CLAUDE_CONFIG_DIR overrides selection"));
-            }
-            frame.render_widget(Paragraph::new(info_lines), info);
-            self.rows.y += info.height;
-            self.rows.height -= info.height;
-        }
-        self.row_height = if usize::from(self.rows.height) >= self.names.len() * 3 {
-            3
-        } else {
-            1
-        };
-        let count = usize::from(self.rows.height) / self.row_height;
-        self.first = self
-            .focus
-            .min(self.names.len().saturating_sub(1))
-            .saturating_add(1)
-            .saturating_sub(count.max(1));
+                Direction::Vertical
+            })
+            .constraints(match (horizontal, self.local) {
+                (false, _) => [Constraint::Length(claude_height), Constraint::Min(0)],
+                (true, true) => [Constraint::Min(0), Constraint::Length(52)],
+                (true, false) => [Constraint::Percentage(50), Constraint::Percentage(50)],
+            })
+            .split(area);
         let seconds = now
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mut lines: Vec<Line<'_>> = Vec::new();
-        if !self.local && self.names.is_empty() {
-            lines.push(Line::from("Claude profiles: Unknown"));
-        }
-        for (index, name) in self.names.iter().enumerate().skip(self.first).take(count) {
-            let style = if index == self.focus {
-                Style::default()
-                    .fg(super::WHITE)
-                    .bg(super::SELECTED_BG)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(super::DIM_WHITE)
-            };
-            let title = format!(
-                "Claude {name}{}",
-                if *name == self.selected { " Saved" } else { "" }
-            );
-            let limits = self.limits.get(name);
-            let five = super::usage_limits::claude("5h", limits, 18_000, seconds);
-            let week = super::usage_limits::claude("week", limits, 604_800, seconds);
-            if self.row_height == 3 {
-                lines.push(Line::from(title).style(style));
-                lines.push(five);
-                lines.push(week);
-            } else {
-                let reset = |five: bool| {
-                    limits
-                        .and_then(|l| {
-                            if five {
-                                l.five_hour.as_ref()
-                            } else {
-                                l.seven_day.as_ref()
-                            }
-                        })
-                        .and_then(|w| w.resets_at)
-                };
-                lines.push(super::usage_limits::compact_line(
-                    name,
-                    style,
-                    [
-                        super::usage_limits::CompactWindow {
-                            label: "5h".into(),
-                            line: five,
-                            reset: reset(true),
-                        },
-                        super::usage_limits::CompactWindow {
-                            label: "week".into(),
-                            line: week,
-                            reset: reset(false),
-                        },
-                    ],
-                    usize::from(self.rows.width),
-                    seconds,
-                ));
-            }
-        }
-        frame.render_widget(Paragraph::new(lines), self.rows);
-        let quota = snapshot
-            .codex_quota
-            .as_ref()
-            .filter(|q| now.duration_since(q.observed_at).is_ok());
-        let title = if quota_summary(quota, now).contains("Stale") {
-            " Stale ChatGPT subscription "
-        } else {
-            " ChatGPT subscription "
-        };
-        let detail_block = Block::default()
-            .title(title)
-            .title_style(if self.focus == self.names.len() {
-                Style::default()
-                    .fg(super::WHITE)
-                    .bg(super::SELECTED_BG)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(super::DIM_WHITE)
-            })
+        let roster = self.details.roster(&self.names, &self.identities);
+        let states = roster.states(&self.limits, seconds);
+        let mut block = Block::default()
+            .title(" Claude profiles ")
             .borders(Borders::ALL)
-            .style(Style::default().fg(super::DIM_WHITE));
-        self.subscription = panes[1];
-        let inner = detail_block.inner(panes[1]);
-        frame.render_widget(detail_block, panes[1]);
-        self.confirmation_visible = false;
-        let saved = format!(
-            "Saved: {}",
-            if self.selected.is_empty() {
-                "Unknown"
-            } else {
-                &self.selected
-            }
-        );
-        let mut detail: Vec<Line<'_>> = Vec::new();
-        {
-            let quota = snapshot
-                .codex_quota
-                .as_ref()
-                .filter(|q| now.duration_since(q.observed_at).is_ok());
-            detail.push(Line::from(quota_summary(quota, now)));
-            let primary = super::usage_limits::codex_in_zone(
-                "Primary",
-                quota.and_then(|q| q.primary.as_ref()),
-                now,
-                zone.clone(),
-            );
-            let secondary = super::usage_limits::codex_in_zone(
-                "Secondary",
-                quota.and_then(|q| q.secondary.as_ref()),
-                now,
-                zone.clone(),
-            );
-            let layout = quota_layout(
-                super::usage_limits::wrapped_height(
-                    &[detail[0].clone(), primary.clone(), secondary.clone()],
-                    inner.width,
-                ),
-                inner.height,
-            );
-            if layout == QuotaLayout::Full {
-                detail.push(primary);
-                detail.push(secondary);
-            } else {
-                if inner.height <= 2 {
-                    detail.clear();
-                }
-                let window = |primary: bool| {
-                    quota.and_then(|q| {
-                        if primary {
-                            q.primary.as_ref()
-                        } else {
-                            q.secondary.as_ref()
-                        }
-                    })
-                };
-                let compact =
-                    |fallback: &str, w: Option<&crate::monitor::CodexQuotaWindow>, line| {
-                        let label = match w.and_then(|w| w.window_minutes) {
-                            Some(300) => "5h".into(),
-                            Some(10080) => "week".into(),
-                            Some(n) if (1..=525_600_000).contains(&n) => format!("{n}m"),
-                            _ => fallback.into(),
-                        };
-                        super::usage_limits::CompactWindow {
-                            label,
-                            line,
-                            reset: w.and_then(|w| w.reset_at),
-                        }
-                    };
-                let windows = [
-                    compact("Primary", window(true), primary),
-                    compact("Secondary", window(false), secondary),
-                ];
-                if layout == QuotaLayout::TwoLines {
-                    for window in windows {
-                        detail.push(super::usage_limits::compact_line(
-                            "",
-                            Style::default(),
-                            [window],
-                            usize::from(inner.width),
-                            seconds,
-                        ));
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .style(Style::default().fg(super::SEPARATOR));
+        if self.local {
+            block = block.title_top(
+                Line::from(format!(
+                    " ● Saved: {}  ★ Suggested ",
+                    if self.selected.is_empty() {
+                        "Unknown"
+                    } else {
+                        &self.selected
                     }
-                } else {
-                    detail.push(super::usage_limits::compact_line(
-                        "",
-                        Style::default(),
-                        windows,
-                        usize::from(inner.width),
-                        seconds,
-                    ));
-                }
+                ))
+                .style(Style::default().fg(super::DIM_WHITE))
+                .right_aligned(),
+            );
+        }
+        if !self.names.is_empty() {
+            block = block.title_bottom(
+                Line::from(format!(" {} ", roster.total(&self.limits, seconds)))
+                    .style(Style::default().fg(super::DIM_WHITE)),
+            );
+        }
+        let inner = block.inner(panes[0]);
+        frame.render_widget(block, panes[0]);
+        self.rows = inner;
+        self.row_height = 1;
+        if !self.local {
+            frame.render_widget(Paragraph::new("Claude profiles: Unknown"), inner);
+        } else {
+            let rows: Vec<super::profile_table::Row<'_>> = self
+                .names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| super::profile_table::Row {
+                    name,
+                    saved: *name == self.selected,
+                    focused: index == self.focus,
+                    state: states.get(index),
+                })
+                .collect();
+            let columns = super::profile_table::Columns::fit(&rows, usize::from(inner.width));
+            let height = usize::from(inner.height);
+            let line = |y: u16| ratatui::layout::Rect::new(inner.x, y, inner.width, 1);
+            let (buttons, message, header) = (
+                height >= 2,
+                height >= rows.len() + 2,
+                height >= rows.len() + 3,
+            );
+            if header {
+                frame.render_widget(Paragraph::new(columns.header()), line(inner.y));
+                self.rows.y += 1;
             }
-            if self.local {
-                detail.push(Line::from(saved));
-                if self.overridden {
-                    detail.push(Line::from("CLAUDE_CONFIG_DIR overrides selection"));
-                } else if self.names.get(self.focus) == Some(&self.selected) {
-                    detail.push(Line::from("Selected for next launch"));
-                }
-                if !self.status.is_empty() {
-                    detail.push(Line::from(self.status.clone()));
-                }
-            } else {
-                detail.push(Line::from("Read-only monitor"));
+            self.rows.height = inner
+                .height
+                .saturating_sub(u16::from(header) + u16::from(buttons) + u16::from(message));
+            let count = usize::from(self.rows.height);
+            self.first = self
+                .focus
+                .min(rows.len().saturating_sub(1))
+                .saturating_add(1)
+                .saturating_sub(count.max(1));
+            let lines: Vec<Line<'_>> = rows
+                .iter()
+                .skip(self.first)
+                .take(count)
+                .map(|row| columns.line(row))
+                .collect();
+            frame.render_widget(Paragraph::new(lines), self.rows);
+            let note = self.note_line(rows.get(self.focus));
+            if message {
+                frame.render_widget(Paragraph::new(note), line(inner.bottom() - 1));
+            }
+            if buttons {
+                self.render_buttons(frame, line(inner.bottom() - 1 - u16::from(message)));
             }
         }
-        frame.render_widget(
-            Paragraph::new(detail).wrap(ratatui::widgets::Wrap { trim: false }),
-            inner,
+        self.subscription = panes[1];
+        self.confirmation_visible = false;
+        super::subscription::render(
+            frame,
+            panes[1],
+            snapshot,
+            now,
+            zone,
+            super::subscription::Notes {
+                focused: self.focus == self.names.len(),
+                local: self.local,
+                saved: &self.selected,
+                overridden: self.overridden,
+                focus_is_saved: self.names.get(self.focus) == Some(&self.selected),
+                status: &self.status,
+            },
         );
     }
 }

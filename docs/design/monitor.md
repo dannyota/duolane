@@ -50,13 +50,15 @@ project values are ellipsized.
 ## Views
 
 The header shows two tabs, `1 Overview` and `2 Usage`, with the open one
-highlighted. The key or a left click on a tab opens that view. The footer hints
-for `q`, `?`, `b`, `Tab`, `1`, `2`, and `r` are click targets that act as their
-keys. The `Enter` and navigation hints are not targets, because they act on a
-selection. A click on a tab or a hint is ignored while the help, setup,
-shutdown, or profile confirmation overlay is visible, while a banner covers the
-footer, and when the terminal size differs from the frame the targets came from.
-Only a table row opens a detail.
+highlighted. The key or a left click on a tab opens that view. The footer shows
+the hints that apply to the open view: `Tab` in Overview, `r` in Usage, and `n`
+in the in-process monitor only. The hints for `q`, `?`, `b`, `Tab`, `r`, `n`,
+`1`, and `2` are click targets that act as their keys. The `Enter` and
+navigation hints are not targets, because they act on a selection. A click on a
+tab or a hint is ignored while the help, setup, shutdown, or profile
+confirmation overlay is visible, while a banner covers the footer, and when the
+terminal size differs from the frame the targets came from. Only a table row
+opens a detail.
 
 Dim text uses a color with a contrast of at least 4.5 to 1 on the background.
 
@@ -176,7 +178,10 @@ header, account, or conversation value.
 
 `1` opens Overview and `2` opens Usage. The view shows the Claude profiles and
 the ChatGPT subscription with their limits, then Speed by model and Tokens by
-session.
+session. The in-process monitor adds the
+[profile state](monitor-accounts.md#profile-state), the
+[account details](monitor-accounts.md#account-details), and the
+[account actions](monitor-accounts.md#account-actions).
 
 - A limit window is a bar with its percent used and reset time. The bar is
   yellow from 50% and red from 80%.
@@ -191,22 +196,24 @@ session.
   and effort. Each row shows the request count, the median Wait, the median
   generation time, the median output tokens, the pooled rate, and a bar of the
   two medians at one cell per half second.
+- Model and Project take the width of their longest value, up to 36 and 24 cells
+  from a pane of 100 cells and 14 cells below it, so a header or a value is cut
+  only at its cap.
 - Tokens by session lists each session's input and output tokens and its share
   of all output tokens, as a number and a bar.
 - The bars take the width the other columns leave. The two tables share the
   height below the limits by their row counts, and a table that does not fit
   shows the rows that fit and the number left out.
-- A profile takes three lines, its name and one per window, when the pane has
-  room for every profile. Otherwise each profile is one compact line, so a
-  terminal of 80 by 24 still shows the limits.
-- A compact line gives its parts room in this order: the name, at least 12 cells
-  and ellipsized beyond its share; then for each window a short label, the
+- The in-process monitor shows the Claude profiles as the
+  [profile table](monitor-accounts.md#profile-table), one line per profile.
+- The ChatGPT pane shows one line per window when it has room. Otherwise it uses
+  compact lines. A compact line gives for each window a short label, the
   percent, and the time left until the reset, such as `5h 42% 1h54m`; then a
   bar, only when cells remain. A window with no reset time shows `-` there, and
-  one whose reset has passed shows `passed`. The ChatGPT pane has its name in
-  its title, so its compact lines start at the windows, on one line or one line
-  per window. A non-standard ChatGPT window uses its length as the label, such
-  as `120m`. The stale marker is never dropped while a value shows.
+  one whose reset has passed shows `passed`. The pane has its name in its title,
+  so its compact lines start at the windows, on one line or one line per window.
+  A non-standard ChatGPT window uses its length as the label, such as `120m`.
+  The stale marker is never dropped while a value shows.
 - The confirmation for a profile change is an overlay, so it fits a terminal of
   80 by 24. `Enter` saves only when the terminal still has the size of the frame
   that showed the confirmation. The Claude pane keeps showing the saved profile
@@ -217,7 +224,9 @@ Arrow keys or a row click move the focus without changing the selected profile.
 and `Esc` cancels. Display both the focused row and the profile selected for the
 next launch. Keep the existing shutdown and help controls in both views. At
 narrow widths the Claude profiles and the ChatGPT subscription stack; at wide
-widths they sit side by side.
+widths they sit side by side. The read-only monitors sit side by side from 90
+cells. The in-process monitor does so from 180 cells, because its table needs
+the width, and gives the ChatGPT pane 52 cells.
 
 Only the in-process monitor on Unix can change the profile. It reuses the
 checked selector and locks from [`accounts use`](claude-accounts.md#commands)
@@ -229,8 +238,10 @@ do not read or modify the local account store. They do not receive profile names
 or selection state over HTTP.
 
 `r` reloads the local names and saved choice. Entering Usage also reads the
-local roster. These reads do not run a login/status command or make a provider
-request. A registered profile is not evidence that its login is still valid.
+local roster. These reads make no provider request. A registered profile is not
+evidence that its login is still valid;
+[account details](monitor-accounts.md#account-details) report the login
+separately.
 
 ### Reported limits
 

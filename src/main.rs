@@ -99,6 +99,10 @@ enum AccountsCommand {
     Login {
         #[arg(value_name = "NAME")]
         name: Option<String>,
+        #[arg(long, hide = true, conflicts_with = "expect_absent")]
+        expect: Option<String>,
+        #[arg(long, hide = true)]
+        expect_absent: bool,
     },
     #[command(about = "Choose the profile for the next duolane claude launch")]
     Use {
@@ -111,6 +115,8 @@ enum AccountsCommand {
         name: Option<String>,
         #[arg(long, help = "Pick the next profile with a different account")]
         next: bool,
+        #[arg(long, hide = true)]
+        expect: Option<String>,
         #[arg(last = true, value_name = "CLAUDE_ARGS")]
         args: Vec<std::ffi::OsString>,
     },
@@ -122,6 +128,8 @@ enum AccountsCommand {
         name: String,
         #[arg(long, help = "Skip the confirmation prompt")]
         yes: bool,
+        #[arg(long, hide = true)]
+        expect: Option<String>,
     },
 }
 
@@ -311,6 +319,18 @@ fn main() -> Result<()> {
                         monitor_listen_url
                             .push_str("  traffic capture on: stores conversation content");
                     }
+                    let shutdown_signal =
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let signal_flag = shutdown_signal.clone();
+                    let mut signals = {
+                        let _guard = runtime.enter();
+                        ServiceShutdownSignals::new()?
+                    };
+                    let signal_task = runtime.spawn(async move {
+                        if signals.recv().await.is_ok() {
+                            signal_flag.store(true, std::sync::atomic::Ordering::Release);
+                        }
+                    });
                     let server_monitor = monitor.clone();
                     let server_registry = registry.clone();
                     let server_task = runtime.spawn(async move {
@@ -335,8 +355,10 @@ fn main() -> Result<()> {
                             registry: &registry,
                             shutdown: Some(shutdown_tx),
                             shutdown_complete: Some(shutdown_complete_rx),
+                            shutdown_signal,
                         },
                     );
+                    signal_task.abort();
                     if matches!(&ui_result, Ok(MonitorExit::ForceQuit)) {
                         server_task.abort();
                         let _ = runtime.block_on(server_task);
@@ -388,16 +410,25 @@ fn main() -> Result<()> {
         }
         Commands::Codex { command } => run_provider_cli("codex", command),
         Commands::Accounts { command } => match command {
-            AccountsCommand::Login { name } => {
-                let name = duolane::claude_accounts::login(name)?;
+            AccountsCommand::Login {
+                name,
+                expect,
+                expect_absent,
+            } => {
+                let name = duolane::claude_accounts::login(name, expect, expect_absent)?;
                 duolane::claude_accounts::announce(&name)
             }
             AccountsCommand::Use { name } => duolane::claude_accounts::select(name),
-            AccountsCommand::Switch { name, next, args } => {
-                duolane::claude_accounts::switch(name, next, args)
-            }
+            AccountsCommand::Switch {
+                name,
+                next,
+                args,
+                expect,
+            } => duolane::claude_accounts::switch(name, next, args, expect),
             AccountsCommand::List => duolane::claude_accounts::list(),
-            AccountsCommand::Remove { name, yes } => duolane::claude_accounts::remove(name, yes),
+            AccountsCommand::Remove { name, yes, expect } => {
+                duolane::claude_accounts::remove(name, yes, expect)
+            }
         },
         Commands::Claude { args } => duolane::intercept::run_claude(args, None),
         Commands::Agents { command } => match command {
@@ -436,17 +467,29 @@ async fn run_service(config: ServerConfig, registry: std::sync::Arc<Registry>) -
 }
 
 #[cfg(unix)]
+fn shutdown_signal_kinds() -> [tokio::signal::unix::SignalKind; 3] {
+    [
+        tokio::signal::unix::SignalKind::interrupt(),
+        tokio::signal::unix::SignalKind::terminate(),
+        tokio::signal::unix::SignalKind::hangup(),
+    ]
+}
+
+#[cfg(unix)]
 struct ServiceShutdownSignals {
     interrupt: tokio::signal::unix::Signal,
     terminate: tokio::signal::unix::Signal,
+    hangup: tokio::signal::unix::Signal,
 }
 
 #[cfg(unix)]
 impl ServiceShutdownSignals {
     fn new() -> std::io::Result<Self> {
+        let [interrupt, terminate, hangup] = shutdown_signal_kinds();
         Ok(Self {
-            interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?,
-            terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
+            interrupt: tokio::signal::unix::signal(interrupt)?,
+            terminate: tokio::signal::unix::signal(terminate)?,
+            hangup: tokio::signal::unix::signal(hangup)?,
         })
     }
 
@@ -454,6 +497,7 @@ impl ServiceShutdownSignals {
         tokio::select! {
             _ = self.interrupt.recv() => Ok(()),
             _ = self.terminate.recv() => Ok(()),
+            _ = self.hangup.recv() => Ok(()),
         }
     }
 }
@@ -646,58 +690,5 @@ fn alias_names() -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_serve_selects_monitor_on_tty() {
-        assert_eq!(select_serve_mode(true, false), ServeMode::Monitor);
-    }
-
-    #[test]
-    fn no_monitor_selects_plain_mode() {
-        assert_eq!(select_serve_mode(true, true), ServeMode::Plain);
-    }
-
-    #[test]
-    fn non_tty_stdout_selects_plain_mode() {
-        assert_eq!(select_serve_mode(false, false), ServeMode::Plain);
-    }
-
-    #[test]
-    fn demo_command_parses_without_server_options() {
-        let cli = Cli::try_parse_from(["duolane", "demo"]).unwrap();
-
-        assert!(matches!(cli.command, Some(Commands::Demo)));
-    }
-
-    #[tokio::test]
-    async fn shutdown_signal_setup_and_receive_preserve_io_results() {
-        fn assert_constructor(_: fn() -> std::io::Result<ServiceShutdownSignals>) {}
-        fn assert_io_future<F: std::future::Future<Output = std::io::Result<()>>>(_: &F) {}
-
-        assert_constructor(ServiceShutdownSignals::new);
-        let mut signals = ServiceShutdownSignals::new().unwrap();
-        let receive = signals.recv();
-        assert_io_future(&receive);
-    }
-
-    #[test]
-    fn monitor_token_travels_only_to_loopback_or_https() {
-        for (url, expected) in [
-            ("http://127.0.0.1:18765/", true),
-            ("http://LOCALHOST:18765/", true),
-            ("http://[::1]:18765/", true),
-            ("https://proxy.example/", true),
-            ("http://proxy.example:18765/", false),
-            ("http://192.0.2.1:18765/", false),
-        ] {
-            assert_eq!(token_may_travel(&url.parse().unwrap()), expected, "{url}");
-        }
-    }
-
-    #[test]
-    fn listen_url_brackets_ipv6_addresses() {
-        assert_eq!(listen_url("::1", 18765), "http://[::1]:18765");
-    }
-}
+#[path = "main_tests.rs"]
+mod tests;

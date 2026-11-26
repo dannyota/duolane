@@ -1,6 +1,7 @@
 use super::roster::{self, Entry};
 use super::unix::{
-    checked_target, current_selection, profile_names, prompt_name, registered, save_selection,
+    checked_target, current_selection, monitor_roster, profile_names, prompt_name, registered,
+    save_selection_identity,
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::ffi::OsString;
@@ -81,8 +82,16 @@ fn launch_arguments(args: Vec<OsString>) -> (Vec<OsString>, bool) {
     (launch, true)
 }
 
-fn retry_hint(target: &str, continued: bool, selection: Result<String>) -> String {
+fn retry_hint(
+    target: &str,
+    continued: bool,
+    selection: Result<String>,
+    identity_matches: bool,
+) -> String {
     match selection {
+        Ok(current) if current == target && !identity_matches => {
+            "profile changed since it was confirmed; reload the Usage view or run `duolane accounts list` and choose again".into()
+        }
         Ok(current) if current == target => {
             let command = if continued {
                 "duolane claude --continue"
@@ -104,7 +113,23 @@ fn retry_hint(target: &str, continued: bool, selection: Result<String>) -> Strin
     }
 }
 
-pub fn switch(name: Option<String>, next: bool, args: Vec<OsString>) -> Result<()> {
+fn switch_identity(
+    expected: Option<&str>,
+    save: impl FnOnce(bool) -> Result<Option<String>>,
+) -> Result<Option<String>> {
+    let identity = save(expected.is_some())?;
+    if expected.is_some() {
+        anyhow::ensure!(identity.is_some(), "profile identity unknown");
+    }
+    Ok(identity)
+}
+
+pub fn switch(
+    name: Option<String>,
+    next: bool,
+    args: Vec<OsString>,
+    expected: Option<String>,
+) -> Result<()> {
     ensure!(
         !(name.is_some() && next),
         "give a profile name or --next, not both"
@@ -149,20 +174,29 @@ pub fn switch(name: Option<String>, next: bool, args: Vec<OsString>) -> Result<(
         None => roster::entries(&profiles)?,
     };
     let summary = roster::describe(&entries, &target).0;
-    save_selection(&target, Some(&current))?;
+    let identity = switch_identity(expected.as_deref(), |required| {
+        save_selection_identity(&target, Some(&current), expected.as_deref(), required)
+    })?;
     match summary {
         Some(summary) => println!("Switched to {target} ({summary})."),
         None => println!("Switched to {target}."),
     }
     std::io::stdout().flush()?;
     let (arguments, continued) = launch_arguments(args);
-    crate::intercept::run_claude(arguments, Some(&target))
-        .with_context(|| retry_hint(&target, continued, current_selection()))
+    crate::intercept::run_claude(arguments, Some((&target, identity.as_deref()))).with_context(
+        || {
+            let matches = identity.as_ref().is_none_or(|identity| {
+                monitor_roster()
+                    .is_ok_and(|roster| roster.identities.get(&target) == Some(identity))
+            });
+            retry_hint(&target, continued, current_selection(), matches)
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{launch_arguments, retry_hint};
+    use super::{launch_arguments, retry_hint, switch_identity};
     use std::ffi::OsString;
 
     fn run(args: &[&str]) -> Vec<String> {
@@ -174,18 +208,39 @@ mod tests {
     }
 
     #[test]
+    fn unknown_identity_only_blocks_expected_switch() {
+        let save = |required| {
+            if required {
+                anyhow::bail!("profile identity unknown")
+            }
+            Ok(None)
+        };
+        assert!(switch_identity(None, save).is_ok());
+        assert!(switch_identity(Some("known"), save).is_err());
+    }
+
+    #[test]
+    fn retry_hint_for_recreated_profile_requests_fresh_choice() {
+        let hint = retry_hint("backup", true, Ok("backup".into()), false);
+        assert!(hint.contains("profile changed"));
+        assert!(hint.contains("duolane accounts list"));
+        assert!(!hint.contains("duolane claude"));
+        assert!(!hint.contains("duolane accounts switch"));
+    }
+
+    #[test]
     fn claude_accounts_switch_conflict_retry_uses_switch() {
-        let hint = retry_hint("backup", true, Ok("other".into()));
+        let hint = retry_hint("backup", true, Ok("other".into()), true);
         assert!(hint.contains("selection changed"));
         assert!(hint.contains("nothing was launched"));
         assert!(hint.contains("duolane accounts switch backup"));
         assert!(hint.contains("same Claude arguments"));
-        let unreadable = retry_hint("backup", true, Err(anyhow::anyhow!("unreadable")));
+        let unreadable = retry_hint("backup", true, Err(anyhow::anyhow!("unreadable")), true);
         assert!(unreadable.contains("duolane accounts switch backup"));
         assert!(unreadable.contains("same Claude arguments"));
         assert!(!hint.contains("is now selected"));
         assert!(!hint.contains("duolane claude"));
-        let hint = retry_hint("backup", false, Ok("backup".into()));
+        let hint = retry_hint("backup", false, Ok("backup".into()), true);
         assert!(hint.contains("duolane claude`"));
         assert!(!hint.contains("--continue"));
     }

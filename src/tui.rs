@@ -1,4 +1,6 @@
+mod account_details;
 mod accounts;
+mod actions;
 mod cells;
 mod chrome;
 mod detail;
@@ -15,9 +17,11 @@ mod phase_tests;
 mod pointer;
 #[cfg(test)]
 mod pointer_tests;
+mod profile_table;
 mod request_phases;
 mod requests;
 mod sessions;
+mod subscription;
 mod summary;
 mod usage_limits;
 mod usage_stats;
@@ -39,10 +43,11 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -87,6 +92,7 @@ pub struct MonitorUiConfig<'a> {
     pub registry: &'a Registry,
     pub shutdown: Option<oneshot::Sender<()>>,
     pub shutdown_complete: Option<mpsc::Receiver<()>>,
+    pub shutdown_signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +127,7 @@ pub fn run_attached_monitor(
             setup_text,
             shutdown: None,
             shutdown_complete: None,
+            shutdown_signal: Default::default(),
         },
     )
 }
@@ -135,6 +142,7 @@ pub fn run_mock_monitor(port: u16, registry: &Registry) -> Result<(), anyhow::Er
             setup_text: mock_setup_text(port, registry),
             shutdown: None,
             shutdown_complete: None,
+            shutdown_signal: Default::default(),
         },
     )
     .map(|_| ())
@@ -146,6 +154,7 @@ struct UiSession {
     setup_text: String,
     shutdown: Option<oneshot::Sender<()>>,
     shutdown_complete: Option<mpsc::Receiver<()>>,
+    shutdown_signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl From<MonitorUiConfig<'_>> for UiSession {
@@ -156,6 +165,7 @@ impl From<MonitorUiConfig<'_>> for UiSession {
             listen_url: config.listen_url,
             shutdown: config.shutdown,
             shutdown_complete: config.shutdown_complete,
+            shutdown_signal: config.shutdown_signal,
         }
     }
 }
@@ -186,7 +196,22 @@ fn run_monitor_loop(
 
     app.accounts.enter();
     app.accounts.refresh_limits();
-    let run_result = run_monitor_events(&mut terminal, &mut snapshot, &mut app, &mut guard.pointer);
+    let run_result = run_monitor_events(
+        &mut terminal,
+        &mut snapshot,
+        &mut app,
+        &mut guard.pointer,
+        &config.shutdown_signal,
+    );
+    if run_result
+        .as_ref()
+        .is_err_and(actions::terminal_handoff_error)
+    {
+        guard.suspended = true;
+        app.begin_shutdown();
+        app.wait_for_shutdown_completion();
+        return run_result;
+    }
     if run_result.is_err() {
         app.begin_shutdown();
         let state = snapshot();
@@ -208,9 +233,14 @@ fn run_monitor_events(
     mut snapshot: impl FnMut() -> SnapshotUpdate,
     app: &mut MonitorApp,
     pointer: &mut pointer::Pointer,
+    signal: &std::sync::atomic::AtomicBool,
 ) -> Result<MonitorExit, anyhow::Error> {
     loop {
+        if signal.load(std::sync::atomic::Ordering::Acquire) {
+            app.begin_shutdown();
+        }
         app.accounts.refresh_if_due();
+        app.accounts.run_handoff(terminal)?;
         let update = snapshot();
         let state = update.snapshot();
         app.clamp_selection(state.sessions.len(), state.recent.len());
@@ -349,6 +379,7 @@ impl MonitorApp {
             return;
         }
         self.phase = MonitorPhase::ShuttingDown;
+        self.accounts.stop_action();
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
@@ -424,12 +455,16 @@ impl Drop for MonitorApp {
 }
 
 struct TerminalGuard {
+    suspended: bool,
     mouse_capture_attempted: bool,
     pointer: pointer::Pointer,
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        if self.suspended {
+            return;
+        }
         pointer::restore(&mut self.pointer, &mut io::stdout(), |writer| {
             if self.mouse_capture_attempted {
                 let _ = execute!(writer, DisableMouseCapture);
@@ -445,6 +480,7 @@ fn setup_terminal(
 ) -> Result<(TerminalGuard, Terminal<CrosstermBackend<Stdout>>), anyhow::Error> {
     enable_raw_mode()?;
     let mut guard = TerminalGuard {
+        suspended: false,
         mouse_capture_attempted: false,
         pointer: pointer::Pointer::new(pointer_supported),
     };
@@ -536,6 +572,7 @@ fn render_at(
         usage_stats::render(frame, panes[1], panes[2], terminal_state, &state.recent);
         chrome::render_chrome_footer(frame, root[5], app, &mut targets);
         app.accounts.render_confirmation(frame, area);
+        app.accounts.render_action(frame, area);
         if app.show_setup {
             render_setup_overlay(frame, area, &app.setup_text);
         }

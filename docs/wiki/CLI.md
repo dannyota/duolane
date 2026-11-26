@@ -49,11 +49,41 @@ times, the speed of each model over the recent requests, and the tokens each
 session used. A limit that was not reported is `Unknown`, and the ChatGPT report
 is marked `Stale` after 15 minutes.
 
-In the local Unix monitor, select a Claude profile with the arrow keys or a
-click, then press Enter to review and confirm the next-launch choice. Press `r`
-to reload the local profile list and limits without contacting providers. An
-attached monitor stays read-only and does not show local profile names or Claude
-limits.
+In the local Unix monitor, the Claude profiles form a table with the columns of
+`duolane accounts list`: account email, plan, both limit windows, the time left
+on the login, status, and the age of the usage, which reads `stale` after 15
+minutes. A login under 3 days is yellow. `●` marks the profile saved for the
+next launch and `★` the available profile with the most room; duolane never
+switches on its own. The bottom border of the pane gives the total over all
+accounts.
+
+Select a Claude profile with the arrow keys or a click, then press Enter to
+review and confirm the next-launch choice. Press `r` to reload the profile list,
+the limits, and the account details. The details come from `claude auth status`,
+checked in the background when Usage opens and kept for 5 minutes. The pane
+shows when they were last checked.
+
+Press `n` in either view to pick another profile for the next launch without
+moving the focus yourself. It proposes the suggested profile first; press `n`
+again for the next one, Enter to save, or Esc to cancel.
+
+Below the table, a line of buttons shows every action for the focused profile.
+Click a button or press its key. The line under the buttons shows the result.
+
+| Key | Action on the focused profile                                 |
+| --- | ------------------------------------------------------------- |
+| `a` | Add a profile: type a name, then sign in                      |
+| `l` | Sign in again                                                 |
+| `d` | Sign out and delete the profile                               |
+| `s` | Select it and resume the latest session where `serve` started |
+
+Each action asks for confirmation first and runs the matching `duolane accounts`
+command. Sign-in and switch take over the terminal until they end, then return
+to the dashboard; the proxy keeps serving. `default` cannot be signed in again
+or removed here.
+
+An attached monitor stays read-only. It does not show local profile names,
+account emails, or Claude limits, and it runs no action.
 
 ## Claude Code agents
 

@@ -75,6 +75,19 @@ skips adding the Codex lineup. The
 describe separation by configuration directory, including macOS Keychain
 entries.
 
+## Profile identity
+
+A profile's identity is the device, inode, and birth time of its directory, so a
+profile removed and created again under the same name gets a new one. Reading it
+needs no credential. `accounts login`, `remove`, and `switch` take a hidden
+`--expect <identity>`, and `login` takes `--expect-absent`; each checks it under
+the profile's lock before changing anything and refuses on a mismatch or when
+the file system reports no birth time. `switch` checks the identity again when
+the launcher takes the lock before it shares history, so a profile recreated and
+selected meanwhile is refused. A refusal says the profile changed and asks to
+reload the list and choose again. Without these options the commands behave as
+before. The [monitor](monitor-accounts.md#account-actions) passes them.
+
 ## Account details
 
 `list`, the `use` menu, and the login report learn which account a profile holds
@@ -96,6 +109,11 @@ as signed in or unknown.
   active status process groups and waits for the children before returning an
   error. The Unix roster uses the locked `libc` version to restore the previous
   signal handlers when collection finishes.
+- The monitor reads the same details for its
+  [Usage view](monitor-accounts.md#account-details) on a background thread. That
+  reader installs no signal handler, because a handler would swallow a signal
+  meant to stop the proxy. A cancel flag stops its status process groups
+  instead.
 - Displayed fields drop control and bidirectional formatting characters and keep
   at most 64 characters, so status text cannot rewrite the terminal.
 - Two signed-in profiles are the same account when their full email, compared

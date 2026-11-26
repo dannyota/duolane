@@ -103,8 +103,13 @@ pub(super) fn layout(
     now: std::time::SystemTime,
     zone: jiff::tz::TimeZone,
 ) -> [Rect; 3] {
-    let accounts =
-        super::accounts::needed_height(area, state, account_count, now, zone).min(area.height / 2);
+    let accounts = super::subscription::needed_height(area, state, account_count, now, zone).min(
+        if account_count > 0 {
+            area.height / 3 * 2
+        } else {
+            area.height / 2
+        },
+    );
     let remaining = area.height.saturating_sub(accounts);
     let speed_rows = groups(&state.recent).len();
     let token_rows = state.sessions.len();
@@ -127,6 +132,23 @@ pub(super) fn layout(
     ]
 }
 
+fn fit_width<'a>(values: impl Iterator<Item = Option<&'a str>>, cap: u16) -> u16 {
+    let longest = values
+        .map(|value| cells::display_width(value.unwrap_or("-")))
+        .max()
+        .unwrap_or(0)
+        .max(7);
+    longest.min(usize::from(cap)) as u16
+}
+
+fn model_cap(pane: u16) -> u16 {
+    if pane >= 100 {
+        layout::MODEL_WIDE_WIDTH
+    } else {
+        14
+    }
+}
+
 fn fit_rows<'a>(mut rows: Vec<Row<'a>>, height: u16) -> (Vec<Row<'a>>, Option<String>) {
     let capacity = usize::from(height.saturating_sub(3));
     if rows.len() > capacity && capacity > 0 {
@@ -144,19 +166,20 @@ pub(super) fn render(
     state: &MonitorSnapshot,
     recent: &[CompletedSnapshot],
 ) {
-    let rows = groups(recent)
+    let groups = groups(recent);
+    let speed_model = fit_width(
+        groups.iter().map(|((_, model, _), _)| model.as_deref()),
+        model_cap(speed.width),
+    );
+    let speed_fixed = 6 + speed_model + 6 + 4 + 6 + 6 + 6 + 11 + 8 + 2;
+    let rows = groups
         .into_iter()
         .map(|((lane, model, effort), mut group)| {
             let wait = median(&mut group.waits);
             let generation = median(&mut group.generations);
             let output = median(&mut group.outputs);
             let rate = (group.rate_seconds > 0.0).then_some(group.rate_tokens / group.rate_seconds);
-            let width =
-                usize::from(
-                    speed
-                        .width
-                        .saturating_sub(if speed.width >= 100 { 71 } else { 61 }),
-                );
+            let width = usize::from(speed.width.saturating_sub(speed_fixed));
             let waits = wait.map_or(0, |n| (n * 2.0).round().min(width as f64) as usize);
             let generation_cells = generation.map_or(0, |n| {
                 (n * 2.0).round().min(width.saturating_sub(waits) as f64) as usize
@@ -204,27 +227,19 @@ pub(super) fn render(
         rows,
         [
             Constraint::Length(6),
-            Constraint::Length(if speed.width >= 100 { 24 } else { 14 }),
-            Constraint::Length(5),
+            Constraint::Length(speed_model),
+            Constraint::Length(6),
             Constraint::Length(4),
-            Constraint::Length(5),
-            Constraint::Length(5),
-            Constraint::Length(5),
-            Constraint::Length(7),
+            Constraint::Length(6),
+            Constraint::Length(6),
+            Constraint::Length(6),
+            Constraint::Length(11),
             Constraint::Fill(1),
         ],
     )
     .header(
         Row::new([
-            "Lane",
-            "Model",
-            "Effort",
-            "Requests",
-            "Wait",
-            "Generation",
-            "Out",
-            "Rate",
-            "Time",
+            "Lane", "Model", "Effort", "Reqs", "Wait", "Gen", "Out", "Rate", "Time",
         ])
         .style(Style::default().fg(TEAL)),
     )
@@ -247,6 +262,15 @@ pub(super) fn render(
         .iter()
         .map(|row| u128::from(row.output_tokens))
         .sum();
+    let token_project = fit_width(
+        sessions.iter().map(|row| row.project.as_deref()),
+        if tokens.width >= 100 { 24 } else { 14 },
+    );
+    let token_model = fit_width(
+        sessions.iter().map(|row| row.model.as_deref()),
+        model_cap(tokens.width),
+    );
+    let token_fixed = token_project + 8 + 6 + token_model + 7 + 7 + 6 + 7 + 2;
     let rows = sessions
         .into_iter()
         .map(|row| {
@@ -255,7 +279,7 @@ pub(super) fn render(
             } else {
                 row.output_tokens as f64 * 100.0 / total as f64
             };
-            let width = usize::from(tokens.width.saturating_sub(66));
+            let width = usize::from(tokens.width.saturating_sub(token_fixed));
             let bars = ((share / 100.0) * width as f64).round() as usize;
             Row::new(vec![
                 row.project.clone().unwrap_or_else(|| "-".into()),
@@ -273,10 +297,10 @@ pub(super) fn render(
     let table = Table::new(
         rows,
         [
-            Constraint::Length(9),
+            Constraint::Length(token_project),
             Constraint::Length(8),
             Constraint::Length(6),
-            Constraint::Length(14),
+            Constraint::Length(token_model),
             Constraint::Length(7),
             Constraint::Length(7),
             Constraint::Length(6),

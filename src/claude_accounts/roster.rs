@@ -86,17 +86,18 @@ impl Drop for Signals {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Account {
-    signed_in: bool,
-    email: Option<String>,
+    pub(super) signed_in: bool,
+    pub(super) email: Option<String>,
     org: Option<String>,
-    plan: Option<String>,
-    expires: Option<jiff::Timestamp>,
+    pub(super) plan: Option<String>,
+    pub(super) expires: Option<jiff::Timestamp>,
 }
 
+#[derive(Clone)]
 pub(super) struct Entry {
     pub(super) name: String,
-    account: Option<Account>,
-    same_as: Option<String>,
+    pub(super) account: Option<Account>,
+    pub(super) same_as: Option<String>,
 }
 
 pub(super) struct Table {
@@ -104,7 +105,7 @@ pub(super) struct Table {
     pub(super) rows: Vec<String>,
 }
 
-fn clean(text: &str) -> String {
+pub(super) fn clean(text: &str) -> String {
     text.chars()
         .filter(|c| {
             !c.is_control()
@@ -120,7 +121,7 @@ fn clean(text: &str) -> String {
         .collect()
 }
 
-fn parse(bytes: &[u8]) -> Option<Account> {
+pub(super) fn parse(bytes: &[u8]) -> Option<Account> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let field = |name: &str| {
         value
@@ -141,8 +142,8 @@ fn parse(bytes: &[u8]) -> Option<Account> {
     })
 }
 
-fn query(config: Option<&Path>) -> Option<Account> {
-    if CANCELLED.load(Ordering::Relaxed) {
+fn query(config: Option<&Path>, cancelled: &AtomicBool) -> Option<Account> {
+    if cancelled.load(Ordering::Relaxed) {
         return None;
     }
     let mut child = super::claude_command(config)
@@ -161,7 +162,7 @@ fn query(config: Option<&Path>) -> Option<Account> {
         let mut bytes = Vec::new();
         let mut buffer = [0; 4096];
         loop {
-            if CANCELLED.load(Ordering::Relaxed) || Instant::now() >= deadline {
+            if cancelled.load(Ordering::Relaxed) || Instant::now() >= deadline {
                 return None;
             }
             match stdout.read(&mut buffer) {
@@ -180,7 +181,7 @@ fn query(config: Option<&Path>) -> Option<Account> {
             }
         }
         loop {
-            if CANCELLED.load(Ordering::Relaxed) || Instant::now() >= deadline {
+            if cancelled.load(Ordering::Relaxed) || Instant::now() >= deadline {
                 return None;
             }
             match child.try_wait() {
@@ -212,7 +213,7 @@ fn identity(account: &Account) -> Option<(String, Option<&str>)> {
         .map(|email| (email.to_lowercase(), account.org.as_deref()))
 }
 
-fn mark_duplicates(entries: &mut [Entry]) {
+pub(super) fn mark_duplicates(entries: &mut [Entry]) {
     for index in 1..entries.len() {
         let (earlier, rest) = entries.split_at_mut(index);
         let Some(key) = rest[0].account.as_ref().and_then(identity) else {
@@ -227,6 +228,16 @@ fn mark_duplicates(entries: &mut [Entry]) {
 
 pub(super) fn entries(profiles: &[(String, PathBuf)]) -> anyhow::Result<Vec<Entry>> {
     let mut signals = Signals::install()?;
+    let entries = collect(profiles, &CANCELLED);
+    signals.restore();
+    anyhow::ensure!(
+        !CANCELLED.load(Ordering::Relaxed),
+        "account status interrupted"
+    );
+    Ok(entries)
+}
+
+pub(super) fn collect(profiles: &[(String, PathBuf)], cancelled: &AtomicBool) -> Vec<Entry> {
     let mut targets: Vec<(String, Option<&Path>)> = vec![("default".into(), None)];
     targets.extend(
         profiles
@@ -235,13 +246,13 @@ pub(super) fn entries(profiles: &[(String, PathBuf)]) -> anyhow::Result<Vec<Entr
     );
     let mut entries = Vec::with_capacity(targets.len());
     for chunk in targets.chunks(PARALLEL_QUERIES) {
-        if CANCELLED.load(Ordering::Relaxed) {
+        if cancelled.load(Ordering::Relaxed) {
             break;
         }
         let accounts: Vec<Option<Account>> = std::thread::scope(|scope| {
             let handles: Vec<_> = chunk
                 .iter()
-                .map(|(_, config)| scope.spawn(|| query(*config)))
+                .map(|(_, config)| scope.spawn(|| query(*config, cancelled)))
                 .collect();
             handles
                 .into_iter()
@@ -256,16 +267,11 @@ pub(super) fn entries(profiles: &[(String, PathBuf)]) -> anyhow::Result<Vec<Entr
             });
         }
     }
-    signals.restore();
-    anyhow::ensure!(
-        !CANCELLED.load(Ordering::Relaxed),
-        "account status interrupted"
-    );
     mark_duplicates(&mut entries);
-    Ok(entries)
+    entries
 }
 
-fn remaining(expires: jiff::Timestamp, now: jiff::Timestamp) -> String {
+pub(super) fn remaining(expires: jiff::Timestamp, now: jiff::Timestamp) -> String {
     let seconds = expires.as_second().saturating_sub(now.as_second());
     match seconds {
         ..=0 => "expired".into(),
@@ -311,7 +317,7 @@ fn window_cell(window: Option<&Window>, observed_at: u64, length: u64, now: u64)
     }
 }
 
-fn seen_cell(limits: &Limits, now: u64) -> String {
+pub(super) fn seen_cell(limits: &Limits, now: u64) -> String {
     match now.saturating_sub(limits.observed_at) {
         0..60 => "now".into(),
         age => format!(
@@ -324,7 +330,7 @@ fn seen_cell(limits: &Limits, now: u64) -> String {
     }
 }
 
-fn usage<'a>(
+pub(super) fn usage<'a>(
     entries: &[Entry],
     entry: &Entry,
     limits: &'a BTreeMap<String, Limits>,
@@ -381,13 +387,13 @@ fn pad(text: &str, width: usize) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Status {
+pub(super) enum Status {
     Available,
     Limited(Option<u64>),
     Unknown,
 }
 
-fn status(limits: Option<&Limits>, now: u64) -> Status {
+pub(super) fn status(limits: Option<&Limits>, now: u64) -> Status {
     let Some(limits) = limits else {
         return Status::Unknown;
     };
@@ -422,7 +428,7 @@ fn status(limits: Option<&Limits>, now: u64) -> Status {
     )
 }
 
-fn status_cell(status: Status, now: u64) -> String {
+pub(super) fn status_cell(status: Status, now: u64) -> String {
     match status {
         Status::Available => "available".into(),
         Status::Limited(Some(reset)) => format!("limited {}", span(reset.saturating_sub(now))),

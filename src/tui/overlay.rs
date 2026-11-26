@@ -80,7 +80,7 @@ pub(super) fn render_shutdown_overlay(frame: &mut ratatui::Frame<'_>, area: Rect
 
 pub(super) fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: bool) {
     let width = 48.min(area.width.saturating_sub(4)).max(24);
-    let height = 14.min(area.height.saturating_sub(2)).max(8);
+    let height = 15.min(area.height.saturating_sub(2)).max(8);
     let popup = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -108,7 +108,9 @@ pub(super) fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, at
         ("?", "toggle help"),
         ("b", "toggle setup"),
         ("1 / 2", "Overview / Usage"),
+        ("n", "next profile for the next launch"),
         ("r", "reload local accounts"),
+        ("a l d s", "add / sign in / remove / switch"),
         ("arrows", "navigate rows and panes"),
         ("j / k", "previous / next row"),
         ("Tab", "switch pane"),
@@ -120,7 +122,7 @@ pub(super) fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, at
         .map(|(key, label)| {
             Line::from(vec![
                 Span::raw("  "),
-                Span::styled(format!("{key:<10}"), Style::default().fg(TEAL)),
+                Span::styled(format!("{key:<11}"), Style::default().fg(TEAL)),
                 Span::styled(label, Style::default().fg(DIM_WHITE)),
             ])
         })

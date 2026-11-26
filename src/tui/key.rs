@@ -67,6 +67,13 @@ impl MonitorApp {
                 self.cancel_shutdown_confirmation()
             }
             _ if self.phase == MonitorPhase::ConfirmingShutdown => {}
+            _ if self.usage_open
+                && !self.show_help
+                && !self.show_setup
+                && self.accounts.typing() =>
+            {
+                self.accounts.type_key(key.code)
+            }
             KeyCode::Char('q') => self.request_shutdown_confirmation(),
             KeyCode::Char('?') => self.show_help = !self.show_help,
             KeyCode::Char('b') => self.show_setup = !self.show_setup,
@@ -76,11 +83,20 @@ impl MonitorApp {
             }
             KeyCode::Char('2') => {
                 self.usage_open = true;
-                self.accounts.enter();
+                self.accounts.open();
             }
-            KeyCode::Char('r') if self.usage_open && !self.show_help && !self.show_setup => {
-                self.accounts.enter();
-                self.accounts.refresh_limits();
+            KeyCode::Char('n' | 'N')
+                if self.accounts.local && !self.show_help && !self.show_setup =>
+            {
+                if !self.usage_open {
+                    self.usage_open = true;
+                    self.detail = None;
+                    self.accounts.open();
+                }
+                self.accounts.quick_switch();
+            }
+            KeyCode::Char('r' | 'R') if self.usage_open && !self.show_help && !self.show_setup => {
+                self.accounts.reload();
             }
             KeyCode::Esc
                 if self.usage_open
@@ -92,6 +108,11 @@ impl MonitorApp {
             }
             KeyCode::Enter if self.usage_open && !self.show_help && !self.show_setup => {
                 self.accounts.confirm()
+            }
+            KeyCode::Char(action @ ('a' | 'l' | 'd' | 's' | 'A' | 'L' | 'D' | 'S'))
+                if self.usage_open && !self.show_help && !self.show_setup =>
+            {
+                self.accounts.action_key(action.to_ascii_lowercase())
             }
             KeyCode::Down
                 if self.usage_open

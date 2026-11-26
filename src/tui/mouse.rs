@@ -1,4 +1,5 @@
-use super::*;
+use super::{DetailSelection, DetailView, FocusPane, MonitorExit, MonitorPhase, MonitorSnapshot};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::widgets::{Block, Row, Table, TableState};
@@ -212,7 +213,7 @@ impl super::MonitorApp {
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
             return None;
         }
-        if targets.active_border(mouse.column, mouse.row) {
+        if !self.usage_open && targets.active_border(mouse.column, mouse.row) {
             self.active_resize.dragging = true;
             return None;
         }
@@ -223,8 +224,15 @@ impl super::MonitorApp {
             );
         }
         if self.usage_open {
-            self.accounts.click(mouse.column, mouse.row);
-            return None;
+            return self
+                .accounts
+                .click(mouse.column, mouse.row)
+                .and_then(|code| {
+                    self.handle_key(
+                        crossterm::event::KeyEvent::new(code, KeyModifiers::NONE),
+                        state,
+                    )
+                });
         }
         match targets.hit(mouse.column, mouse.row) {
             Some(MouseTarget::Session(index)) => {
