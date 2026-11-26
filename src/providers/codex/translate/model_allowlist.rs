@@ -22,6 +22,17 @@ pub const ALLOWED_MODELS: &[&str] = &[
     "gpt-6.1-terra",
 ];
 
+const FULL_LANE_MODELS: &[&str] = &[
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-6.2-sol",
+    "gpt-6.2-astra",
+];
+
 const OPUS_TARGETS: &[&str] = &["gpt-6-sol", "gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-sol"];
 const SONNET_TARGETS: &[&str] = &["gpt-5.6-terra"];
 const HAIKU_TARGETS: &[&str] = &["gpt-6-luna", "gpt-5.6-luna"];
@@ -165,6 +176,9 @@ impl ResolvedModel {
     }
 
     pub(in crate::providers::codex) fn uses_responses_lite(&self, full_lane: bool) -> bool {
+        if full_lane && FULL_LANE_MODELS.contains(&self.model.as_str()) {
+            return false;
+        }
         self.family_catalog_lite
             .unwrap_or_else(|| uses_responses_lite_with_full_lane(&self.model, full_lane))
     }
@@ -352,17 +366,7 @@ pub fn uses_responses_lite(model: &str) -> bool {
 }
 
 pub fn uses_responses_lite_with_full_lane(model: &str, full_lane: bool) -> bool {
-    if full_lane
-        && matches!(
-            model,
-            "gpt-5.6-sol"
-                | "gpt-5.6-terra"
-                | "gpt-6-astra"
-                | "gpt-6-sol"
-                | "gpt-6.1-sol"
-                | "gpt-6.1-terra"
-        )
-    {
+    if full_lane && FULL_LANE_MODELS.contains(&model) {
         return false;
     }
     uses_responses_lite(model)
@@ -462,6 +466,24 @@ mod tests {
     }
 
     #[test]
+    fn full_lane_overrides_catalog_for_known_family_models() {
+        for (family, id) in [("sol", "gpt-6.2-sol"), ("astra", "gpt-6.2-astra")] {
+            let catalog = [CatalogModel {
+                slug: id.to_string(),
+                use_responses_lite: true,
+                supported_in_api: true,
+                listed: true,
+                priority: None,
+                display_name: None,
+            }];
+            let resolved = resolve_family_in(family, &catalog).unwrap();
+            assert_eq!(resolved.model, id);
+            assert!(resolved.uses_responses_lite(false));
+            assert!(!resolved.uses_responses_lite(true));
+        }
+    }
+
+    #[test]
     fn haiku_resolves_to_luna() {
         let r = resolve_model_request("haiku");
         assert_eq!(r.model, "gpt-6-luna");
@@ -478,6 +500,9 @@ mod tests {
             "gpt-6.1-terra",
         ] {
             assert!(uses_responses_lite_with_full_lane(model, false), "{model}");
+            assert!(!uses_responses_lite_with_full_lane(model, true), "{model}");
+        }
+        for model in ["gpt-6.2-sol", "gpt-6.2-astra"] {
             assert!(!uses_responses_lite_with_full_lane(model, true), "{model}");
         }
         for model in ["gpt-5.6-luna", "gpt-6-luna"] {

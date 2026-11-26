@@ -27,7 +27,11 @@ impl CodexProvider {
     ) -> Response {
         let standalone_search = search::is_standalone_search_request(body);
         let use_responses_lite = !standalone_search
-            && apply_model_lane_for_request(&mut resolved, body, config::codex_full_lane());
+            && apply_model_lane_for_request(
+                &mut resolved,
+                body,
+                config::codex_full_lane().unwrap_or(true),
+            );
         let base = config::codex_base_instructions()
             .then(|| super::translate::model_catalog::base_instructions(&resolved.model))
             .flatten();

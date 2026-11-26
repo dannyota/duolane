@@ -135,6 +135,34 @@ async fn catalog_drives_discovery_routing_tiers_and_lanes_in_actual_process() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(ready, "proxy did not start");
+    for (route, body, lite) in [
+        (
+            "/v1/messages",
+            json!({"model":"gpt-6.1-terra","max_tokens":64,"messages":[{"role":"user","content":"synthetic"}]}),
+            false,
+        ),
+        (
+            "/v1/chat/completions",
+            json!({"model":"terra","messages":[{"role":"user","content":"synthetic"}]}),
+            true,
+        ),
+    ] {
+        let response = client
+            .post(format!("{url}{route}"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let (headers, _) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            headers.contains_key("x-openai-internal-codex-responses-lite"),
+            lite
+        );
+    }
     let listing: Value = client
         .get(format!("{url}/v1/models"))
         .send()

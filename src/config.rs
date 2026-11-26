@@ -2,6 +2,8 @@ mod codex_base_instructions;
 pub use codex_base_instructions::codex_base_instructions;
 pub mod codex_auth;
 pub use codex_auth::openai_base_url;
+mod codex_full_lane;
+pub use codex_full_lane::codex_full_lane;
 mod codex_transport;
 
 pub use codex_transport::{
@@ -546,21 +548,6 @@ pub fn codex_responses_api() -> bool {
     false
 }
 
-pub fn codex_full_lane() -> bool {
-    let env: HashMap<_, _> = crate::paths::environment_snapshot();
-    if let Some(raw) = env.get("DUOLANE_CODEX_FULL_LANE") {
-        return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
-    }
-    let config_dir = paths::config_dir();
-    if let Some(file) = read_file_config(&config_dir)
-        && let Some(codex) = file.codex
-        && let Some(enabled) = codex.full_lane
-    {
-        return enabled;
-    }
-    false
-}
-
 pub fn codex_images_api() -> bool {
     let env: HashMap<_, _> = crate::paths::environment_snapshot();
     if let Some(raw) = env.get("DUOLANE_CODEX_IMAGES_API") {
@@ -1077,20 +1064,29 @@ mod tests {
     }
 
     #[test]
-    fn codex_full_lane_defaults_off_reads_config_and_env_takes_precedence() {
+    fn codex_full_lane_reads_config_and_env_takes_precedence() {
         let _guard = ENV_LOCK.lock().unwrap();
         let config = tempfile::TempDir::new().unwrap();
         let _env = isolated_env(&config);
-        assert!(!codex_full_lane());
-
-        std::fs::write(
-            config.path().join("config.json"),
-            r#"{"codex":{"fullLane":true}}"#,
-        )
-        .unwrap();
-        assert!(codex_full_lane());
-        let _full_lane_env = EnvGuard::set("DUOLANE_CODEX_FULL_LANE", "false");
-        assert!(!codex_full_lane());
+        assert_eq!(codex_full_lane(), None);
+        let path = config.path().join("config.json");
+        std::fs::write(&path, r#"{"codex":{"fullLane":false}}"#).unwrap();
+        assert_eq!(codex_full_lane(), Some(false));
+        for value in ["on", "invalid", ""] {
+            let _flag = EnvGuard::set("DUOLANE_CODEX_FULL_LANE", value);
+            assert_eq!(codex_full_lane(), Some(value == "on"));
+        }
+        std::fs::write(&path, r#"{"codex":{"fullLane":true}}"#).unwrap();
+        for value in ["off", "0", "invalid", ""] {
+            let _flag = EnvGuard::set("DUOLANE_CODEX_FULL_LANE", value);
+            assert_eq!(
+                codex_full_lane(),
+                Some(value == "invalid" || value.is_empty())
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+        let _flag = EnvGuard::set("DUOLANE_CODEX_FULL_LANE", "invalid");
+        assert_eq!(codex_full_lane(), None);
     }
 
     #[test]
@@ -1098,13 +1094,13 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let config = tempfile::TempDir::new().unwrap();
         let _env = isolated_env(&config);
-        for value in ["1", "true", "TRUE", "yes"] {
+        for value in ["1", "true", "TRUE", "yes", " On "] {
             let _flag = EnvGuard::set("DUOLANE_CODEX_FULL_LANE", value);
-            assert!(codex_full_lane(), "{value}");
+            assert_eq!(codex_full_lane(), Some(true), "{value}");
         }
-        for value in ["0", "false", "no", "invalid", ""] {
+        for value in ["0", "false", "no", " OFF "] {
             let _flag = EnvGuard::set("DUOLANE_CODEX_FULL_LANE", value);
-            assert!(!codex_full_lane(), "{value}");
+            assert_eq!(codex_full_lane(), Some(false), "{value}");
         }
     }
 

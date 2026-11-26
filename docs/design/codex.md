@@ -32,10 +32,22 @@ Codex serves two lanes: the full Responses API and Responses Lite.
 
 - A built-in list says which built-in models use Lite. For any other id, the
   catalog entry's Lite field decides, and it defaults to false.
-- `DUOLANE_CODEX_FULL_LANE` moves the built-in Lite models that are known to
-  exist on the full lane off Lite. It never overrides the catalog for other ids,
-  because their full-lane availability is unknown. On Chat Completions, only the
-  Codex family aliases honor this setting.
+- The full lane setting moves the built-in Lite models known to exist on the
+  full lane off Lite, because only the full lane accepts parallel tool calls:
+  GPT-6 Sol, Terra, and Astra up to 6.2. On 2026-11-26 a request asking for two
+  tool calls got both on the full lane from `gpt-6.2-sol`, `gpt-6.2-astra`, and
+  `gpt-6.1-terra`, and one on Lite. The setting never overrides the catalog for
+  other ids. A family alias moves when the model it selects is listed; `haiku`
+  stays on Lite through Luna.
+- `codex.fullLane` is a JSON boolean; `DUOLANE_CODEX_FULL_LANE` overrides it
+  with `1`, `true`, `yes`, or `on`, and `0`, `false`, `no`, or `off`, and any
+  other value falls through. When neither sets it, `/v1/messages` and its token
+  counting use the full lane, while Chat Completions and native Responses keep
+  Lite, because their clients may send Lite-only fields such as `all_turns`
+  context or an `additional_tools` item. On Chat Completions, only the Codex
+  family aliases honor the setting.
+- On the full lane a deferred tool that a `tool_reference` loads changes the
+  `tools` field, so that request sends full context instead of continuing.
 - Requests with hosted `web_search` use the full lane, because Lite accepts only
   function and custom tools.
 - The Luna family exists only on Lite. A hosted search request for a Luna model

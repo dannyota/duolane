@@ -80,7 +80,8 @@ fn translate_with_source(
                 Some("model_not_supported"),
             )
         })?;
-        let full_lane = family_alias_with_tier(&normalized).is_some() && config::codex_full_lane();
+        let full_lane = family_alias_with_tier(&normalized).is_some()
+            && config::codex_full_lane().unwrap_or(false);
         let lite = resolved.uses_responses_lite(full_lane);
         (resolved, lite)
     };
