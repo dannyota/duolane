@@ -223,6 +223,17 @@ mod local {
     }
 
     #[test]
+    fn long_unicode_account_does_not_block_confirmation() {
+        let mut accounts = accounts();
+        accounts.action_key('l');
+        accounts.controls.pending.as_mut().unwrap().account = Some("用".repeat(100));
+        let text = show(&mut accounts);
+        assert!(text.contains("backup"));
+        accounts.confirm_action_with(roster(&["default", "backup", "work"], "work"), never);
+        assert!(accounts.take_handoff().is_some());
+    }
+
+    #[test]
     fn terminal_actions_queue_fixed_arguments_and_removal_runs_captured() {
         for (key, args) in [
             ('l', ["accounts", "login", "backup", "--expect", "captured"]),

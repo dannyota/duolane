@@ -215,7 +215,51 @@ impl Drop for IgnoreTtou {
 }
 
 #[cfg(unix)]
-pub(super) fn handoff(program: &Path, args: &[String]) -> Finished {
+trait TerminalOps {
+    type Saved;
+    fn save(&mut self) -> std::io::Result<Self::Saved>;
+    fn give(&mut self) -> std::io::Result<()>;
+    fn wait(&mut self) -> Finished;
+    fn take(&mut self) -> std::io::Result<()>;
+    fn restore(&mut self, saved: Self::Saved) -> std::io::Result<()>;
+}
+
+#[cfg(unix)]
+fn terminal_handoff(ops: &mut impl TerminalOps) -> std::io::Result<Finished> {
+    let saved = ops.save()?;
+    let give = ops.give();
+    let finished = if give.is_ok() { Some(ops.wait()) } else { None };
+    let take = if give.is_ok() { ops.take() } else { Ok(()) };
+    let restore = ops.restore(saved);
+    give?;
+    take?;
+    restore?;
+    Ok(finished.unwrap_or_else(|| Finished::failed("could not start")))
+}
+
+#[derive(Debug)]
+pub(super) struct TerminalHandoffError(pub(super) std::io::Error);
+
+impl std::fmt::Display for TerminalHandoffError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "terminal handoff failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for TerminalHandoffError {}
+
+pub(super) fn terminal_handoff_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            error
+                .get_ref()
+                .is_some_and(|inner| inner.is::<TerminalHandoffError>())
+        })
+    })
+}
+
+#[cfg(unix)]
+pub(super) fn handoff(program: &Path, args: &[String]) -> std::io::Result<Finished> {
     use rustix::process::{Signal, WaitOptions, kill_process_group, waitpid};
     use std::os::unix::process::CommandExt;
 
@@ -228,41 +272,74 @@ pub(super) fn handoff(program: &Path, args: &[String]) -> Finished {
         .spawn()
     {
         Ok(child) => child,
-        Err(error) => return Finished::failed(format!("could not start: {}", error.kind())),
+        Err(error) => {
+            return Ok(Finished::failed(format!(
+                "could not start: {}",
+                error.kind()
+            )));
+        }
     };
     let Some(pid) = i32::try_from(child.id())
         .ok()
         .and_then(rustix::process::Pid::from_raw)
     else {
-        return Finished::failed("could not start: invalid process id");
-    };
-    if rustix::termios::tcsetpgrp(&terminal, pid).is_err() {
         kill_group(&child);
-        let _ = waitpid(Some(pid), WaitOptions::empty());
-        return Finished::failed("the terminal is unavailable");
-    }
-    let _ = kill_process_group(pid, Signal::CONT);
-    let finished = loop {
-        match waitpid(Some(pid), WaitOptions::UNTRACED) {
-            Ok(Some((_, status))) if status.stopped() => {
-                let _ = kill_process_group(pid, Signal::CONT);
-            }
-            Ok(Some((_, status))) => {
-                break summarize(status.exit_status(), &[]);
-            }
-            Ok(None) => {}
-            Err(rustix::io::Errno::INTR) => {}
-            Err(_) => break Finished::failed("could not wait"),
-        }
+        return Err(std::io::Error::other("invalid child process id"));
     };
-    let _ = kill_process_group(pid, Signal::KILL);
-    let _ = rustix::termios::tcsetpgrp(&terminal, ours);
-    finished
+    struct Ops<'a> {
+        terminal: &'a std::io::Stdin,
+        pid: rustix::process::Pid,
+        ours: rustix::process::Pid,
+    }
+    impl TerminalOps for Ops<'_> {
+        type Saved = rustix::termios::Termios;
+        fn save(&mut self) -> std::io::Result<Self::Saved> {
+            rustix::termios::tcgetattr(self.terminal).map_err(Into::into)
+        }
+        fn give(&mut self) -> std::io::Result<()> {
+            rustix::termios::tcsetpgrp(self.terminal, self.pid).map_err(|e| {
+                std::io::Error::other(format!("could not give terminal foreground: {e}"))
+            })
+        }
+        fn wait(&mut self) -> Finished {
+            let _ = kill_process_group(self.pid, Signal::CONT);
+            loop {
+                match waitpid(Some(self.pid), WaitOptions::UNTRACED) {
+                    Ok(Some((_, status))) if status.stopped() => {
+                        let _ = kill_process_group(self.pid, Signal::CONT);
+                    }
+                    Ok(Some((_, status))) => break summarize(status.exit_status(), &[]),
+                    Ok(None) | Err(rustix::io::Errno::INTR) => {}
+                    Err(_) => break Finished::failed("could not wait"),
+                }
+            }
+        }
+        fn take(&mut self) -> std::io::Result<()> {
+            let _ = kill_process_group(self.pid, Signal::KILL);
+            rustix::termios::tcsetpgrp(self.terminal, self.ours).map_err(|e| {
+                std::io::Error::other(format!("could not reclaim terminal foreground: {e}"))
+            })
+        }
+        fn restore(&mut self, saved: Self::Saved) -> std::io::Result<()> {
+            rustix::termios::tcsetattr(self.terminal, rustix::termios::OptionalActions::Now, &saved)
+                .map_err(|e| {
+                    std::io::Error::other(format!("could not restore terminal attributes: {e}"))
+                })
+        }
+    }
+    let result = terminal_handoff(&mut Ops {
+        terminal: &terminal,
+        pid,
+        ours,
+    });
+    kill_group(&child);
+    let _ = waitpid(Some(pid), WaitOptions::empty());
+    result.map_err(|error| std::io::Error::other(TerminalHandoffError(error)))
 }
 
 #[cfg(not(unix))]
-pub(super) fn handoff(_: &Path, _: &[String]) -> Finished {
-    Finished::failed("unsupported on this platform")
+pub(super) fn handoff(_: &Path, _: &[String]) -> std::io::Result<Finished> {
+    Ok(Finished::failed("unsupported on this platform"))
 }
 
 pub(super) fn run_handoff(
@@ -282,7 +359,7 @@ pub(super) fn run_handoff(
     terminal.show_cursor()?;
     println!("\n$ duolane {}\n", args.join(" "));
     let finished = match program() {
-        Ok(program) => handoff(&program, args),
+        Ok(program) => handoff(&program, args)?,
         Err(error) => Finished::failed(format!("could not start: {}", error.kind())),
     };
     enable_raw_mode()?;
@@ -384,6 +461,60 @@ impl Drop for Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreground_errors_remain_identifiable_when_wrapped_in_io_error() {
+        let error = anyhow::Error::from(std::io::Error::other(TerminalHandoffError(
+            std::io::Error::other("foreground unavailable"),
+        )));
+        assert!(terminal_handoff_error(&error));
+        assert!(!terminal_handoff_error(&anyhow::anyhow!("other error")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_restores_attributes_before_returning_or_reporting_foreground_failure() {
+        struct Fake {
+            steps: Vec<&'static str>,
+            fail_take: bool,
+        }
+        impl TerminalOps for Fake {
+            type Saved = ();
+            fn save(&mut self) -> std::io::Result<()> {
+                self.steps.push("save");
+                Ok(())
+            }
+            fn give(&mut self) -> std::io::Result<()> {
+                self.steps.push("give");
+                Ok(())
+            }
+            fn wait(&mut self) -> Finished {
+                self.steps.push("wait");
+                Finished::failed("done")
+            }
+            fn take(&mut self) -> std::io::Result<()> {
+                self.steps.push("take");
+                if self.fail_take {
+                    Err(std::io::Error::other("take failed"))
+                } else {
+                    Ok(())
+                }
+            }
+            fn restore(&mut self, _: ()) -> std::io::Result<()> {
+                self.steps.push("restore");
+                Ok(())
+            }
+        }
+        for fail_take in [false, true] {
+            let mut terminal = Fake {
+                steps: Vec::new(),
+                fail_take,
+            };
+            let result = terminal_handoff(&mut terminal);
+            assert_eq!(result.is_err(), fail_take);
+            assert_eq!(terminal.steps, ["save", "give", "wait", "take", "restore"]);
+        }
+    }
 
     #[test]
     fn output_loses_escape_sequences_and_control_characters() {

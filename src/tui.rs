@@ -192,6 +192,15 @@ fn run_monitor_loop(
     app.accounts.enter();
     app.accounts.refresh_limits();
     let run_result = run_monitor_events(&mut terminal, &mut snapshot, &mut app, &mut guard.pointer);
+    if run_result
+        .as_ref()
+        .is_err_and(actions::terminal_handoff_error)
+    {
+        guard.suspended = true;
+        app.begin_shutdown();
+        app.wait_for_shutdown_completion();
+        return run_result;
+    }
     if run_result.is_err() {
         app.begin_shutdown();
         let state = snapshot();
@@ -430,12 +439,16 @@ impl Drop for MonitorApp {
 }
 
 struct TerminalGuard {
+    suspended: bool,
     mouse_capture_attempted: bool,
     pointer: pointer::Pointer,
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        if self.suspended {
+            return;
+        }
         pointer::restore(&mut self.pointer, &mut io::stdout(), |writer| {
             if self.mouse_capture_attempted {
                 let _ = execute!(writer, DisableMouseCapture);
@@ -451,6 +464,7 @@ fn setup_terminal(
 ) -> Result<(TerminalGuard, Terminal<CrosstermBackend<Stdout>>), anyhow::Error> {
     enable_raw_mode()?;
     let mut guard = TerminalGuard {
+        suspended: false,
         mouse_capture_attempted: false,
         pointer: pointer::Pointer::new(pointer_supported),
     };

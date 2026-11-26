@@ -449,10 +449,8 @@ impl Accounts {
         } else if let Some(action) = &self.controls.pending {
             vec![
                 action.kind.title().into(),
-                match &action.account {
-                    Some(account) => format!("{}  {account}", action.name),
-                    None => action.name.clone(),
-                },
+                action.name.clone(),
+                action.account.clone().unwrap_or_default(),
                 match action.kind {
                     Kind::Switch => std::env::current_dir()
                         .map(|dir| actions::clean(format!("in {}", dir.display()).as_bytes()))
@@ -474,7 +472,8 @@ impl Accounts {
             .unwrap_or(u16::MAX)
             .clamp(30, 76)
             .min(area.width);
-        let height = 6.min(area.height);
+        let required_height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+        let height = required_height.min(area.height);
         let popup = Rect::new(
             area.x + area.width.saturating_sub(width) / 2,
             area.y + area.height.saturating_sub(height) / 2,
@@ -482,16 +481,28 @@ impl Accounts {
             height,
         );
         let inner = usize::from(width.saturating_sub(2));
-        self.controls.visible = height >= 6
-            && lines[..2]
-                .iter()
-                .all(|line| line.is_ascii() && line.len() <= inner);
+        self.controls.visible = height >= required_height
+            && self
+                .controls
+                .pending
+                .as_ref()
+                .is_some_and(|action| crate::tui::cells::display_width(&action.name) <= inner);
         frame.render_widget(Clear, popup);
         frame.render_widget(
             Paragraph::new(
                 lines
                     .iter()
-                    .map(|line| crate::tui::cells::ellipsize(line, inner))
+                    .enumerate()
+                    .map(|(index, line)| {
+                        if index == 1
+                            && self.controls.pending.is_some()
+                            && crate::tui::cells::display_width(line) > inner
+                        {
+                            String::new()
+                        } else {
+                            crate::tui::cells::ellipsize(line, inner)
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join("\n"),
             )
