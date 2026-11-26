@@ -161,10 +161,11 @@ pub(super) async fn handler_responses(
         );
         return monitor_response_body(response, request_guard);
     }
-    let prepared = match prepare_native_request(&body, crate::config::codex_full_lane()) {
-        Ok(prepared) => prepared,
-        Err(response) => return monitor_response_body(response, request_guard),
-    };
+    let prepared =
+        match prepare_native_request(&body, crate::config::codex_full_lane().unwrap_or(false)) {
+            Ok(prepared) => prepared,
+            Err(response) => return monitor_response_body(response, request_guard),
+        };
     let current = session::record_session_request(
         session_id.as_deref(),
         session_state.as_ref(),

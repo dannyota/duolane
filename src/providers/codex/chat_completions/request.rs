@@ -80,7 +80,8 @@ fn translate_with_source(
                 Some("model_not_supported"),
             )
         })?;
-        let full_lane = family_alias_with_tier(&normalized).is_some() && config::codex_full_lane();
+        let full_lane = family_alias_with_tier(&normalized).is_some()
+            && config::codex_full_lane().unwrap_or(false);
         let lite = resolved.uses_responses_lite(full_lane);
         (resolved, lite)
     };
@@ -146,11 +147,10 @@ fn translate_with_source(
         ("store".to_string(), json!(false)),
         ("stream".to_string(), json!(true)),
         ("parallel_tool_calls".to_string(), json!(false)),
-        ("client_metadata".to_string(), json!({"lite":"true"})),
         ("text".to_string(), Value::Object(text)),
     ]);
-    if api_resolved.is_some() {
-        upstream.remove("client_metadata");
+    if use_responses_lite {
+        upstream.insert("client_metadata".to_string(), json!({"lite":"true"}));
     }
     if let Some(tier) = resolved.service_tier {
         let tier = if api_resolved.is_some() && tier == ServiceTier::Ultrafast {
@@ -166,7 +166,7 @@ fn translate_with_source(
         );
     }
     let mut reasoning = Map::new();
-    if api_resolved.is_none() {
+    if use_responses_lite {
         reasoning.insert("context".to_string(), json!("all_turns"));
     }
     if let Some(effort) = effort
