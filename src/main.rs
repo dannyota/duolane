@@ -319,6 +319,18 @@ fn main() -> Result<()> {
                         monitor_listen_url
                             .push_str("  traffic capture on: stores conversation content");
                     }
+                    let shutdown_signal =
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let signal_flag = shutdown_signal.clone();
+                    let mut signals = {
+                        let _guard = runtime.enter();
+                        ServiceShutdownSignals::new()?
+                    };
+                    let signal_task = runtime.spawn(async move {
+                        if signals.recv().await.is_ok() {
+                            signal_flag.store(true, std::sync::atomic::Ordering::Release);
+                        }
+                    });
                     let server_monitor = monitor.clone();
                     let server_registry = registry.clone();
                     let server_task = runtime.spawn(async move {
@@ -343,8 +355,10 @@ fn main() -> Result<()> {
                             registry: &registry,
                             shutdown: Some(shutdown_tx),
                             shutdown_complete: Some(shutdown_complete_rx),
+                            shutdown_signal,
                         },
                     );
+                    signal_task.abort();
                     if matches!(&ui_result, Ok(MonitorExit::ForceQuit)) {
                         server_task.abort();
                         let _ = runtime.block_on(server_task);

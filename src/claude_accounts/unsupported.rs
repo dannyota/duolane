@@ -24,7 +24,7 @@ impl Profile {
 }
 pub(crate) fn prepare_launch(
     _: &[std::ffi::OsString],
-    _: Option<&str>,
+    _: Option<(&str, Option<&str>)>,
 ) -> anyhow::Result<Option<Profile>> {
     Ok(None)
 }

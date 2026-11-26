@@ -198,7 +198,8 @@ fn claude_accounts_launch_probe() {
         .filter_map(std::env::var_os)
         .collect();
     let expected_profile = std::env::var("EXPECTED_PROFILE").ok();
-    let result = prepare_launch(&args, expected_profile.as_deref());
+    let expected_identity = std::env::var("EXPECTED_IDENTITY").ok();
+    let result = prepare_launch(&args, expected_profile.as_deref().map(|name| (name, expected_identity.as_deref())));
     match std::env::var("EXPECTED").unwrap().as_str() {
         "none" => assert!(matches!(result, Ok(None))),
         "some" => assert!(matches!(result, Ok(Some(_)))),
@@ -260,6 +261,7 @@ fn claude_accounts_launch_precedence_and_rejections() {
         &[("ANTHROPIC_API_KEY", "toy")],
     );
     run("selection changed; expected copy, nothing was launched", &[("EXPECTED_PROFILE", "copy")]);
+    run("profile changed or identity unknown; reload and retry", &[("EXPECTED_PROFILE", "backup"), ("EXPECTED_IDENTITY", "stale")]);
     run("project sharing requires terminal confirmation", &[("EXPECTED_PROFILE", "backup")]);
     assert!(!path.join("projects").exists());
     transcripts::link_project(&dir, &root.join(".claude"), &root, |_| Ok(true)).unwrap();

@@ -92,6 +92,7 @@ pub struct MonitorUiConfig<'a> {
     pub registry: &'a Registry,
     pub shutdown: Option<oneshot::Sender<()>>,
     pub shutdown_complete: Option<mpsc::Receiver<()>>,
+    pub shutdown_signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +127,7 @@ pub fn run_attached_monitor(
             setup_text,
             shutdown: None,
             shutdown_complete: None,
+            shutdown_signal: Default::default(),
         },
     )
 }
@@ -140,6 +142,7 @@ pub fn run_mock_monitor(port: u16, registry: &Registry) -> Result<(), anyhow::Er
             setup_text: mock_setup_text(port, registry),
             shutdown: None,
             shutdown_complete: None,
+            shutdown_signal: Default::default(),
         },
     )
     .map(|_| ())
@@ -151,6 +154,7 @@ struct UiSession {
     setup_text: String,
     shutdown: Option<oneshot::Sender<()>>,
     shutdown_complete: Option<mpsc::Receiver<()>>,
+    shutdown_signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl From<MonitorUiConfig<'_>> for UiSession {
@@ -161,6 +165,7 @@ impl From<MonitorUiConfig<'_>> for UiSession {
             listen_url: config.listen_url,
             shutdown: config.shutdown,
             shutdown_complete: config.shutdown_complete,
+            shutdown_signal: config.shutdown_signal,
         }
     }
 }
@@ -191,7 +196,13 @@ fn run_monitor_loop(
 
     app.accounts.enter();
     app.accounts.refresh_limits();
-    let run_result = run_monitor_events(&mut terminal, &mut snapshot, &mut app, &mut guard.pointer);
+    let run_result = run_monitor_events(
+        &mut terminal,
+        &mut snapshot,
+        &mut app,
+        &mut guard.pointer,
+        &config.shutdown_signal,
+    );
     if run_result
         .as_ref()
         .is_err_and(actions::terminal_handoff_error)
@@ -222,8 +233,13 @@ fn run_monitor_events(
     mut snapshot: impl FnMut() -> SnapshotUpdate,
     app: &mut MonitorApp,
     pointer: &mut pointer::Pointer,
+    signal: &std::sync::atomic::AtomicBool,
 ) -> Result<MonitorExit, anyhow::Error> {
     loop {
+        if signal.load(std::sync::atomic::Ordering::Acquire) {
+            app.accounts.stop_action();
+            app.begin_shutdown();
+        }
         app.accounts.refresh_if_due();
         app.accounts.run_handoff(terminal)?;
         let update = snapshot();

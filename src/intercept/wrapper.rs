@@ -100,7 +100,7 @@ pub(super) fn same_file(value: &str, expected: &Path) -> bool {
     }
 }
 
-pub fn run(arguments: Vec<OsString>, expected: Option<&str>) -> anyhow::Result<()> {
+pub fn run(arguments: Vec<OsString>, expected: Option<(&str, Option<&str>)>) -> anyhow::Result<()> {
     let dir = super::intercept_dir();
     let required = |name: &str| {
         files::read(&dir.join(name))?

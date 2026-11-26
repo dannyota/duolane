@@ -128,15 +128,25 @@ passes the profile name rule.
   the monitor is busy.
 - A captured action runs on a background thread with standard input closed, in
   its own process group. Its output is kept up to 64 KiB with control characters
-  and escape sequences removed. After 60 seconds the monitor stops the process
-  group and reports a timeout. The message line shows the action while it runs,
-  then the result with the last line of output.
+  and escape sequences removed. One loop watches the deadline, the exit, and the
+  output, so a process that keeps the pipe open cannot delay the result. After
+  60 seconds or 64 KiB the monitor kills the process group and reports a
+  failure; success needs exit status 0 within both limits. The message line
+  shows the action while it runs, then the result with the last line of output.
+- When the monitor stops, by a key, a shutdown, or `SIGTERM`, `SIGINT`, or
+  `SIGHUP`, it kills a running captured action's process group and waits for it
+  before the proxy exits. A signal that arrives during a handoff is handled when
+  the handoff returns, because the child owns the terminal until then.
 - A handoff action needs the terminal for a browser sign-in or for Claude Code.
-  The monitor leaves the alternate screen, turns off raw mode and mouse capture,
-  and runs the child in its own process group as the foreground group of the
-  terminal. `Ctrl-C` therefore reaches only the child, never the proxy. A child
-  stopped with `Ctrl-Z` is continued at once. When the child exits, the monitor
-  takes the terminal back, waits for `Enter`, and redraws. The proxy serves
+  It uses the controlling terminal, `/dev/tty`, and is refused with a message,
+  leaving the dashboard as it is, when that terminal cannot be opened. The
+  monitor saves the terminal attributes, leaves the alternate screen, turns off
+  raw mode and mouse capture, and runs the child in its own process group as the
+  foreground group of the terminal. `Ctrl-C` therefore reaches only the child,
+  never the proxy. A child stopped with `Ctrl-Z` is continued at once. When the
+  child exits, the monitor takes the terminal back, restores the saved
+  attributes, waits for `Enter`, and redraws. If it cannot take the terminal
+  back, it restores the attributes and stops without drawing. The proxy serves
   throughout.
 - After an action ends, however it ends, the monitor reloads the roster and the
   plan usage and starts an account details check. A failed action changes no
