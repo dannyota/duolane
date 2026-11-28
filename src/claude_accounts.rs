@@ -137,9 +137,9 @@ mod unix {
         };
         let lock = store::lock(&parent, &format!(".profile-{name}.lock"), false)?;
         let existing = profile_dir(name, false)?;
-        if absent {
+        if let (true, Some((_, dir))) = (absent, &existing) {
             ensure!(
-                existing.is_none(),
+                store::private_read(dir, ".duolane-ready", 64)?.is_none(),
                 "profile already exists; reload and retry"
             );
         }

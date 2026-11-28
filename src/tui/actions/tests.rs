@@ -189,3 +189,59 @@ fn unavailable_terminal_refuses_before_leaving_dashboard() {
     .unwrap();
     assert!(!result.ok && result.summary.contains("terminal unavailable"));
 }
+
+#[test]
+#[ignore]
+fn handoff_terminal_probe() {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::MetadataExt;
+    let given = open_terminal().unwrap().metadata().unwrap().rdev();
+    let alias = std::fs::metadata("/dev/tty").unwrap().rdev();
+    let stdin = std::io::stdin().as_fd().try_clone_to_owned().unwrap();
+    assert!(given != alias && given == std::fs::File::from(stdin).metadata().unwrap().rdev());
+}
+
+#[test]
+fn handoff_gives_the_terminal_device_instead_of_the_dev_tty_alias() {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::os::unix::process::CommandExt;
+    let (master, slave) = unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        assert!(master >= 0 && libc::grantpt(master) == 0 && libc::unlockpt(master) == 0);
+        libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
+        let slave = std::ffi::CStr::from_ptr(libc::ptsname(master)).to_owned();
+        (std::fs::File::from_raw_fd(master), slave)
+    };
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.env_clear().args([
+        "--exact",
+        "--ignored",
+        "tui::actions::tests::handoff_terminal_probe",
+    ]);
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let fd = libc::open(slave.as_ptr(), libc::O_RDWR);
+            if fd < 0 || libc::ioctl(fd, libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            for target in 0..3 {
+                if libc::dup2(fd, target) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    let drain = std::thread::spawn(move || {
+        let mut master = master;
+        let _ = master.read_to_end(&mut Vec::new());
+    });
+    let status = child.wait().unwrap();
+    drop(drain);
+    assert!(status.success());
+}

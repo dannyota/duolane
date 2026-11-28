@@ -367,3 +367,12 @@ fn claude_accounts_resolution_precedence_and_lock() {
     std::fs::remove_dir_all(&config).unwrap();
     run(&config, "none", false);
 }
+#[test]
+fn claude_accounts_expect_absent_reuses_only_a_profile_that_never_became_ready() {
+    let name = "expect-absent-leftover";
+    drop(profile_expected(name, true, None, true).unwrap().unwrap());
+    let profile = profile_expected(name, true, None, true).unwrap().unwrap();
+    store::private_replace(&profile.dir, ".duolane-ready", b"ready\n").unwrap();
+    drop(profile);
+    assert!(profile_expected(name, true, None, true).is_err());
+}
