@@ -140,14 +140,19 @@ passes the profile name rule.
 - A handoff action needs the terminal for a browser sign-in or for Claude Code.
   It uses the controlling terminal, `/dev/tty`, and is refused with a message,
   leaving the dashboard as it is, when that terminal cannot be opened. The
-  monitor saves the terminal attributes, leaves the alternate screen, turns off
-  raw mode and mouse capture, and runs the child in its own process group as the
-  foreground group of the terminal. `Ctrl-C` therefore reaches only the child,
-  never the proxy. A child stopped with `Ctrl-Z` is continued at once. When the
-  child exits, the monitor takes the terminal back, restores the saved
-  attributes, waits for `Enter`, and redraws. If it cannot take the terminal
-  back, it restores the attributes and stops without drawing. The proxy serves
-  throughout.
+  child's input is the monitor's own readable standard input, output, or error
+  when that descriptor is the same controlling terminal and is not itself opened
+  through `/dev/tty`, and `/dev/tty` only when none is. macOS kqueue rejects a
+  descriptor opened through `/dev/tty` with `EINVAL`, and Claude Code, which
+  runs on Bun, watches its input with kqueue, so a sign-in given `/dev/tty`
+  crashes before it starts. The monitor saves the terminal attributes, leaves
+  the alternate screen, turns off raw mode and mouse capture, and runs the child
+  in its own process group as the foreground group of the terminal. `Ctrl-C`
+  therefore reaches only the child, never the proxy. A child stopped with
+  `Ctrl-Z` is continued at once. When the child exits, the monitor takes the
+  terminal back, restores the saved attributes, waits for `Enter`, and redraws.
+  If it cannot take the terminal back, it restores the attributes and stops
+  without drawing. The proxy serves throughout.
 - After an action ends, however it ends, the monitor reloads the roster and the
   plan usage and starts an account details check. A failed action changes no
   monitor state besides the message line.

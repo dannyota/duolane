@@ -189,3 +189,97 @@ fn unavailable_terminal_refuses_before_leaving_dashboard() {
     .unwrap();
     assert!(!result.ok && result.summary.contains("terminal unavailable"));
 }
+
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn handoff_terminal_probe() {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::MetadataExt;
+    let given = open_terminal().unwrap().metadata().unwrap().rdev();
+    let alias = std::fs::metadata("/dev/tty").unwrap().rdev();
+    let stdout = std::io::stdout().as_fd().try_clone_to_owned().unwrap();
+    assert!(given != alias && given == std::fs::File::from(stdout).metadata().unwrap().rdev());
+}
+
+#[cfg(unix)]
+#[test]
+fn handoff_gives_the_terminal_device_instead_of_the_dev_tty_alias() {
+    run_handoff_terminal_probe(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn handoff_skips_stdin_opened_through_dev_tty() {
+    run_handoff_terminal_probe(true);
+}
+
+#[cfg(unix)]
+fn run_handoff_terminal_probe(alias_stdin: bool) {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::process::CommandExt;
+    let (master, slave) = unsafe {
+        let mut master = -1;
+        let mut slave = -1;
+        assert_eq!(
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ),
+            0
+        );
+        let master = std::fs::File::from_raw_fd(master);
+        let slave = std::fs::File::from_raw_fd(slave);
+        assert_eq!(
+            libc::fcntl(master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC),
+            0
+        );
+        assert_eq!(
+            libc::fcntl(slave.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC),
+            0
+        );
+        (master, slave)
+    };
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.env_clear().args([
+        "--exact",
+        "--ignored",
+        "tui::actions::tests::handoff_terminal_probe",
+    ]);
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let fd = slave.as_raw_fd();
+            if libc::ioctl(fd, libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            for target in 0..3 {
+                if libc::dup2(fd, target) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            if alias_stdin {
+                let alias = libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR);
+                if alias < 0 || libc::dup2(alias, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    drop(command);
+    let drain = std::thread::spawn(move || {
+        let mut master = master;
+        let _ = master.read_to_end(&mut Vec::new());
+    });
+    let status = child.wait().unwrap();
+    drop(drain);
+    assert!(status.success());
+}

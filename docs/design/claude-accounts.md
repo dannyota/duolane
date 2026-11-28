@@ -82,11 +82,14 @@ profile removed and created again under the same name gets a new one. Reading it
 needs no credential. `accounts login`, `remove`, and `switch` take a hidden
 `--expect <identity>`, and `login` takes `--expect-absent`; each checks it under
 the profile's lock before changing anything and refuses on a mismatch or when
-the file system reports no birth time. `switch` checks the identity again when
-the launcher takes the lock before it shares history, so a profile recreated and
-selected meanwhile is refused. A refusal says the profile changed and asks to
-reload the list and choose again. Without these options the commands behave as
-before. The [monitor](monitor-accounts.md#account-actions) passes them.
+the file system reports no birth time. `--expect-absent` accepts a profile
+directory that never became ready, such as one a failed sign-in left behind,
+because the monitor does not list it, and signs in to it again. `switch` checks
+the identity again when the launcher takes the lock before it shares history, so
+a profile recreated and selected meanwhile is refused. A refusal says the
+profile changed and asks to reload the list and choose again. Without these
+options the commands behave as before. The
+[monitor](monitor-accounts.md#account-actions) passes them.
 
 ## Account details
 
