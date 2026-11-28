@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.1
+
+### Fixed
+
+- Signing in to a Claude profile from the monitor no longer crashes on macOS
+  before the browser step. The sign-in now gets the terminal device instead of
+  `/dev/tty`, which Claude Code cannot watch there. After a failed sign-in, the
+  same name can be used again instead of being refused as an existing profile.
+  Contributed by @nnatuan03.
+
 ## 0.13.0
 
 ### Added
