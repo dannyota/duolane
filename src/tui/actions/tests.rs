@@ -198,13 +198,24 @@ fn handoff_terminal_probe() {
     use std::os::unix::fs::MetadataExt;
     let given = open_terminal().unwrap().metadata().unwrap().rdev();
     let alias = std::fs::metadata("/dev/tty").unwrap().rdev();
-    let stdin = std::io::stdin().as_fd().try_clone_to_owned().unwrap();
-    assert!(given != alias && given == std::fs::File::from(stdin).metadata().unwrap().rdev());
+    let stdout = std::io::stdout().as_fd().try_clone_to_owned().unwrap();
+    assert!(given != alias && given == std::fs::File::from(stdout).metadata().unwrap().rdev());
 }
 
 #[cfg(unix)]
 #[test]
 fn handoff_gives_the_terminal_device_instead_of_the_dev_tty_alias() {
+    run_handoff_terminal_probe(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn handoff_skips_stdin_opened_through_dev_tty() {
+    run_handoff_terminal_probe(true);
+}
+
+#[cfg(unix)]
+fn run_handoff_terminal_probe(alias_stdin: bool) {
     use std::io::Read;
     use std::os::fd::FromRawFd;
     use std::os::unix::process::CommandExt;
@@ -212,7 +223,9 @@ fn handoff_gives_the_terminal_device_instead_of_the_dev_tty_alias() {
         let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
         assert!(master >= 0 && libc::grantpt(master) == 0 && libc::unlockpt(master) == 0);
         libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
-        let slave = std::ffi::CStr::from_ptr(libc::ptsname(master)).to_owned();
+        let slave = libc::ptsname(master);
+        assert!(!slave.is_null());
+        let slave = std::ffi::CStr::from_ptr(slave).to_owned();
         (std::fs::File::from_raw_fd(master), slave)
     };
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
@@ -232,6 +245,12 @@ fn handoff_gives_the_terminal_device_instead_of_the_dev_tty_alias() {
             }
             for target in 0..3 {
                 if libc::dup2(fd, target) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            if alias_stdin {
+                let alias = libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR);
+                if alias < 0 || libc::dup2(alias, 0) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
             }

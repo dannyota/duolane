@@ -369,6 +369,9 @@ fn terminal_device(alias: std::fs::File) -> std::fs::File {
     let Ok(session) = rustix::termios::tcgetsid(&alias) else {
         return alias;
     };
+    let Ok(alias_stat) = rustix::fs::fstat(&alias) else {
+        return alias;
+    };
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
@@ -376,6 +379,7 @@ fn terminal_device(alias: std::fs::File) -> std::fs::File {
         .into_iter()
         .find(|fd| {
             rustix::fs::fcntl_getfl(fd).is_ok_and(|flags| flags & OFlags::RWMODE != OFlags::WRONLY)
+                && rustix::fs::fstat(fd).is_ok_and(|stat| stat.st_rdev != alias_stat.st_rdev)
                 && rustix::termios::tcgetsid(fd).ok() == Some(session)
         })
         .and_then(|fd| fd.try_clone_to_owned().ok())
