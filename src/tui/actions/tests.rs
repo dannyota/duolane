@@ -190,6 +190,7 @@ fn unavailable_terminal_refuses_before_leaving_dashboard() {
     assert!(!result.ok && result.summary.contains("terminal unavailable"));
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore]
 fn handoff_terminal_probe() {
@@ -201,6 +202,7 @@ fn handoff_terminal_probe() {
     assert!(given != alias && given == std::fs::File::from(stdin).metadata().unwrap().rdev());
 }
 
+#[cfg(unix)]
 #[test]
 fn handoff_gives_the_terminal_device_instead_of_the_dev_tty_alias() {
     use std::io::Read;

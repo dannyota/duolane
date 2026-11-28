@@ -368,11 +368,25 @@ fn claude_accounts_resolution_precedence_and_lock() {
     run(&config, "none", false);
 }
 #[test]
-fn claude_accounts_expect_absent_reuses_only_a_profile_that_never_became_ready() {
-    let name = "expect-absent-leftover";
-    drop(profile_expected(name, true, None, true).unwrap().unwrap());
-    let profile = profile_expected(name, true, None, true).unwrap().unwrap();
+#[ignore]
+fn claude_accounts_expect_absent_probe() {
+    unsafe {
+        std::env::set_var("DUOLANE_CONFIG_DIR", std::env::var_os("TEST_CONFIG").unwrap());
+    }
+    drop(profile_expected("leftover", true, None, true).unwrap().unwrap());
+    let profile = profile_expected("leftover", true, None, true).unwrap().unwrap();
     store::private_replace(&profile.dir, ".duolane-ready", b"ready\n").unwrap();
     drop(profile);
-    assert!(profile_expected(name, true, None, true).is_err());
+    assert!(profile_expected("leftover", true, None, true).is_err());
+}
+#[test]
+fn claude_accounts_expect_absent_reuses_only_a_profile_that_never_became_ready() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .env("TEST_CONFIG", root.path().join("config"))
+        .args(["--exact", "--ignored", "claude_accounts::unix::tests::claude_accounts_expect_absent_probe"])
+        .status()
+        .unwrap()
+        .success());
 }
