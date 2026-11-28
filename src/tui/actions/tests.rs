@@ -217,16 +217,32 @@ fn handoff_skips_stdin_opened_through_dev_tty() {
 #[cfg(unix)]
 fn run_handoff_terminal_probe(alias_stdin: bool) {
     use std::io::Read;
-    use std::os::fd::FromRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::process::CommandExt;
     let (master, slave) = unsafe {
-        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
-        assert!(master >= 0 && libc::grantpt(master) == 0 && libc::unlockpt(master) == 0);
-        libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
-        let slave = libc::ptsname(master);
-        assert!(!slave.is_null());
-        let slave = std::ffi::CStr::from_ptr(slave).to_owned();
-        (std::fs::File::from_raw_fd(master), slave)
+        let mut master = -1;
+        let mut slave = -1;
+        assert_eq!(
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ),
+            0
+        );
+        let master = std::fs::File::from_raw_fd(master);
+        let slave = std::fs::File::from_raw_fd(slave);
+        assert_eq!(
+            libc::fcntl(master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC),
+            0
+        );
+        assert_eq!(
+            libc::fcntl(slave.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC),
+            0
+        );
+        (master, slave)
     };
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     command.env_clear().args([
@@ -239,8 +255,8 @@ fn run_handoff_terminal_probe(alias_stdin: bool) {
             if libc::setsid() < 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            let fd = libc::open(slave.as_ptr(), libc::O_RDWR);
-            if fd < 0 || libc::ioctl(fd, libc::TIOCSCTTY as _, 0) < 0 {
+            let fd = slave.as_raw_fd();
+            if libc::ioctl(fd, libc::TIOCSCTTY as _, 0) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             for target in 0..3 {
@@ -258,6 +274,7 @@ fn run_handoff_terminal_probe(alias_stdin: bool) {
         });
     }
     let mut child = command.spawn().unwrap();
+    drop(command);
     let drain = std::thread::spawn(move || {
         let mut master = master;
         let _ = master.read_to_end(&mut Vec::new());
